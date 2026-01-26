@@ -921,6 +921,31 @@ class VisualizationRenderer:
             background: transparent;
             color: inherit;
         }}
+
+        /* Toast notification */
+        .toast {{
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: #333;
+            color: white;
+            padding: 15px 25px;
+            border-radius: 8px;
+            opacity: 0;
+            transform: translateY(20px);
+            transition: all 0.3s ease;
+            z-index: 1000;
+            font-size: 0.9rem;
+        }}
+
+        .toast.show {{
+            opacity: 1;
+            transform: translateY(0);
+        }}
+
+        .toast.success {{
+            background: var(--success-color);
+        }}
     </style>
 </head>
 <body>
@@ -950,6 +975,8 @@ class VisualizationRenderer:
         </footer>
     </div>
 
+    <div id="toast" class="toast"></div>
+
     <script>
         mermaid.initialize({{
             startOnLoad: true,
@@ -962,6 +989,16 @@ class VisualizationRenderer:
             }}
         }});
 
+        // Toast notification function
+        function showToast(message, type = '') {{
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = 'toast ' + type + ' show';
+            setTimeout(() => {{
+                toast.className = 'toast';
+            }}, 2000);
+        }}
+
         // Copy to clipboard function
         function copyToClipboard(btn) {{
             const code = btn.previousElementSibling.textContent;
@@ -969,6 +1006,7 @@ class VisualizationRenderer:
                 const original = btn.textContent;
                 btn.textContent = '✓';
                 setTimeout(() => btn.textContent = original, 1500);
+                showToast('Copied!', 'success');
             }});
         }}
 
@@ -976,7 +1014,7 @@ class VisualizationRenderer:
         function copyScript(name) {{
             const code = document.getElementById('script-' + name).textContent;
             navigator.clipboard.writeText(code).then(() => {{
-                alert('Script copied to clipboard!');
+                showToast('Script copied to clipboard!', 'success');
             }});
         }}
 
