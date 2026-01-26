@@ -50,16 +50,48 @@ cd apk-analyzer
 ## Quick Start
 
 ```bash
-# Scan an APK
+# Interactive mode (recommended) - guided step-by-step wizard
+python main.py
+
+# Or use command-line arguments directly
 python main.py scan app.apk --out report
-
-# Generate visualization
 python main.py visualize app.apk --out report
-
-# Open the reports
-open report/report.html
-open report/visualization.html
 ```
+
+### Interactive Mode
+
+Simply run without arguments to launch the interactive wizard:
+
+```
+$ python main.py
+
+    _    ____  _  __     _                _
+   / \  |  _ \| |/ /    / \   _ __   __ _| |_   _ _______ _ __
+  / _ \ | |_) | ' /    / _ \ | '_ \ / _` | | | | |_  / _ \ '__|
+ / ___ \|  __/| . \   / ___ \| | | | (_| | | |_| |/ /  __/ |
+/_/   \_\_|   |_|\_\ /_/   \_\_| |_|\__,_|_|\__, /___\___|_|
+                                            |___/
+
+Android Security Vulnerability Scanner
+77+ patterns | Deep Analysis | Visualization
+
+[1/6] What would you like to do?
+
+Select operation:
+  > 1. Security Scan - Find vulnerabilities in APK
+    2. Visualize - Generate app structure diagrams
+    3. Full Analysis - Scan + Visualize
+    4. Pattern Management - List/validate patterns
+    5. Update Threat Intel - Fetch latest patterns
+```
+
+The wizard guides you through:
+1. **Operation selection** - Scan, visualize, or both
+2. **APK file** - With path validation
+3. **Output directory** - Where to save reports
+4. **Threat intelligence** - Auto/force/skip updates
+5. **Analysis options** - Keep sources, custom patterns
+6. **Confirmation** - Review settings before starting
 
 ## Usage
 
