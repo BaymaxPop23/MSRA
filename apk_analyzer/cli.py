@@ -62,9 +62,6 @@ class Colors:
 
 def print_banner():
     """Print the APK Analyzer banner."""
-    # Reset terminal first
-    os.system('stty sane 2>/dev/null')
-
     banner = """
     _    ____  _  __     _                _
    / \\  |  _ \\| |/ /    / \\   _ __   __ _| |_   _ _______ _ __
@@ -76,7 +73,7 @@ def print_banner():
 Android Security Vulnerability Scanner
 77+ patterns | Deep Analysis | Visualization
 """
-    print(banner)
+    print(banner, flush=True)
 
 
 def print_step(step: int, total: int, message: str):
@@ -101,16 +98,16 @@ def print_info(message: str):
 
 def prompt_input(prompt: str, default: str = None) -> str:
     """Prompt for input with optional default."""
-    # Reset terminal to ensure echo is on
-    os.system('stty echo 2>/dev/null')
-
     if default:
         display = f"{prompt} [{default}]: "
     else:
         display = f"{prompt}: "
 
     try:
-        value = input(display).strip()
+        # Print prompt and flush before reading
+        sys.stdout.write(display)
+        sys.stdout.flush()
+        value = sys.stdin.readline().strip()
         return value if value else default
     except (KeyboardInterrupt, EOFError):
         print("\n")
@@ -126,9 +123,9 @@ def prompt_choice(prompt: str, choices: List[Tuple[str, str]], default: int = 1)
 
     while True:
         try:
-            # Reset terminal echo
-            os.system('stty echo 2>/dev/null')
-            choice = input(f"\nEnter choice [{default}]: ").strip()
+            sys.stdout.write(f"\nEnter choice [{default}]: ")
+            sys.stdout.flush()
+            choice = sys.stdin.readline().strip()
             if not choice:
                 return choices[default - 1][0]
             idx = int(choice)
@@ -146,9 +143,9 @@ def prompt_yes_no(prompt: str, default: bool = True) -> bool:
     """Prompt for yes/no with default."""
     default_str = "Y/n" if default else "y/N"
     try:
-        # Reset terminal echo
-        os.system('stty echo 2>/dev/null')
-        response = input(f"{prompt} [{default_str}]: ").strip().lower()
+        sys.stdout.write(f"{prompt} [{default_str}]: ")
+        sys.stdout.flush()
+        response = sys.stdin.readline().strip().lower()
         if not response:
             return default
         return response in ('y', 'yes', 'true', '1')
