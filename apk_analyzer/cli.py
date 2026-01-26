@@ -64,43 +64,78 @@ except (ImportError, Exception):
     pass
 
 
+# Unicode icons for CLI
+class Icons:
+    """Unicode icons for terminal output."""
+    SHIELD = "🛡️ "
+    CHECK = "✓"
+    CROSS = "✗"
+    ARROW = "→"
+    BULLET = "●"
+    SEARCH = "🔍"
+    FOLDER = "📁"
+    FILE = "📄"
+    GEAR = "⚙️ "
+    ROCKET = "🚀"
+    WARNING = "⚠️ "
+    INFO = "ℹ️ "
+    LOCK = "🔒"
+    BUG = "🐛"
+    CHART = "📊"
+    PACKAGE = "📦"
+    PROGRESS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+
 def print_banner():
     """Print the APK Analyzer banner."""
-    print("")
-    print("=" * 60)
-    print("           APK ANALYZER")
-    print("   Android Security Vulnerability Scanner")
-    print("   77+ patterns | Deep Analysis | Visualization")
-    print("=" * 60)
-    print("")
+    banner = f"""
+╔══════════════════════════════════════════════════════════════╗
+║                                                              ║
+║   {Icons.SHIELD}APK ANALYZER                                       ║
+║                                                              ║
+║   Android Security Vulnerability Scanner                     ║
+║   ──────────────────────────────────────                     ║
+║   {Icons.BULLET} 77+ Security Patterns                              ║
+║   {Icons.BULLET} Deep Analysis Engine                               ║
+║   {Icons.BULLET} Visual Reports & Graphs                            ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝
+"""
+    print(banner)
 
 
 def print_step(step: int, total: int, message: str):
     """Print a step indicator."""
-    print(f"\n[{step}/{total}] {message}")
+    # Create progress bar
+    filled = "█" * step
+    empty = "░" * (total - step)
+    print(f"\n┌─ Step {step}/{total} {'─' * 40}")
+    print(f"│  {Icons.ARROW} {message}")
+    print(f"└─ [{filled}{empty}]")
 
 
 def print_success(message: str):
     """Print a success message."""
-    print(f"[OK] {message}")
+    print(f"   {Icons.CHECK} {message}")
 
 
 def print_error(message: str):
     """Print an error message."""
-    print(f"[ERROR] {message}")
+    print(f"   {Icons.CROSS} {message}")
 
 
 def print_info(message: str):
     """Print an info message."""
-    print(f"[INFO] {message}")
+    print(f"   {Icons.INFO} {message}")
 
 
-def prompt_input(prompt: str, default: str = None) -> str:
+def prompt_input(prompt: str, default: str = None, icon: str = None) -> str:
     """Prompt for input with optional default."""
+    icon_str = f"{icon} " if icon else ""
     if default:
-        display = f"{prompt} [{default}]: "
+        display = f"   {icon_str}{prompt} [{default}]: "
     else:
-        display = f"{prompt}: "
+        display = f"   {icon_str}{prompt}: "
 
     try:
         value = input(display).strip()
@@ -112,10 +147,31 @@ def prompt_input(prompt: str, default: str = None) -> str:
 
 def prompt_choice(prompt: str, choices: List[Tuple[str, str]], default: int = 1) -> str:
     """Prompt for a choice from a list."""
+    # Icons for different menu options
+    menu_icons = {
+        "scan": Icons.SEARCH,
+        "visualize": Icons.CHART,
+        "both": Icons.ROCKET,
+        "patterns": Icons.GEAR,
+        "update": Icons.PACKAGE,
+        "list": Icons.FILE,
+        "stats": Icons.CHART,
+        "validate": Icons.CHECK,
+        "search": Icons.SEARCH,
+        "force": Icons.ROCKET,
+        "auto": Icons.GEAR,
+        "skip": Icons.ARROW,
+        "cancel": Icons.CROSS,
+    }
+
     print(f"\n{prompt}")
+    print("─" * 50)
     for i, (key, description) in enumerate(choices, 1):
-        marker = ">" if i == default else " "
-        print(f"  {marker} {i}. {description}")
+        icon = menu_icons.get(key, Icons.BULLET)
+        if i == default:
+            print(f"  ▸ {i}. {icon} {description}")
+        else:
+            print(f"    {i}. {icon} {description}")
 
     while True:
         try:
@@ -137,7 +193,7 @@ def prompt_yes_no(prompt: str, default: bool = True) -> bool:
     """Prompt for yes/no with default."""
     default_str = "Y/n" if default else "y/N"
     try:
-        response = input(f"{prompt} [{default_str}]: ").strip().lower()
+        response = input(f"   {prompt} [{default_str}]: ").strip().lower()
         if not response:
             return default
         return response in ('y', 'yes', 'true', '1')
@@ -148,8 +204,9 @@ def prompt_yes_no(prompt: str, default: bool = True) -> bool:
 
 def prompt_file(prompt: str, must_exist: bool = True, extension: str = None) -> str:
     """Prompt for a file path with validation."""
+    print(f"   {Icons.FOLDER} Tab completion enabled for paths")
     while True:
-        path = prompt_input(prompt)
+        path = prompt_input(prompt, icon=Icons.FILE)
         if not path:
             print_error("Please enter a path")
             continue
@@ -224,23 +281,33 @@ def interactive_mode() -> int:
 
     # Step 6: Confirmation
     print_step(6, total_steps, "Review & Confirm")
+
+    # Operation icons
+    op_icons = {"scan": Icons.SEARCH, "visualize": Icons.CHART, "both": Icons.ROCKET}
+    op_icon = op_icons.get(operation, Icons.BULLET)
+
     print(f"""
-Analysis Configuration:
-  APK File:        {os.path.basename(apk_path)}
-  Output:          {out_dir}
-  Operation:       {operation.title()}
-  Threat Intel:    {update_mode.title()}
-  Keep Sources:    {'Yes' if keep_decompiled else 'No'}
-  Custom Patterns: {patterns_dir if patterns_dir else 'None'}
+   ┌────────────────────────────────────────────────────┐
+   │  {Icons.GEAR} Analysis Configuration                      │
+   ├────────────────────────────────────────────────────┤
+   │  {Icons.PACKAGE} APK File:      {os.path.basename(apk_path):<28} │
+   │  {Icons.FOLDER} Output:        {out_dir:<28} │
+   │  {op_icon} Operation:     {operation.title():<28} │
+   │  {Icons.PACKAGE} Threat Intel:  {update_mode.title():<28} │
+   │  {Icons.FILE} Keep Sources:  {'Yes' if keep_decompiled else 'No':<28} │
+   │  {Icons.FOLDER} Custom Patterns: {(patterns_dir if patterns_dir else 'None'):<24} │
+   └────────────────────────────────────────────────────┘
 """)
 
-    if not prompt_yes_no("Proceed with analysis?", default=True):
+    if not prompt_yes_no(f"{Icons.ROCKET} Proceed with analysis?", default=True):
         print_info("Analysis cancelled")
         return 0
 
-    print(f"\n{'='*60}")
-    print("Starting Analysis...")
-    print(f"{'='*60}\n")
+    print(f"""
+╔══════════════════════════════════════════════════════════╗
+║  {Icons.ROCKET} Starting Analysis...                             ║
+╚══════════════════════════════════════════════════════════╝
+""")
 
     # Build args object
     class Args:
@@ -274,24 +341,28 @@ Analysis Configuration:
             return result
 
     # Final summary
-    print(f"\n{'='*60}")
-    print("Analysis Complete!")
-    print(f"{'='*60}")
-    print(f"\nOutput Files:")
+    print(f"""
+╔══════════════════════════════════════════════════════════╗
+║  {Icons.CHECK} Analysis Complete!                                ║
+╚══════════════════════════════════════════════════════════╝
+""")
+    print(f"   {Icons.FOLDER} Output Files:")
+    print("   " + "─" * 50)
 
     if operation in ("scan", "both"):
-        print(f"  Report:        {os.path.join(out_dir, 'report.html')}")
+        print(f"   {Icons.FILE} Report:        {os.path.join(out_dir, 'report.html')}")
     if operation in ("visualize", "both"):
-        print(f"  Visualization: {os.path.join(out_dir, 'visualization.html')}")
+        print(f"   {Icons.CHART} Visualization: {os.path.join(out_dir, 'visualization.html')}")
 
     # Offer to open reports
     print()
-    if prompt_yes_no("Open reports in browser?", default=True):
+    if prompt_yes_no(f"{Icons.ROCKET} Open reports in browser?", default=True):
         if operation in ("scan", "both"):
             _open_file(os.path.join(out_dir, "report.html"))
         if operation in ("visualize", "both"):
             _open_file(os.path.join(out_dir, "visualization.html"))
 
+    print(f"\n   {Icons.INFO} Thank you for using APK Analyzer!\n")
     return 0
 
 
