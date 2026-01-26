@@ -23,17 +23,43 @@ from .visualizer import AppStructureAnalyzer, VisualizationRenderer, Visualizati
 # Interactive Mode Helpers
 # ============================================================================
 
-# Disable readline/libedit tab completion which causes display issues on some terminals
+# Configure readline for file path completion
+_readline_available = False
 try:
     import readline
-    # Try GNU readline syntax
-    readline.parse_and_bind('set disable-completion on')
-    # Try libedit syntax (macOS)
-    readline.parse_and_bind('bind -e')
-    readline.parse_and_bind('bind "^I" ed-unassigned')
-    # Disable completer
-    readline.set_completer(None)
-    readline.set_completer_delims('')
+    import glob
+    _readline_available = True
+
+    def _path_completer(text, state):
+        """Complete file paths."""
+        # Expand ~ to home directory
+        if text.startswith('~'):
+            text = os.path.expanduser(text)
+
+        # Add wildcard for glob matching
+        pattern = text + '*'
+        matches = glob.glob(pattern)
+
+        # Add trailing slash to directories
+        matches = [m + '/' if os.path.isdir(m) else m for m in matches]
+
+        # Return match at index 'state'
+        if state < len(matches):
+            return matches[state]
+        return None
+
+    # Configure readline
+    readline.set_completer(_path_completer)
+    readline.set_completer_delims(' \t\n;')
+
+    # Check if libedit (macOS) or GNU readline
+    if 'libedit' in readline.__doc__:
+        # macOS libedit
+        readline.parse_and_bind('bind ^I rl_complete')
+    else:
+        # GNU readline
+        readline.parse_and_bind('tab: complete')
+
 except (ImportError, Exception):
     pass
 
