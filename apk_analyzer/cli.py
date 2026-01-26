@@ -23,6 +23,15 @@ from .visualizer import AppStructureAnalyzer, VisualizationRenderer, Visualizati
 # Interactive Mode Helpers
 # ============================================================================
 
+# Disable readline tab completion which causes display issues on some terminals
+try:
+    import readline
+    readline.parse_and_bind('set disable-completion on')
+    # Also try to set a simple prompt that won't interfere
+    readline.set_completer(None)
+except (ImportError, Exception):
+    pass
+
 
 def print_banner():
     """Print the APK Analyzer banner."""
