@@ -62,51 +62,55 @@ class Colors:
 
 def print_banner():
     """Print the APK Analyzer banner."""
-    banner = f"""
-{Colors.CYAN}{Colors.BOLD}
+    # Reset terminal first
+    os.system('stty sane 2>/dev/null')
+
+    banner = """
     _    ____  _  __     _                _
    / \\  |  _ \\| |/ /    / \\   _ __   __ _| |_   _ _______ _ __
   / _ \\ | |_) | ' /    / _ \\ | '_ \\ / _` | | | | |_  / _ \\ '__|
  / ___ \\|  __/| . \\   / ___ \\| | | | (_| | | |_| |/ /  __/ |
 /_/   \\_\\_|   |_|\\_\\ /_/   \\_\\_| |_|\\__,_|_|\\__, /___\\___|_|
                                             |___/
-{Colors.END}
-{Colors.YELLOW}Android Security Vulnerability Scanner{Colors.END}
-{Colors.BLUE}77+ patterns | Deep Analysis | Visualization{Colors.END}
+
+Android Security Vulnerability Scanner
+77+ patterns | Deep Analysis | Visualization
 """
     print(banner)
 
 
 def print_step(step: int, total: int, message: str):
     """Print a step indicator."""
-    print(f"\n{Colors.CYAN}[{step}/{total}]{Colors.END} {Colors.BOLD}{message}{Colors.END}")
+    print(f"\n[{step}/{total}] {message}")
 
 
 def print_success(message: str):
     """Print a success message."""
-    print(f"{Colors.GREEN}✓{Colors.END} {message}")
+    print(f"[OK] {message}")
 
 
 def print_error(message: str):
     """Print an error message."""
-    print(f"{Colors.RED}✗{Colors.END} {message}")
+    print(f"[ERROR] {message}")
 
 
 def print_info(message: str):
     """Print an info message."""
-    print(f"{Colors.BLUE}ℹ{Colors.END} {message}")
+    print(f"[INFO] {message}")
 
 
 def prompt_input(prompt: str, default: str = None) -> str:
     """Prompt for input with optional default."""
-    # Print colored part first, then reset before input
+    # Reset terminal to ensure echo is on
+    os.system('stty echo 2>/dev/null')
+
     if default:
-        print(f"{prompt} {Colors.YELLOW}[{default}]{Colors.END}: ", end="", flush=True)
+        display = f"{prompt} [{default}]: "
     else:
-        print(f"{prompt}: ", end="", flush=True)
+        display = f"{prompt}: "
 
     try:
-        value = input().strip()
+        value = input(display).strip()
         return value if value else default
     except (KeyboardInterrupt, EOFError):
         print("\n")
@@ -117,21 +121,22 @@ def prompt_choice(prompt: str, choices: List[Tuple[str, str]], default: int = 1)
     """Prompt for a choice from a list."""
     print(f"\n{prompt}")
     for i, (key, description) in enumerate(choices, 1):
-        marker = f"{Colors.GREEN}>{Colors.END}" if i == default else " "
-        print(f"  {marker} {Colors.BOLD}{i}{Colors.END}. {description}")
+        marker = ">" if i == default else " "
+        print(f"  {marker} {i}. {description}")
 
     while True:
         try:
-            print(f"\nEnter choice {Colors.YELLOW}[{default}]{Colors.END}: ", end="", flush=True)
-            choice = input().strip()
+            # Reset terminal echo
+            os.system('stty echo 2>/dev/null')
+            choice = input(f"\nEnter choice [{default}]: ").strip()
             if not choice:
                 return choices[default - 1][0]
             idx = int(choice)
             if 1 <= idx <= len(choices):
                 return choices[idx - 1][0]
-            print_error(f"Please enter a number between 1 and {len(choices)}")
+            print(f"Please enter a number between 1 and {len(choices)}")
         except ValueError:
-            print_error("Please enter a valid number")
+            print("Please enter a valid number")
         except (KeyboardInterrupt, EOFError):
             print("\n")
             sys.exit(0)
@@ -141,8 +146,9 @@ def prompt_yes_no(prompt: str, default: bool = True) -> bool:
     """Prompt for yes/no with default."""
     default_str = "Y/n" if default else "y/N"
     try:
-        print(f"{prompt} {Colors.YELLOW}[{default_str}]{Colors.END}: ", end="", flush=True)
-        response = input().strip().lower()
+        # Reset terminal echo
+        os.system('stty echo 2>/dev/null')
+        response = input(f"{prompt} [{default_str}]: ").strip().lower()
         if not response:
             return default
         return response in ('y', 'yes', 'true', '1')
@@ -230,7 +236,7 @@ def interactive_mode() -> int:
     # Step 6: Confirmation
     print_step(6, total_steps, "Review & Confirm")
     print(f"""
-{Colors.BOLD}Analysis Configuration:{Colors.END}
+Analysis Configuration:
   APK File:        {os.path.basename(apk_path)}
   Output:          {out_dir}
   Operation:       {operation.title()}
@@ -243,8 +249,8 @@ def interactive_mode() -> int:
         print_info("Analysis cancelled")
         return 0
 
-    print(f"\n{Colors.BOLD}{'='*60}{Colors.END}")
-    print(f"{Colors.CYAN}Starting Analysis...{Colors.END}")
+    print(f"\n{'='*60}")
+    print("Starting Analysis...")
     print(f"{'='*60}\n")
 
     # Build args object
@@ -279,15 +285,15 @@ def interactive_mode() -> int:
             return result
 
     # Final summary
-    print(f"\n{Colors.BOLD}{'='*60}{Colors.END}")
-    print(f"{Colors.GREEN}Analysis Complete!{Colors.END}")
+    print(f"\n{'='*60}")
+    print("Analysis Complete!")
     print(f"{'='*60}")
-    print(f"\n{Colors.BOLD}Output Files:{Colors.END}")
+    print(f"\nOutput Files:")
 
     if operation in ("scan", "both"):
-        print(f"  {Colors.CYAN}Report:{Colors.END}        {os.path.join(out_dir, 'report.html')}")
+        print(f"  Report:        {os.path.join(out_dir, 'report.html')}")
     if operation in ("visualize", "both"):
-        print(f"  {Colors.CYAN}Visualization:{Colors.END} {os.path.join(out_dir, 'visualization.html')}")
+        print(f"  Visualization: {os.path.join(out_dir, 'visualization.html')}")
 
     # Offer to open reports
     print()
@@ -315,27 +321,26 @@ def cmd_patterns_interactive() -> int:
     manager.load_all()
 
     if action == "list":
-        print(f"\n{Colors.BOLD}Loaded Patterns:{Colors.END}\n")
+        print(f"\nLoaded Patterns:\n")
         print(f"{'ID':<35} {'Title':<40} {'Severity':<10}")
         print("-" * 90)
         for p in manager.get_patterns(enabled_only=True):
             title = p.title[:38] + ".." if len(p.title) > 40 else p.title
-            sev_color = Colors.RED if p.severity.value == "Critical" else Colors.YELLOW if p.severity.value == "High" else Colors.END
-            print(f"{p.id:<35} {title:<40} {sev_color}{p.severity.value:<10}{Colors.END}")
+            print(f"{p.id:<35} {title:<40} {p.severity.value:<10}")
 
         stats = manager.stats
-        print(f"\n{Colors.BOLD}Total:{Colors.END} {stats['total']} | {Colors.BOLD}Enabled:{Colors.END} {stats['enabled']}")
+        print(f"\nTotal: {stats['total']} | Enabled: {stats['enabled']}")
 
     elif action == "stats":
         stats = manager.stats
-        print(f"\n{Colors.BOLD}Pattern Statistics{Colors.END}")
+        print(f"\nPattern Statistics")
         print("=" * 40)
         print(f"Total patterns: {stats['total']}")
         print(f"Enabled: {stats['enabled']}")
-        print(f"\n{Colors.BOLD}By Severity:{Colors.END}")
+        print(f"\nBy Severity:")
         for sev, count in sorted(stats['by_severity'].items()):
             print(f"  {sev}: {count}")
-        print(f"\n{Colors.BOLD}By Category:{Colors.END}")
+        print(f"\nBy Category:")
         for cat, count in sorted(stats['by_category'].items()):
             print(f"  {cat}: {count}")
 
@@ -354,9 +359,9 @@ def cmd_patterns_interactive() -> int:
         query = prompt_input("Search query")
         results = manager.search_patterns(query)
         if results:
-            print(f"\n{Colors.BOLD}Found {len(results)} patterns:{Colors.END}\n")
+            print(f"\nFound {len(results)} patterns:\n")
             for p in results:
-                print(f"  {Colors.CYAN}{p.id}{Colors.END}: {p.title}")
+                print(f"  {p.id}: {p.title}")
         else:
             print_info("No patterns found matching query")
 
@@ -372,7 +377,7 @@ def cmd_update_interactive() -> int:
 
     # Show current status
     stats = updater.get_stats()
-    print(f"\n{Colors.BOLD}Current Status:{Colors.END}")
+    print(f"\nCurrent Status:")
     print(f"  Last update: {stats['last_update'] or 'Never'}")
     print(f"  Patterns pending review: {stats['pending_patterns']}")
 
@@ -385,7 +390,7 @@ def cmd_update_interactive() -> int:
     if action == "cancel":
         return 0
 
-    print(f"\n{Colors.CYAN}Updating threat intelligence...{Colors.END}\n")
+    print(f"\nUpdating threat intelligence...\n")
     result = updater.update(force=(action == "force"))
 
     if result.success:
