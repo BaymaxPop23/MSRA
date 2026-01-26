@@ -23,12 +23,17 @@ from .visualizer import AppStructureAnalyzer, VisualizationRenderer, Visualizati
 # Interactive Mode Helpers
 # ============================================================================
 
-# Disable readline tab completion which causes display issues on some terminals
+# Disable readline/libedit tab completion which causes display issues on some terminals
 try:
     import readline
+    # Try GNU readline syntax
     readline.parse_and_bind('set disable-completion on')
-    # Also try to set a simple prompt that won't interfere
+    # Try libedit syntax (macOS)
+    readline.parse_and_bind('bind -e')
+    readline.parse_and_bind('bind "^I" ed-unassigned')
+    # Disable completer
     readline.set_completer(None)
+    readline.set_completer_delims('')
 except (ImportError, Exception):
     pass
 
