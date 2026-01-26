@@ -497,6 +497,34 @@ def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+def _extract_apkm_bundle(apkm_path: str, out_dir: str) -> Optional[str]:
+    """
+    Check if file is an APKM bundle (split APKs from APKMirror) and extract base.apk.
+    Returns path to extracted base.apk, or None if not an APKM bundle.
+    """
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(apkm_path, 'r') as zf:
+            names = zf.namelist()
+            # APKM bundles contain base.apk and split_config.*.apk files
+            if 'base.apk' in names and any('split_config.' in n for n in names):
+                print(f"[+] {Icons.PACKAGE} Detected APKM bundle (split APKs)")
+                print(f"[+] {Icons.ARROW} Extracting base.apk...")
+
+                # Extract base.apk
+                extracted_path = os.path.join(out_dir, 'base.apk')
+                with zf.open('base.apk') as src, open(extracted_path, 'wb') as dst:
+                    dst.write(src.read())
+
+                print(f"[+] {Icons.CHECK} Extracted: {extracted_path}")
+                return extracted_path
+    except (zipfile.BadZipFile, Exception):
+        pass
+
+    return None
+
+
 def _decompile(apk_path: str, out_dir: str, jadx_path: str) -> None:
     """Decompile APK using jadx."""
     cmd = [jadx_path, "-d", out_dir, apk_path]
@@ -528,6 +556,11 @@ def cmd_scan(args) -> int:
 
     out_dir = os.path.abspath(args.out)
     _ensure_dir(out_dir)
+
+    # Check if this is an APKM bundle and extract base.apk if so
+    extracted_apk = _extract_apkm_bundle(apk_path, out_dir)
+    if extracted_apk:
+        apk_path = extracted_apk
 
     decompiled_dir = os.path.join(out_dir, "decompiled")
     _ensure_dir(decompiled_dir)
@@ -1052,6 +1085,11 @@ def cmd_visualize(args) -> int:
 
     out_dir = os.path.abspath(args.out)
     _ensure_dir(out_dir)
+
+    # Check if this is an APKM bundle and extract base.apk if so
+    extracted_apk = _extract_apkm_bundle(apk_path, out_dir)
+    if extracted_apk:
+        apk_path = extracted_apk
 
     decompiled_dir = os.path.join(out_dir, "decompiled")
     _ensure_dir(decompiled_dir)
