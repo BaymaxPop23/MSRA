@@ -87,6 +87,51 @@ class DataFlowInfo:
     sink: str    # Where data goes
     data_type: str  # Type of data (user_input, file, network, etc.)
     path: List[str] = field(default_factory=list)  # Methods in the flow
+    source_method: str = ""  # Method where data originates
+    sink_method: str = ""  # Method where data is consumed
+    parameters: List[str] = field(default_factory=list)  # Parameters involved
+    taint_chain: List[str] = field(default_factory=list)  # Variable names through the flow
+    is_user_controllable: bool = False  # True if source is user input
+    risk_level: str = "medium"  # low, medium, high, critical
+
+
+@dataclass
+class AttackSurface:
+    """Attack surface information for a component."""
+    component_name: str
+    component_type: str  # activity, service, receiver, provider
+    exported: bool = False
+    permission: Optional[str] = None
+    # Testing commands
+    adb_commands: List[str] = field(default_factory=list)
+    # Deep links
+    deep_links: List[str] = field(default_factory=list)
+    # Intent filters
+    actions: List[str] = field(default_factory=list)
+    categories: List[str] = field(default_factory=list)
+    data_schemes: List[str] = field(default_factory=list)
+    data_hosts: List[str] = field(default_factory=list)
+    data_paths: List[str] = field(default_factory=list)
+    # For providers
+    uri_patterns: List[str] = field(default_factory=list)
+    # Frida hooks
+    frida_hooks: List[str] = field(default_factory=list)
+    # Associated vulnerabilities
+    vulnerabilities: List[str] = field(default_factory=list)
+
+
+@dataclass
+class InjectionPoint:
+    """Potential injection point in the application."""
+    class_name: str
+    method_name: str
+    parameter_name: str
+    parameter_type: str
+    injection_type: str  # sql, path, command, xss, intent
+    sink_method: str  # The dangerous method called
+    line_number: int = 0
+    code_snippet: str = ""
+    exploit_example: str = ""
 
 
 @dataclass
@@ -99,6 +144,10 @@ class AppStructure:
     permissions: List[str] = field(default_factory=list)
     data_flows: List[DataFlowInfo] = field(default_factory=list)
     entry_points: List[str] = field(default_factory=list)
+    # New: Enhanced attack surface analysis
+    attack_surfaces: List[AttackSurface] = field(default_factory=list)
+    injection_points: List[InjectionPoint] = field(default_factory=list)
+    frida_scripts: Dict[str, str] = field(default_factory=dict)  # name -> script content
 
 
 class AppStructureAnalyzer:
@@ -168,6 +217,34 @@ class AppStructureAnalyzer:
         self.resources_dir = self.decompiled_dir / "resources"
         self.manifest_path = self.resources_dir / "AndroidManifest.xml"
 
+    # Injection patterns for vulnerability detection
+    INJECTION_PATTERNS = {
+        'sql': [
+            (r'rawQuery\s*\([^,]+\+', 'SQL Injection via string concatenation'),
+            (r'execSQL\s*\([^,]+\+', 'SQL Injection via execSQL'),
+            (r'query\s*\([^)]*\+[^)]*\)', 'SQL Injection in query'),
+        ],
+        'path': [
+            (r'new\s+File\s*\([^)]*\+', 'Path Traversal via File constructor'),
+            (r'openFileInput\s*\([^)]*\+', 'Path Traversal in openFileInput'),
+            (r'getExternalFilesDir[^)]*\+', 'Path Traversal in external storage'),
+        ],
+        'command': [
+            (r'Runtime\.getRuntime\(\)\.exec\s*\([^)]*\+', 'Command Injection'),
+            (r'ProcessBuilder\s*\([^)]*\+', 'Command Injection via ProcessBuilder'),
+        ],
+        'xss': [
+            (r'loadUrl\s*\([^)]*\+', 'XSS via loadUrl'),
+            (r'evaluateJavascript\s*\([^)]*\+', 'XSS via evaluateJavascript'),
+            (r'loadDataWithBaseURL\s*\([^)]*\+', 'XSS via loadDataWithBaseURL'),
+        ],
+        'intent': [
+            (r'setClassName\s*\([^)]*getStringExtra', 'Intent Redirect'),
+            (r'setComponent\s*\([^)]*getIntent', 'Intent Redirect via Component'),
+            (r'startActivity\s*\(.*getParcelableExtra', 'Intent Redirect via Parcelable'),
+        ],
+    }
+
     def analyze(self) -> AppStructure:
         """Perform complete analysis of the application."""
         structure = AppStructure(package_name="")
@@ -184,6 +261,11 @@ class AppStructureAnalyzer:
         self._analyze_intents(structure)
         self._analyze_data_flows(structure)
         self._identify_entry_points(structure)
+
+        # New: Enhanced attack surface analysis
+        self._generate_attack_surfaces(structure)
+        self._detect_injection_points(structure)
+        self._generate_frida_scripts(structure)
 
         return structure
 
@@ -554,3 +636,358 @@ class AppStructureAnalyzer:
                         host = data.get('host', '*')
                         path = data.get('path', data.get('pathPrefix', '/*'))
                         structure.entry_points.append(f"deeplink:{scheme}://{host}{path} -> {name}")
+
+    def _generate_attack_surfaces(self, structure: AppStructure) -> None:
+        """Generate attack surface information with ADB commands for testing."""
+        pkg = structure.package_name
+
+        for name, comp in structure.components.items():
+            attack_surface = AttackSurface(
+                component_name=name,
+                component_type=comp.type,
+                exported=comp.exported,
+                permission=comp.permission,
+            )
+
+            # Collect intent filter info
+            for intent_filter in comp.intent_filters:
+                attack_surface.actions.extend(intent_filter.get('actions', []))
+                attack_surface.categories.extend(intent_filter.get('categories', []))
+                for data in intent_filter.get('data', []):
+                    if 'scheme' in data:
+                        attack_surface.data_schemes.append(data['scheme'])
+                    if 'host' in data:
+                        attack_surface.data_hosts.append(data['host'])
+                    if 'path' in data:
+                        attack_surface.data_paths.append(data['path'])
+                    elif 'pathPrefix' in data:
+                        attack_surface.data_paths.append(data['pathPrefix'] + '*')
+
+            # Generate ADB commands based on component type
+            if comp.exported or not comp.permission:
+                if comp.type == 'activity':
+                    # Basic activity start
+                    attack_surface.adb_commands.append(
+                        f"adb shell am start -n {pkg}/{name}"
+                    )
+                    # With action
+                    for action in attack_surface.actions:
+                        attack_surface.adb_commands.append(
+                            f"adb shell am start -a {action} -n {pkg}/{name}"
+                        )
+                    # With data URI
+                    for scheme in attack_surface.data_schemes:
+                        host = attack_surface.data_hosts[0] if attack_surface.data_hosts else 'example.com'
+                        path = attack_surface.data_paths[0] if attack_surface.data_paths else '/test'
+                        deep_link = f"{scheme}://{host}{path}"
+                        attack_surface.deep_links.append(deep_link)
+                        attack_surface.adb_commands.append(
+                            f"adb shell am start -a android.intent.action.VIEW -d \"{deep_link}\""
+                        )
+                    # Intent injection test
+                    attack_surface.adb_commands.append(
+                        f"adb shell am start -n {pkg}/{name} --es \"injection_test\" \"<script>alert(1)</script>\""
+                    )
+
+                elif comp.type == 'service':
+                    attack_surface.adb_commands.append(
+                        f"adb shell am startservice -n {pkg}/{name}"
+                    )
+                    for action in attack_surface.actions:
+                        attack_surface.adb_commands.append(
+                            f"adb shell am startservice -a {action}"
+                        )
+
+                elif comp.type == 'receiver':
+                    for action in attack_surface.actions:
+                        attack_surface.adb_commands.append(
+                            f"adb shell am broadcast -a {action}"
+                        )
+                        # With extra data
+                        attack_surface.adb_commands.append(
+                            f"adb shell am broadcast -a {action} --es \"data\" \"malicious_payload\""
+                        )
+                    if not attack_surface.actions:
+                        attack_surface.adb_commands.append(
+                            f"adb shell am broadcast -n {pkg}/{name}"
+                        )
+
+                elif comp.type == 'provider':
+                    if comp.authorities:
+                        for authority in comp.authorities.split(';'):
+                            uri = f"content://{authority}/"
+                            attack_surface.uri_patterns.append(uri)
+                            attack_surface.adb_commands.append(
+                                f"adb shell content query --uri {uri}"
+                            )
+                            # SQL injection test
+                            attack_surface.adb_commands.append(
+                                f"adb shell content query --uri \"{uri}\" --where \"1=1--\""
+                            )
+                            # Path traversal test
+                            attack_surface.adb_commands.append(
+                                f"adb shell content read --uri {uri}../../../etc/passwd"
+                            )
+
+            # Generate Frida hooks for this component
+            attack_surface.frida_hooks = self._get_component_frida_hooks(name, comp, pkg)
+
+            structure.attack_surfaces.append(attack_surface)
+
+    def _get_component_frida_hooks(self, name: str, comp: ComponentInfo, pkg: str) -> List[str]:
+        """Generate Frida hook code for a component."""
+        hooks = []
+        simple_name = name.split('.')[-1]
+
+        if comp.type == 'activity':
+            hooks.append(f'''// Hook {simple_name} onCreate
+Java.perform(function() {{
+    var Activity = Java.use("{name}");
+    Activity.onCreate.overload("android.os.Bundle").implementation = function(bundle) {{
+        console.log("[*] {simple_name}.onCreate called");
+        console.log("[*] Intent: " + this.getIntent());
+        console.log("[*] Extras: " + this.getIntent().getExtras());
+        return this.onCreate(bundle);
+    }};
+}});''')
+
+        elif comp.type == 'service':
+            hooks.append(f'''// Hook {simple_name} onStartCommand
+Java.perform(function() {{
+    var Service = Java.use("{name}");
+    Service.onStartCommand.implementation = function(intent, flags, startId) {{
+        console.log("[*] {simple_name}.onStartCommand called");
+        console.log("[*] Intent: " + intent);
+        return this.onStartCommand(intent, flags, startId);
+    }};
+}});''')
+
+        elif comp.type == 'receiver':
+            hooks.append(f'''// Hook {simple_name} onReceive
+Java.perform(function() {{
+    var Receiver = Java.use("{name}");
+    Receiver.onReceive.implementation = function(context, intent) {{
+        console.log("[*] {simple_name}.onReceive called");
+        console.log("[*] Action: " + intent.getAction());
+        console.log("[*] Data: " + intent.getDataString());
+        return this.onReceive(context, intent);
+    }};
+}});''')
+
+        elif comp.type == 'provider':
+            hooks.append(f'''// Hook {simple_name} query
+Java.perform(function() {{
+    var Provider = Java.use("{name}");
+    Provider.query.overload("android.net.Uri", "[Ljava.lang.String;", "java.lang.String", "[Ljava.lang.String;", "java.lang.String").implementation = function(uri, projection, selection, selectionArgs, sortOrder) {{
+        console.log("[*] {simple_name}.query called");
+        console.log("[*] URI: " + uri);
+        console.log("[*] Selection: " + selection);
+        return this.query(uri, projection, selection, selectionArgs, sortOrder);
+    }};
+}});''')
+
+        return hooks
+
+    def _detect_injection_points(self, structure: AppStructure) -> None:
+        """Detect potential injection vulnerabilities."""
+        for class_info in structure.classes.values():
+            try:
+                with open(class_info.file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                    lines = content.split('\n')
+
+                for injection_type, patterns in self.INJECTION_PATTERNS.items():
+                    for pattern, description in patterns:
+                        for match in re.finditer(pattern, content):
+                            # Find line number
+                            pos = match.start()
+                            line_num = content[:pos].count('\n') + 1
+
+                            # Get code snippet (surrounding lines)
+                            start_line = max(0, line_num - 2)
+                            end_line = min(len(lines), line_num + 2)
+                            snippet = '\n'.join(lines[start_line:end_line])
+
+                            # Generate exploit example
+                            exploit = self._generate_exploit_example(injection_type, match.group())
+
+                            injection_point = InjectionPoint(
+                                class_name=class_info.full_name,
+                                method_name="",  # Would need deeper parsing
+                                parameter_name="",
+                                parameter_type="String",
+                                injection_type=injection_type,
+                                sink_method=match.group()[:50],
+                                line_number=line_num,
+                                code_snippet=snippet,
+                                exploit_example=exploit,
+                            )
+                            structure.injection_points.append(injection_point)
+
+            except Exception:
+                pass
+
+    def _generate_exploit_example(self, injection_type: str, matched_code: str) -> str:
+        """Generate example exploit payload for injection type."""
+        exploits = {
+            'sql': "' OR '1'='1' --",
+            'path': "../../../etc/passwd",
+            'command': "; cat /etc/passwd",
+            'xss': "<script>alert(document.cookie)</script>",
+            'intent': "Use setClassName() to redirect to attacker's exported activity",
+        }
+        return exploits.get(injection_type, "Manual testing required")
+
+    def _generate_frida_scripts(self, structure: AppStructure) -> None:
+        """Generate comprehensive Frida scripts for testing."""
+        pkg = structure.package_name
+
+        # SSL Pinning Bypass
+        structure.frida_scripts['ssl_bypass'] = '''// SSL Pinning Bypass
+Java.perform(function() {
+    // Trust all certificates
+    var TrustManager = Java.registerClass({
+        name: 'com.frida.TrustManager',
+        implements: [Java.use('javax.net.ssl.X509TrustManager')],
+        methods: {
+            checkClientTrusted: function(chain, authType) {},
+            checkServerTrusted: function(chain, authType) {},
+            getAcceptedIssuers: function() { return []; }
+        }
+    });
+
+    var SSLContext = Java.use('javax.net.ssl.SSLContext');
+    var TrustManagers = Java.array('javax.net.ssl.TrustManager', [TrustManager.$new()]);
+    var sslContext = SSLContext.getInstance('TLS');
+    sslContext.init(null, TrustManagers, null);
+
+    // OkHttp bypass
+    try {
+        var OkHttpClient = Java.use("okhttp3.OkHttpClient$Builder");
+        OkHttpClient.certificatePinner.implementation = function(pinner) {
+            console.log("[*] OkHttp certificate pinning bypassed");
+            return this;
+        };
+    } catch(e) {}
+
+    console.log("[*] SSL Pinning bypassed");
+});'''
+
+        # Crypto Key Logger
+        structure.frida_scripts['crypto_logger'] = '''// Crypto Key Logger
+Java.perform(function() {
+    // Log AES keys
+    var SecretKeySpec = Java.use('javax.crypto.spec.SecretKeySpec');
+    SecretKeySpec.$init.overload('[B', 'java.lang.String').implementation = function(key, algo) {
+        console.log("[*] SecretKeySpec: " + algo);
+        console.log("[*] Key: " + bytesToHex(key));
+        return this.$init(key, algo);
+    };
+
+    // Log Cipher operations
+    var Cipher = Java.use('javax.crypto.Cipher');
+    Cipher.doFinal.overload('[B').implementation = function(data) {
+        console.log("[*] Cipher.doFinal input: " + bytesToHex(data));
+        var result = this.doFinal(data);
+        console.log("[*] Cipher.doFinal output: " + bytesToHex(result));
+        return result;
+    };
+
+    function bytesToHex(bytes) {
+        var hex = '';
+        for (var i = 0; i < bytes.length; i++) {
+            hex += ('0' + (bytes[i] & 0xFF).toString(16)).slice(-2);
+        }
+        return hex;
+    }
+});'''
+
+        # Intent Monitor
+        structure.frida_scripts['intent_monitor'] = f'''// Intent Monitor for {pkg}
+Java.perform(function() {{
+    var Activity = Java.use('android.app.Activity');
+
+    Activity.startActivity.overload('android.content.Intent').implementation = function(intent) {{
+        console.log("[*] startActivity called");
+        console.log("[*] Intent: " + intent.toString());
+        console.log("[*] Component: " + intent.getComponent());
+        console.log("[*] Action: " + intent.getAction());
+        console.log("[*] Data: " + intent.getDataString());
+        var extras = intent.getExtras();
+        if (extras) {{
+            console.log("[*] Extras: " + extras.toString());
+        }}
+        return this.startActivity(intent);
+    }};
+
+    Activity.startActivityForResult.overload('android.content.Intent', 'int').implementation = function(intent, code) {{
+        console.log("[*] startActivityForResult called");
+        console.log("[*] Intent: " + intent.toString());
+        console.log("[*] Request code: " + code);
+        return this.startActivityForResult(intent, code);
+    }};
+}});'''
+
+        # File Operations Logger
+        structure.frida_scripts['file_logger'] = '''// File Operations Logger
+Java.perform(function() {
+    var File = Java.use('java.io.File');
+    File.$init.overload('java.lang.String').implementation = function(path) {
+        console.log("[*] File: " + path);
+        return this.$init(path);
+    };
+
+    var FileInputStream = Java.use('java.io.FileInputStream');
+    FileInputStream.$init.overload('java.io.File').implementation = function(file) {
+        console.log("[*] FileInputStream: " + file.getAbsolutePath());
+        return this.$init(file);
+    };
+
+    var FileOutputStream = Java.use('java.io.FileOutputStream');
+    FileOutputStream.$init.overload('java.io.File').implementation = function(file) {
+        console.log("[*] FileOutputStream: " + file.getAbsolutePath());
+        return this.$init(file);
+    };
+});'''
+
+        # SharedPreferences Logger
+        structure.frida_scripts['sharedprefs_logger'] = '''// SharedPreferences Logger
+Java.perform(function() {
+    var SharedPreferences = Java.use('android.content.SharedPreferences');
+
+    var Editor = Java.use('android.content.SharedPreferences$Editor');
+    Editor.putString.implementation = function(key, value) {
+        console.log("[*] SharedPrefs PUT: " + key + " = " + value);
+        return this.putString(key, value);
+    };
+
+    // Hook Context.getSharedPreferences
+    var Context = Java.use('android.content.Context');
+    var ContextWrapper = Java.use('android.content.ContextWrapper');
+    ContextWrapper.getSharedPreferences.implementation = function(name, mode) {
+        console.log("[*] getSharedPreferences: " + name);
+        return this.getSharedPreferences(name, mode);
+    };
+});'''
+
+        # WebView JavaScript Interface Logger
+        structure.frida_scripts['webview_logger'] = '''// WebView Logger
+Java.perform(function() {
+    var WebView = Java.use('android.webkit.WebView');
+
+    WebView.loadUrl.overload('java.lang.String').implementation = function(url) {
+        console.log("[*] WebView.loadUrl: " + url);
+        return this.loadUrl(url);
+    };
+
+    WebView.addJavascriptInterface.implementation = function(obj, name) {
+        console.log("[*] addJavascriptInterface: " + name);
+        console.log("[*] Interface class: " + obj.$className);
+        return this.addJavascriptInterface(obj, name);
+    };
+
+    WebView.evaluateJavascript.implementation = function(script, callback) {
+        console.log("[*] evaluateJavascript: " + script);
+        return this.evaluateJavascript(script, callback);
+    };
+});'''

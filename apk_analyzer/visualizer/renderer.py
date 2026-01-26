@@ -28,6 +28,9 @@ class VisualizationConfig:
     include_class_hierarchy: bool = True
     include_entry_points: bool = True
     include_statistics: bool = True
+    include_attack_surface: bool = True  # New: Attack surface with ADB commands
+    include_injection_points: bool = True  # New: Injection point detection
+    include_frida_scripts: bool = True  # New: Frida hook scripts
     dark_mode: bool = False
     max_classes_in_hierarchy: int = 50
 
@@ -129,6 +132,18 @@ class VisualizationRenderer:
 
         # Entry points details section
         sections.append(self._render_entry_points_details())
+
+        # Attack Surface with ADB commands
+        if self.config.include_attack_surface:
+            sections.append(self._render_attack_surface_section())
+
+        # Injection Points
+        if self.config.include_injection_points:
+            sections.append(self._render_injection_points_section())
+
+        # Frida Scripts
+        if self.config.include_frida_scripts:
+            sections.append(self._render_frida_scripts_section())
 
         return self._html_template(
             title=f"Application Visualization - {self.structure.package_name}",
@@ -318,6 +333,176 @@ class VisualizationRenderer:
                         {''.join(rows)}
                     </tbody>
                 </table>
+            </div>
+        </section>
+        '''
+
+    def _render_attack_surface_section(self) -> str:
+        """Render attack surface section with ADB commands."""
+        if not self.structure.attack_surfaces:
+            return ''
+
+        cards = []
+        for surface in self.structure.attack_surfaces:
+            if not surface.exported and surface.permission:
+                continue  # Skip non-exported protected components
+
+            # Component type badge
+            type_colors = {
+                'activity': 'warning',
+                'service': 'info',
+                'receiver': 'success',
+                'provider': 'danger',
+            }
+            color = type_colors.get(surface.component_type, '')
+
+            # Deep links
+            deep_links_html = ''
+            if surface.deep_links:
+                links = ''.join(f'<li><code>{link}</code></li>' for link in surface.deep_links[:5])
+                deep_links_html = f'''
+                <div class="attack-section">
+                    <h5>🔗 Deep Links</h5>
+                    <ul>{links}</ul>
+                </div>'''
+
+            # ADB commands
+            adb_html = ''
+            if surface.adb_commands:
+                cmds = ''.join(f'''
+                    <div class="adb-command">
+                        <code>{cmd}</code>
+                        <button class="copy-btn" onclick="copyToClipboard(this)">📋</button>
+                    </div>''' for cmd in surface.adb_commands[:5])
+                adb_html = f'''
+                <div class="attack-section">
+                    <h5>⚡ ADB Commands</h5>
+                    {cmds}
+                </div>'''
+
+            # Frida hooks
+            frida_html = ''
+            if surface.frida_hooks:
+                hook = surface.frida_hooks[0] if surface.frida_hooks else ''
+                frida_html = f'''
+                <div class="attack-section">
+                    <h5>🪝 Frida Hook</h5>
+                    <pre class="frida-code"><code>{hook}</code></pre>
+                </div>'''
+
+            cards.append(f'''
+            <div class="attack-card">
+                <div class="attack-header">
+                    <span class="badge {color}">{surface.component_type.upper()}</span>
+                    <span class="component-name">{surface.component_name.split(".")[-1]}</span>
+                    {'<span class="badge danger">EXPORTED</span>' if surface.exported else ''}
+                </div>
+                <div class="attack-body">
+                    <p class="full-name"><code>{surface.component_name}</code></p>
+                    {deep_links_html}
+                    {adb_html}
+                    {frida_html}
+                </div>
+            </div>
+            ''')
+
+        return f'''
+        <section id="attack-surface" class="section">
+            <h2>🎯 Attack Surface</h2>
+            <p class="description">Exported components with ready-to-use ADB commands for penetration testing.</p>
+            <div class="attack-grid">
+                {''.join(cards)}
+            </div>
+        </section>
+        '''
+
+    def _render_injection_points_section(self) -> str:
+        """Render injection points section."""
+        if not self.structure.injection_points:
+            return ''
+
+        rows = []
+        type_badges = {
+            'sql': '<span class="badge danger">SQL</span>',
+            'path': '<span class="badge warning">PATH</span>',
+            'command': '<span class="badge danger">CMD</span>',
+            'xss': '<span class="badge warning">XSS</span>',
+            'intent': '<span class="badge info">INTENT</span>',
+        }
+
+        for point in self.structure.injection_points[:20]:  # Limit to 20
+            badge = type_badges.get(point.injection_type, f'<span class="badge">{point.injection_type}</span>')
+
+            rows.append(f'''
+                <tr>
+                    <td>{badge}</td>
+                    <td><code>{point.class_name.split(".")[-1]}</code></td>
+                    <td>Line {point.line_number}</td>
+                    <td><code class="sink">{point.sink_method}</code></td>
+                    <td><code class="exploit">{point.exploit_example}</code></td>
+                </tr>
+            ''')
+
+        return f'''
+        <section id="injection-points" class="section">
+            <h2>💉 Potential Injection Points</h2>
+            <p class="description">Locations where user-controlled input may reach dangerous sinks.</p>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Type</th>
+                            <th>Class</th>
+                            <th>Location</th>
+                            <th>Sink</th>
+                            <th>Exploit Example</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {''.join(rows)}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+        '''
+
+    def _render_frida_scripts_section(self) -> str:
+        """Render Frida scripts section."""
+        if not self.structure.frida_scripts:
+            return ''
+
+        tabs = []
+        contents = []
+
+        for i, (name, script) in enumerate(self.structure.frida_scripts.items()):
+            active = 'active' if i == 0 else ''
+            display_name = name.replace('_', ' ').title()
+
+            tabs.append(f'''
+                <button class="tab-btn {active}" onclick="showFridaTab('{name}')">{display_name}</button>
+            ''')
+
+            contents.append(f'''
+                <div id="frida-{name}" class="tab-content {active}">
+                    <div class="script-header">
+                        <span>{display_name}</span>
+                        <button class="copy-btn" onclick="copyScript('{name}')">📋 Copy Script</button>
+                    </div>
+                    <pre class="frida-script"><code id="script-{name}">{script}</code></pre>
+                </div>
+            ''')
+
+        return f'''
+        <section id="frida-scripts" class="section">
+            <h2>🪝 Frida Scripts</h2>
+            <p class="description">Ready-to-use Frida scripts for dynamic analysis and hooking.</p>
+            <div class="frida-container">
+                <div class="tab-buttons">
+                    {''.join(tabs)}
+                </div>
+                <div class="tab-contents">
+                    {''.join(contents)}
+                </div>
             </div>
         </section>
         '''
@@ -550,6 +735,192 @@ class VisualizationRenderer:
                 grid-template-columns: repeat(2, 1fr);
             }}
         }}
+
+        /* Attack Surface Styles */
+        .attack-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+            gap: 20px;
+        }}
+
+        .attack-card {{
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+        }}
+
+        .attack-header {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }}
+
+        .attack-header .badge {{
+            background: rgba(255,255,255,0.2);
+            color: white;
+        }}
+
+        .attack-header .component-name {{
+            font-weight: 600;
+            flex-grow: 1;
+        }}
+
+        .attack-body {{
+            padding: 15px;
+        }}
+
+        .attack-body .full-name {{
+            font-size: 0.85em;
+            color: var(--text-secondary);
+            margin-bottom: 15px;
+            word-break: break-all;
+        }}
+
+        .attack-section {{
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid var(--border-color);
+        }}
+
+        .attack-section h5 {{
+            font-size: 0.9rem;
+            margin-bottom: 10px;
+            color: var(--text-primary);
+        }}
+
+        .attack-section ul {{
+            list-style: none;
+            padding: 0;
+        }}
+
+        .attack-section li {{
+            padding: 5px 0;
+        }}
+
+        .adb-command {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: #1e1e1e;
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 8px;
+        }}
+
+        .adb-command code {{
+            flex-grow: 1;
+            color: #4ec9b0;
+            background: transparent;
+            font-size: 0.85em;
+            word-break: break-all;
+        }}
+
+        .copy-btn {{
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            padding: 5px;
+            border-radius: 4px;
+            transition: background 0.2s;
+        }}
+
+        .copy-btn:hover {{
+            background: rgba(255,255,255,0.1);
+        }}
+
+        .frida-code {{
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 0.8em;
+            max-height: 200px;
+            overflow-y: auto;
+        }}
+
+        /* Injection Points Styles */
+        .sink {{
+            color: var(--danger-color);
+        }}
+
+        .exploit {{
+            color: var(--warning-color);
+            background: #1e1e1e;
+        }}
+
+        /* Frida Scripts Styles */
+        .frida-container {{
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            overflow: hidden;
+        }}
+
+        .tab-buttons {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+            padding: 15px;
+            background: #2d2d2d;
+        }}
+
+        .tab-btn {{
+            padding: 10px 20px;
+            border: none;
+            background: #404040;
+            color: #d4d4d4;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: background 0.2s;
+        }}
+
+        .tab-btn:hover {{
+            background: #505050;
+        }}
+
+        .tab-btn.active {{
+            background: var(--accent-color);
+            color: white;
+        }}
+
+        .tab-content {{
+            display: none;
+            padding: 0;
+        }}
+
+        .tab-content.active {{
+            display: block;
+        }}
+
+        .script-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px;
+            background: #2d2d2d;
+            color: white;
+        }}
+
+        .frida-script {{
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 20px;
+            margin: 0;
+            overflow-x: auto;
+            font-size: 0.85em;
+            line-height: 1.5;
+            max-height: 500px;
+            overflow-y: auto;
+        }}
+
+        .frida-script code {{
+            background: transparent;
+            color: inherit;
+        }}
     </style>
 </head>
 <body>
@@ -566,8 +937,9 @@ class VisualizationRenderer:
             <a href="#entry_points">Entry Points</a>
             <a href="#components">Components</a>
             <a href="#data_flow">Data Flow</a>
-            <a href="#calls">Call Graph</a>
-            <a href="#hierarchy">Hierarchy</a>
+            <a href="#attack-surface">🎯 Attack Surface</a>
+            <a href="#injection-points">💉 Injections</a>
+            <a href="#frida-scripts">🪝 Frida</a>
             <a href="#component-details">Details</a>
         </nav>
 
@@ -589,6 +961,35 @@ class VisualizationRenderer:
                 curve: 'basis'
             }}
         }});
+
+        // Copy to clipboard function
+        function copyToClipboard(btn) {{
+            const code = btn.previousElementSibling.textContent;
+            navigator.clipboard.writeText(code).then(() => {{
+                const original = btn.textContent;
+                btn.textContent = '✓';
+                setTimeout(() => btn.textContent = original, 1500);
+            }});
+        }}
+
+        // Copy Frida script
+        function copyScript(name) {{
+            const code = document.getElementById('script-' + name).textContent;
+            navigator.clipboard.writeText(code).then(() => {{
+                alert('Script copied to clipboard!');
+            }});
+        }}
+
+        // Tab switching
+        function showFridaTab(name) {{
+            // Hide all tabs
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+
+            // Show selected tab
+            document.getElementById('frida-' + name).classList.add('active');
+            event.target.classList.add('active');
+        }}
     </script>
 </body>
 </html>'''
