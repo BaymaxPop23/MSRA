@@ -23,12 +23,6 @@ from .visualizer import AppStructureAnalyzer, VisualizationRenderer, Visualizati
 # Interactive Mode Helpers
 # ============================================================================
 
-# Try to import readline for better input handling (available on most Unix systems)
-try:
-    import readline
-except ImportError:
-    pass
-
 
 def print_banner():
     """Print the APK Analyzer banner."""
@@ -69,13 +63,10 @@ def prompt_input(prompt: str, default: str = None) -> str:
         display = f"{prompt}: "
 
     try:
-        # Print prompt and flush before reading
-        sys.stdout.write(display)
-        sys.stdout.flush()
-        value = sys.stdin.readline().strip()
+        value = input(display).strip()
         return value if value else default
     except (KeyboardInterrupt, EOFError):
-        print("\n")
+        print("")
         sys.exit(0)
 
 
@@ -88,9 +79,7 @@ def prompt_choice(prompt: str, choices: List[Tuple[str, str]], default: int = 1)
 
     while True:
         try:
-            sys.stdout.write(f"\nEnter choice [{default}]: ")
-            sys.stdout.flush()
-            choice = sys.stdin.readline().strip()
+            choice = input(f"\nEnter choice [{default}]: ").strip()
             if not choice:
                 return choices[default - 1][0]
             idx = int(choice)
@@ -100,7 +89,7 @@ def prompt_choice(prompt: str, choices: List[Tuple[str, str]], default: int = 1)
         except ValueError:
             print("Please enter a valid number")
         except (KeyboardInterrupt, EOFError):
-            print("\n")
+            print("")
             sys.exit(0)
 
 
@@ -108,14 +97,12 @@ def prompt_yes_no(prompt: str, default: bool = True) -> bool:
     """Prompt for yes/no with default."""
     default_str = "Y/n" if default else "y/N"
     try:
-        sys.stdout.write(f"{prompt} [{default_str}]: ")
-        sys.stdout.flush()
-        response = sys.stdin.readline().strip().lower()
+        response = input(f"{prompt} [{default_str}]: ").strip().lower()
         if not response:
             return default
         return response in ('y', 'yes', 'true', '1')
     except (KeyboardInterrupt, EOFError):
-        print("\n")
+        print("")
         sys.exit(0)
 
 
@@ -143,8 +130,6 @@ def prompt_file(prompt: str, must_exist: bool = True, extension: str = None) -> 
 
 def interactive_mode() -> int:
     """Run interactive mode for APK analysis."""
-    # Reset terminal to clean state
-    subprocess.run(['tput', 'reset'], stderr=subprocess.DEVNULL, check=False)
     print_banner()
 
     total_steps = 6
