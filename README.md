@@ -4,27 +4,36 @@ A comprehensive Android APK security vulnerability scanner with pattern-based de
 
 ![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![License MIT](https://img.shields.io/badge/license-MIT-green.svg)
+![Patterns](https://img.shields.io/badge/patterns-77+-orange.svg)
+
+## Highlights
+
+- **Interactive CLI** - Step-by-step wizard for easy usage
+- **77+ Security Patterns** - Covering OWASP Mobile Top 10
+- **Low False Positives** - Smart detection with context validation
+- **Visual Reports** - Interactive graphs and diagrams
+- **Zero Dependencies** - Pure Python, stdlib only
 
 ## Features
 
 ### Security Scanning
-- **77+ vulnerability patterns** covering OWASP Mobile Top 10
+- **Pattern-based detection** - 77+ vulnerability patterns with regex and manifest checks
 - **Deep analysis engine** - WebView, Intent, and ContentProvider security analysis
 - **Exploitability validation** - Reduces false positives by validating attack paths
-- **Manifest analysis** - Exported components, permissions, intent filters
+- **Smart credential detection** - Context-aware to avoid false positives from debug strings
+
+### Interactive CLI
+- **Guided wizard** - No need to remember command flags
+- **Step-by-step prompts** - APK selection, output config, analysis options
+- **Colorful output** - Clear visual feedback with progress indicators
+- **Auto-open reports** - View results immediately in browser
 
 ### Visualization
 - **Component interaction graphs** - Activities, Services, Receivers, Providers
 - **Data flow analysis** - Track data from sources to sinks
 - **Class hierarchy diagrams** - Inheritance relationships
 - **Entry point mapping** - Attack surface visualization
-- **Interactive HTML reports** with Mermaid.js diagrams
-
-### Dynamic Analysis
-- **Genymotion/Emulator integration** - Automated runtime testing
-- **Frida instrumentation** - Hook and monitor app behavior
-- **Network traffic capture** - SSL/TLS inspection
-- **Runtime permission testing**
+- **Optimized rendering** - Handles large apps without overflow
 
 ### Threat Intelligence
 - **Auto-updating patterns** - Fetch latest vulnerability signatures
@@ -32,39 +41,36 @@ A comprehensive Android APK security vulnerability scanner with pattern-based de
 - **Security blog crawler** - Monitor Oversecured, NowSecure, WithSecure, etc.
 - **Pattern review workflow** - Approve/reject extracted patterns
 
+### Dynamic Analysis
+- **Genymotion/Emulator integration** - Automated runtime testing
+- **Frida instrumentation** - Hook and monitor app behavior
+- **Network traffic capture** - SSL/TLS inspection
+
 ## Requirements
 
 - Python 3.8+
 - `jadx` for APK decompilation ([install](https://github.com/skylot/jadx))
 - `adb` for device communication
 - Optional: `wkhtmltopdf` or `weasyprint` for PDF reports
-- Optional: `frida` for dynamic analysis
 
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/apk-analyzer.git
+git clone https://github.com/Sai-Jagadeesh/apk-analyzer.git
 cd apk-analyzer
 ```
 
 ## Quick Start
 
-```bash
-# Interactive mode (recommended) - guided step-by-step wizard
-python main.py
-
-# Or use command-line arguments directly
-python main.py scan app.apk --out report
-python main.py visualize app.apk --out report
-```
-
-### Interactive Mode
+### Interactive Mode (Recommended)
 
 Simply run without arguments to launch the interactive wizard:
 
+```bash
+python main.py
 ```
-$ python main.py
 
+```
     _    ____  _  __     _                _
    / \  |  _ \| |/ /    / \   _ __   __ _| |_   _ _______ _ __
   / _ \ | |_) | ' /    / _ \ | '_ \ / _` | | | | |_  / _ \ '__|
@@ -93,7 +99,21 @@ The wizard guides you through:
 5. **Analysis options** - Keep sources, custom patterns
 6. **Confirmation** - Review settings before starting
 
-## Usage
+### Command Line Mode
+
+```bash
+# Scan an APK
+python main.py scan app.apk --out report
+
+# Generate visualization
+python main.py visualize app.apk --out report
+
+# Full analysis (scan + visualize)
+python main.py scan app.apk --out report
+python main.py visualize app.apk --out report
+```
+
+## Usage Examples
 
 ### Scanning APKs
 
@@ -107,14 +127,11 @@ python main.py scan app.apk --out report --no-update
 # Force threat intel update
 python main.py scan app.apk --out report --force-update
 
-# Keep decompiled sources
+# Keep decompiled sources for manual review
 python main.py scan app.apk --out report --keep-decompiled
 
 # Use custom patterns directory
 python main.py scan app.apk --out report --patterns-dir ./my-patterns
-
-# Specify jadx path
-python main.py scan app.apk --out report --jadx-path /path/to/jadx
 ```
 
 ### Visualization
@@ -137,26 +154,20 @@ python main.py visualize app.apk --out report
 # List all patterns
 python main.py patterns list
 
-# List by category
-python main.py patterns list --category WebView
-
-# Show pattern details
-python main.py patterns show webview-js-interface
-
-# Show statistics
+# Show pattern statistics
 python main.py patterns stats
 
 # Validate patterns
 python main.py patterns validate
 
-# Export patterns
+# Export patterns as JSON
 python main.py patterns list --format json > patterns.json
 ```
 
-### Threat Intelligence Updates
+### Threat Intelligence
 
 ```bash
-# Update threat intel (checks if update needed)
+# Update threat intel (auto-checks if needed)
 python main.py update
 
 # Force update
@@ -164,26 +175,14 @@ python main.py update --force
 
 # Show update status
 python main.py update --stats
-```
 
-### Security Source Crawling
-
-```bash
-# Crawl HackerOne reports
+# Crawl HackerOne for new patterns
 export HACKERONE_USERNAME=your_username
 export HACKERONE_TOKEN=your_api_token
 python main.py crawl hackerone --max 50 --extract
 
 # Crawl security blogs
 python main.py crawl blogs --max 20 --extract
-
-# Crawl specific sources
-python main.py crawl blogs --sources Oversecured NowSecure --extract
-
-# Review extracted patterns
-python main.py crawl review --list
-python main.py crawl review --approve h1-123456-webview
-python main.py crawl review --reject blog-abc123-crypto
 ```
 
 ### Dynamic Analysis
@@ -195,11 +194,8 @@ python main.py dynamic --list-devices
 # Run dynamic analysis
 python main.py dynamic app.apk --out dynamic_report
 
-# Specify device
-python main.py dynamic app.apk --device emulator-5554
-
-# Extended timeout
-python main.py dynamic app.apk --timeout 600
+# Specify device and timeout
+python main.py dynamic app.apk --device emulator-5554 --timeout 600
 ```
 
 ## Vulnerability Categories
@@ -210,25 +206,24 @@ python main.py dynamic app.apk --timeout 600
 | **Intent/DeepLink** | Intent redirect, PendingIntent, broadcast hijacking | 13 |
 | **Component Exposure** | Exported activities, services, receivers, providers | 11 |
 | **Cryptography** | Weak algorithms, hardcoded keys, insecure random | 9 |
+| **Permissions** | Dangerous permissions, signature protection | 7 |
 | **Data Storage** | SharedPreferences, SQLite, external storage | 6 |
 | **Network** | TLS validation, cleartext traffic, cert pinning | 4 |
-| **Permissions** | Dangerous permissions, signature protection | 7 |
-| **Logging** | Sensitive data in logs | 3 |
 | **Input Validation** | SQL injection, path traversal | 4 |
+| **Logging** | Sensitive data in logs | 3 |
 | **Credentials** | Hardcoded secrets, API keys | 2 |
 
 ## Report Features
 
-### HTML Report (`report.html`)
-- Summary dashboard with severity breakdown
+### Security Report (`report.html`)
+- Summary dashboard with severity breakdown (Critical/High/Medium/Low)
 - Filter by severity, category, or analysis type
 - Expandable finding cards with:
-  - Description and attack path
-  - Code evidence with line numbers
-  - ADB proof-of-concept commands (copy button)
-  - CWE references
+  - Vulnerability description and attack path
+  - Code evidence with file path and line numbers
+  - ADB proof-of-concept commands (one-click copy)
+  - CWE references and external links
   - Remediation guidance
-  - External references
 
 ### Visualization Report (`visualization.html`)
 - Interactive Mermaid.js diagrams
@@ -236,6 +231,41 @@ python main.py dynamic app.apk --timeout 600
 - Data flow from sources to sinks
 - Class hierarchy browser
 - Entry point attack surface map
+- Optimized for large applications (auto-limits nodes)
+
+## Project Structure
+
+```
+apk-analyzer/
+├── main.py                # Entry point
+├── apk_analyzer/
+│   ├── cli.py             # Interactive & command-line interface
+│   ├── scanner.py         # Vulnerability scanner
+│   ├── report.py          # HTML/PDF report generation
+│   ├── utils.py           # Utility functions
+│   ├── patterns/          # Pattern management
+│   │   ├── manager.py     # PatternManager
+│   │   ├── loader.py      # JSON pattern loading
+│   │   ├── validator.py   # Pattern validation
+│   │   └── models.py      # Data models
+│   ├── crawler/           # Security source crawlers
+│   │   ├── hackerone.py   # HackerOne API
+│   │   ├── blogs.py       # RSS/Atom feeds
+│   │   └── extractor.py   # Pattern extraction
+│   ├── deep_analysis/     # Deep analysis engines
+│   │   ├── webview.py     # WebView analyzer
+│   │   ├── intent.py      # Intent analyzer
+│   │   └── provider.py    # ContentProvider analyzer
+│   ├── visualizer/        # Visualization generators
+│   │   ├── analyzer.py    # App structure analysis
+│   │   ├── graphs.py      # Graph builders (with size limits)
+│   │   └── renderer.py    # HTML rendering
+│   └── dynamic/           # Dynamic analysis
+│       └── executor.py    # Runtime testing
+└── data/
+    └── builtin/           # 77+ built-in patterns
+        └── patterns.json
+```
 
 ## Custom Patterns
 
@@ -273,74 +303,11 @@ Create custom patterns in JSON format:
 }
 ```
 
-## Project Structure
-
-```
-apk_analyzer/
-├── cli.py                 # Command-line interface
-├── scanner.py             # Main vulnerability scanner
-├── report.py              # HTML/PDF report generation
-├── utils.py               # Utility functions
-├── patterns/              # Pattern management
-│   ├── manager.py         # PatternManager
-│   ├── loader.py          # JSON pattern loading
-│   ├── validator.py       # Pattern validation
-│   └── models.py          # Data models
-├── crawler/               # Security source crawlers
-│   ├── hackerone.py       # HackerOne API
-│   ├── blogs.py           # RSS/Atom feeds
-│   ├── extractor.py       # Pattern extraction
-│   └── cache.py           # SQLite caching
-├── deep_analysis/         # Deep analysis engines
-│   ├── engine.py          # Analysis orchestrator
-│   ├── webview.py         # WebView analyzer
-│   ├── intent.py          # Intent analyzer
-│   └── provider.py        # ContentProvider analyzer
-├── visualizer/            # Visualization generators
-│   ├── analyzer.py        # App structure analysis
-│   ├── graphs.py          # Graph builders
-│   └── renderer.py        # HTML rendering
-├── dynamic/               # Dynamic analysis
-│   └── executor.py        # Runtime testing
-└── exploitability/        # Exploitability validation
-    └── validator.py       # False positive reduction
-
-data/
-├── builtin/               # 77+ built-in patterns
-│   └── patterns.json
-├── community/             # Community patterns
-└── crawled/               # Extracted patterns
-    └── pending_review/
-```
-
-## Security Checks
-
-### Manifest Analysis
-- Exported components without permissions
-- Debug mode enabled
-- Backup enabled
-- Cleartext traffic allowed
-- Custom permissions without signature protection
-
-### Code Analysis
-- SQL injection in ContentProviders
-- Path traversal vulnerabilities
-- Insecure WebView configurations
-- Hardcoded credentials and API keys
-- Weak cryptographic implementations
-- Insecure random number generation
-- Sensitive data logging
-
-### Deep Analysis
-- WebView JavaScript interface exposure
-- Intent redirect vulnerabilities
-- PendingIntent mutable flags
-- ContentProvider query injection
-- Broadcast receiver hijacking
-
 ## Example Output
 
 ```
+$ python main.py scan app.apk --out report
+
 [+] Decompiling APK with jadx...
 [+] Scanning decompiled sources...
 [+] Pattern stats: 77 patterns loaded
@@ -348,6 +315,13 @@ data/
 [+] Vulnerabilities found: 67
 [+] HTML report: /path/to/report/report.html
 ```
+
+## Recent Updates
+
+- **Interactive CLI** - New step-by-step wizard for easy usage
+- **Improved Credential Detection** - Reduced false positives from debug/log strings
+- **Optimized Visualization** - Fixed graph rendering for large applications
+- **Better Graph Labels** - Component names now display correctly in diagrams
 
 ## Contributing
 
