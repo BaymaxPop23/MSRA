@@ -23,57 +23,22 @@ from .visualizer import AppStructureAnalyzer, VisualizationRenderer, Visualizati
 # Interactive Mode Helpers
 # ============================================================================
 
-class Colors:
-    """ANSI color codes for terminal output."""
-    HEADER = '\033[95m'
-    BLUE = '\033[94m'
-    CYAN = '\033[96m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
-    END = '\033[0m'
-
-    # Check if colors should be disabled
-    _enabled = True
-
-    @classmethod
-    def disable(cls):
-        """Disable all colors."""
-        cls._enabled = False
-        cls.HEADER = cls.BLUE = cls.CYAN = cls.GREEN = ''
-        cls.YELLOW = cls.RED = cls.BOLD = cls.UNDERLINE = cls.END = ''
-
-    @classmethod
-    def enable(cls):
-        """Enable colors."""
-        cls._enabled = True
-        cls.HEADER = '\033[95m'
-        cls.BLUE = '\033[94m'
-        cls.CYAN = '\033[96m'
-        cls.GREEN = '\033[92m'
-        cls.YELLOW = '\033[93m'
-        cls.RED = '\033[91m'
-        cls.BOLD = '\033[1m'
-        cls.UNDERLINE = '\033[4m'
-        cls.END = '\033[0m'
+# Try to import readline for better input handling (available on most Unix systems)
+try:
+    import readline
+except ImportError:
+    pass
 
 
 def print_banner():
     """Print the APK Analyzer banner."""
-    banner = """
-    _    ____  _  __     _                _
-   / \\  |  _ \\| |/ /    / \\   _ __   __ _| |_   _ _______ _ __
-  / _ \\ | |_) | ' /    / _ \\ | '_ \\ / _` | | | | |_  / _ \\ '__|
- / ___ \\|  __/| . \\   / ___ \\| | | | (_| | | |_| |/ /  __/ |
-/_/   \\_\\_|   |_|\\_\\ /_/   \\_\\_| |_|\\__,_|_|\\__, /___\\___|_|
-                                            |___/
-
-Android Security Vulnerability Scanner
-77+ patterns | Deep Analysis | Visualization
-"""
-    print(banner, flush=True)
+    print("")
+    print("=" * 60)
+    print("           APK ANALYZER")
+    print("   Android Security Vulnerability Scanner")
+    print("   77+ patterns | Deep Analysis | Visualization")
+    print("=" * 60)
+    print("")
 
 
 def print_step(step: int, total: int, message: str):
@@ -178,6 +143,8 @@ def prompt_file(prompt: str, must_exist: bool = True, extension: str = None) -> 
 
 def interactive_mode() -> int:
     """Run interactive mode for APK analysis."""
+    # Reset terminal to clean state
+    subprocess.run(['tput', 'reset'], stderr=subprocess.DEVNULL, check=False)
     print_banner()
 
     total_steps = 6
@@ -1067,11 +1034,6 @@ def cmd_visualize(args) -> int:
 
 def main() -> int:
     """Main CLI entry point."""
-    # Check for --no-color flag
-    if '--no-color' in sys.argv:
-        Colors.disable()
-        sys.argv.remove('--no-color')
-
     # If no arguments, run interactive mode
     if len(sys.argv) == 1:
         return interactive_mode()
