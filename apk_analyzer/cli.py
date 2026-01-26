@@ -34,7 +34,30 @@ class Colors:
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
     END = '\033[0m'
-    RESET = '\033[0m\033[39m\033[49m'  # Full reset including foreground/background
+
+    # Check if colors should be disabled
+    _enabled = True
+
+    @classmethod
+    def disable(cls):
+        """Disable all colors."""
+        cls._enabled = False
+        cls.HEADER = cls.BLUE = cls.CYAN = cls.GREEN = ''
+        cls.YELLOW = cls.RED = cls.BOLD = cls.UNDERLINE = cls.END = ''
+
+    @classmethod
+    def enable(cls):
+        """Enable colors."""
+        cls._enabled = True
+        cls.HEADER = '\033[95m'
+        cls.BLUE = '\033[94m'
+        cls.CYAN = '\033[96m'
+        cls.GREEN = '\033[92m'
+        cls.YELLOW = '\033[93m'
+        cls.RED = '\033[91m'
+        cls.BOLD = '\033[1m'
+        cls.UNDERLINE = '\033[4m'
+        cls.END = '\033[0m'
 
 
 def print_banner():
@@ -76,15 +99,14 @@ def print_info(message: str):
 
 def prompt_input(prompt: str, default: str = None) -> str:
     """Prompt for input with optional default."""
+    # Print colored part first, then reset before input
     if default:
-        display = f"{prompt} {Colors.YELLOW}[{default}]{Colors.END}: {Colors.RESET}"
+        print(f"{prompt} {Colors.YELLOW}[{default}]{Colors.END}: ", end="", flush=True)
     else:
-        display = f"{prompt}: {Colors.RESET}"
+        print(f"{prompt}: ", end="", flush=True)
 
     try:
-        sys.stdout.write(display)
-        sys.stdout.flush()
-        value = sys.stdin.readline().strip()
+        value = input().strip()
         return value if value else default
     except (KeyboardInterrupt, EOFError):
         print("\n")
@@ -100,9 +122,8 @@ def prompt_choice(prompt: str, choices: List[Tuple[str, str]], default: int = 1)
 
     while True:
         try:
-            sys.stdout.write(f"\nEnter choice {Colors.YELLOW}[{default}]{Colors.END}: {Colors.RESET}")
-            sys.stdout.flush()
-            choice = sys.stdin.readline().strip()
+            print(f"\nEnter choice {Colors.YELLOW}[{default}]{Colors.END}: ", end="", flush=True)
+            choice = input().strip()
             if not choice:
                 return choices[default - 1][0]
             idx = int(choice)
@@ -120,9 +141,8 @@ def prompt_yes_no(prompt: str, default: bool = True) -> bool:
     """Prompt for yes/no with default."""
     default_str = "Y/n" if default else "y/N"
     try:
-        sys.stdout.write(f"{prompt} {Colors.YELLOW}[{default_str}]{Colors.END}: {Colors.RESET}")
-        sys.stdout.flush()
-        response = sys.stdin.readline().strip().lower()
+        print(f"{prompt} {Colors.YELLOW}[{default_str}]{Colors.END}: ", end="", flush=True)
+        response = input().strip().lower()
         if not response:
             return default
         return response in ('y', 'yes', 'true', '1')
@@ -1045,6 +1065,11 @@ def cmd_visualize(args) -> int:
 
 def main() -> int:
     """Main CLI entry point."""
+    # Check for --no-color flag
+    if '--no-color' in sys.argv:
+        Colors.disable()
+        sys.argv.remove('--no-color')
+
     # If no arguments, run interactive mode
     if len(sys.argv) == 1:
         return interactive_mode()
