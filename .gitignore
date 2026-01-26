@@ -42,6 +42,7 @@ scan_output/
 scan_report/
 scan_report_*/
 report/
+reports/
 *.apk
 decompiled/
 

@@ -229,7 +229,7 @@ def interactive_mode() -> int:
     """Run interactive mode for APK analysis."""
     print_banner()
 
-    total_steps = 6
+    total_steps = 5
 
     # Step 1: Select operation mode
     print_step(1, total_steps, "What would you like to do?")
@@ -252,23 +252,16 @@ def interactive_mode() -> int:
     apk_path = prompt_file("Enter path to APK file", must_exist=True, extension=".apk")
     print_success(f"APK: {os.path.basename(apk_path)}")
 
-    # Step 3: Output directory
-    print_step(3, total_steps, "Output settings")
-    default_out = os.path.join(os.path.dirname(apk_path), "analysis_output")
-    out_dir = prompt_input("Output directory", default=default_out)
-    out_dir = os.path.abspath(os.path.expanduser(out_dir))
-    print_success(f"Output: {out_dir}")
-
-    # Step 4: Threat intelligence
-    print_step(4, total_steps, "Threat Intelligence")
+    # Step 3: Threat intelligence
+    print_step(3, total_steps, "Threat Intelligence")
     update_mode = prompt_choice("Update threat patterns before scan?", [
         ("auto", "Auto - Update if older than 24 hours (Recommended)"),
         ("force", "Force - Always fetch latest patterns"),
         ("skip", "Skip - Use existing patterns only"),
     ])
 
-    # Step 5: Analysis options
-    print_step(5, total_steps, "Analysis Options")
+    # Step 4: Analysis options
+    print_step(4, total_steps, "Analysis Options")
 
     keep_decompiled = prompt_yes_no("Keep decompiled sources after analysis?", default=False)
 
@@ -279,24 +272,26 @@ def interactive_mode() -> int:
         if patterns_dir:
             patterns_dir = os.path.abspath(os.path.expanduser(patterns_dir))
 
-    # Step 6: Confirmation
-    print_step(6, total_steps, "Review & Confirm")
+    # Get reports directory path for display
+    reports_base = _get_reports_dir()
+
+    # Step 5: Confirmation
+    print_step(5, total_steps, "Review & Confirm")
 
     # Operation icons
     op_icons = {"scan": Icons.SEARCH, "visualize": Icons.CHART, "both": Icons.ROCKET}
     op_icon = op_icons.get(operation, Icons.BULLET)
 
     print(f"""
-   ┌────────────────────────────────────────────────────┐
-   │  {Icons.GEAR} Analysis Configuration                      │
-   ├────────────────────────────────────────────────────┤
-   │  {Icons.PACKAGE} APK File:      {os.path.basename(apk_path):<28} │
-   │  {Icons.FOLDER} Output:        {out_dir:<28} │
-   │  {op_icon} Operation:     {operation.title():<28} │
-   │  {Icons.PACKAGE} Threat Intel:  {update_mode.title():<28} │
-   │  {Icons.FILE} Keep Sources:  {'Yes' if keep_decompiled else 'No':<28} │
-   │  {Icons.FOLDER} Custom Patterns: {(patterns_dir if patterns_dir else 'None'):<24} │
-   └────────────────────────────────────────────────────┘
+   ┌──────────────────────────────────────────────────────────┐
+   │  {Icons.GEAR} Analysis Configuration                            │
+   ├──────────────────────────────────────────────────────────┤
+   │  {Icons.PACKAGE} APK File:        {os.path.basename(apk_path):<35} │
+   │  {op_icon} Operation:       {operation.title():<35} │
+   │  {Icons.PACKAGE} Threat Intel:    {update_mode.title():<35} │
+   │  {Icons.FILE} Keep Sources:    {'Yes' if keep_decompiled else 'No':<35} │
+   │  {Icons.FOLDER} Reports:         reports/<package_name>/{'':15} │
+   └──────────────────────────────────────────────────────────┘
 """)
 
     if not prompt_yes_no(f"{Icons.ROCKET} Proceed with analysis?", default=True):
@@ -315,7 +310,7 @@ def interactive_mode() -> int:
 
     args = Args()
     args.apk = apk_path
-    args.out = out_dir
+    args.out = None  # Will be auto-determined based on package name
     args.jadx_path = None
     args.adb_path = "adb"
     args.patterns_dir = patterns_dir
@@ -323,6 +318,9 @@ def interactive_mode() -> int:
     args.no_update = (update_mode == "skip")
     args.force_update = (update_mode == "force")
     args.quiet_update = False
+
+    # Track the output directory (will be set by cmd_scan/cmd_visualize)
+    report_dir = None
 
     # Run scan
     if operation in ("scan", "both"):
@@ -340,27 +338,41 @@ def interactive_mode() -> int:
         if result != 0:
             return result
 
+    # Find the most recent reports directory
+    reports_base = Path(__file__).parent.parent / "reports"
+    if reports_base.exists():
+        # Get the most recently modified subdirectory
+        subdirs = [d for d in reports_base.iterdir() if d.is_dir()]
+        if subdirs:
+            report_dir = str(max(subdirs, key=lambda d: d.stat().st_mtime))
+
     # Final summary
     print(f"""
 ╔══════════════════════════════════════════════════════════╗
 ║  {Icons.CHECK} Analysis Complete!                                ║
 ╚══════════════════════════════════════════════════════════╝
 """)
-    print(f"   {Icons.FOLDER} Output Files:")
-    print("   " + "─" * 50)
 
-    if operation in ("scan", "both"):
-        print(f"   {Icons.FILE} Report:        {os.path.join(out_dir, 'report.html')}")
-    if operation in ("visualize", "both"):
-        print(f"   {Icons.CHART} Visualization: {os.path.join(out_dir, 'visualization.html')}")
+    if report_dir:
+        print(f"   {Icons.FOLDER} Reports saved to:")
+        print(f"   {report_dir}")
+        print("   " + "─" * 50)
 
-    # Offer to open reports
-    print()
-    if prompt_yes_no(f"{Icons.ROCKET} Open reports in browser?", default=True):
-        if operation in ("scan", "both"):
-            _open_file(os.path.join(out_dir, "report.html"))
-        if operation in ("visualize", "both"):
-            _open_file(os.path.join(out_dir, "visualization.html"))
+        report_html = os.path.join(report_dir, 'report.html')
+        viz_html = os.path.join(report_dir, 'visualization.html')
+
+        if operation in ("scan", "both") and os.path.exists(report_html):
+            print(f"   {Icons.FILE} report.html")
+        if operation in ("visualize", "both") and os.path.exists(viz_html):
+            print(f"   {Icons.CHART} visualization.html")
+
+        # Offer to open reports
+        print()
+        if prompt_yes_no(f"{Icons.ROCKET} Open reports in browser?", default=True):
+            if operation in ("scan", "both") and os.path.exists(report_html):
+                _open_file(report_html)
+            if operation in ("visualize", "both") and os.path.exists(viz_html):
+                _open_file(viz_html)
 
     print(f"\n   {Icons.INFO} Thank you for using APK Analyzer!\n")
     return 0
@@ -497,6 +509,24 @@ def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+def _get_reports_dir(package_name: str = None) -> str:
+    """
+    Get the reports directory under the project root.
+    Structure: APKAnalyzer/reports/<package_name>/
+    """
+    # Get the project root (parent of apk_analyzer package)
+    project_root = Path(__file__).parent.parent
+    reports_dir = project_root / "reports"
+
+    if package_name:
+        # Sanitize package name for filesystem
+        safe_name = package_name.replace("/", "_").replace("\\", "_")
+        reports_dir = reports_dir / safe_name
+
+    _ensure_dir(str(reports_dir))
+    return str(reports_dir)
+
+
 def _extract_apkm_bundle(apkm_path: str, out_dir: str) -> Optional[str]:
     """
     Check if file is an APKM bundle (split APKs from APKMirror) and extract base.apk.
@@ -554,15 +584,16 @@ def cmd_scan(args) -> int:
     if not args.no_update:
         _update_threat_intel(force=args.force_update, quiet=args.quiet_update)
 
-    out_dir = os.path.abspath(args.out)
-    _ensure_dir(out_dir)
+    # Use temp directory for initial decompilation
+    import tempfile
+    temp_dir = tempfile.mkdtemp(prefix="apk_analyzer_")
 
     # Check if this is an APKM bundle and extract base.apk if so
-    extracted_apk = _extract_apkm_bundle(apk_path, out_dir)
+    extracted_apk = _extract_apkm_bundle(apk_path, temp_dir)
     if extracted_apk:
         apk_path = extracted_apk
 
-    decompiled_dir = os.path.join(out_dir, "decompiled")
+    decompiled_dir = os.path.join(temp_dir, "decompiled")
     _ensure_dir(decompiled_dir)
 
     print("[+] Decompiling APK with jadx...")
@@ -583,35 +614,43 @@ def cmd_scan(args) -> int:
     findings = scanner.scan()
     source_file_count = sum(1 for _ in iter_source_files(decompiled_dir))
 
+    # Get package name and create reports directory
+    package_name = scanner.package_name or "unknown"
+    out_dir = _get_reports_dir(package_name)
+
     print(f"[+] Pattern stats: {scanner.pattern_stats.get('total', 0)} patterns loaded")
     print(f"[+] Source files scanned: {source_file_count}")
     print(f"[+] Vulnerabilities found: {len(findings)}")
 
-    # Generate reports
+    # Generate reports in the package-specific reports directory
     html_path = os.path.join(out_dir, "report.html")
     metadata = {
         "title": "APK Analyzer Security Report",
-        "package": scanner.package_name or "unknown",
+        "package": package_name,
         "apk": os.path.basename(apk_path),
         "scan_time": datetime.now().isoformat(),
         "patterns_loaded": scanner.pattern_stats.get('total', 0),
     }
     generate_html_report(findings, html_path, metadata)
-    print(f"[+] HTML report: {html_path}")
+    print(f"[+] {Icons.FILE} HTML report: {html_path}")
 
     pdf_path = os.path.join(out_dir, "report.pdf")
     pdf_rendered = render_pdf_from_html(html_path, pdf_path)
     if pdf_rendered:
-        print(f"[+] PDF report: {pdf_path}")
+        print(f"[+] {Icons.FILE} PDF report: {pdf_path}")
     else:
         print("[!] PDF renderer not available. Install wkhtmltopdf or weasyprint.")
 
-    # Cleanup
-    if not findings and not args.keep_decompiled:
-        print("[!] No findings detected; keeping decompiled output for inspection.")
-    elif not args.keep_decompiled:
-        shutil.rmtree(decompiled_dir, ignore_errors=True)
-        print("[+] Cleaned decompiled output.")
+    # Copy decompiled sources to reports dir if requested
+    if args.keep_decompiled:
+        dest_decompiled = os.path.join(out_dir, "decompiled")
+        if os.path.exists(dest_decompiled):
+            shutil.rmtree(dest_decompiled)
+        shutil.copytree(decompiled_dir, dest_decompiled)
+        print(f"[+] {Icons.FOLDER} Decompiled sources: {dest_decompiled}")
+
+    # Cleanup temp directory
+    shutil.rmtree(temp_dir, ignore_errors=True)
 
     return 0
 
@@ -1083,31 +1122,36 @@ def cmd_visualize(args) -> int:
         print("jadx not found. Install jadx-cli or pass --jadx-path.", file=sys.stderr)
         return 2
 
-    out_dir = os.path.abspath(args.out)
-    _ensure_dir(out_dir)
+    # Use temp directory for decompilation
+    import tempfile
+    temp_dir = tempfile.mkdtemp(prefix="apk_analyzer_viz_")
 
     # Check if this is an APKM bundle and extract base.apk if so
-    extracted_apk = _extract_apkm_bundle(apk_path, out_dir)
+    extracted_apk = _extract_apkm_bundle(apk_path, temp_dir)
     if extracted_apk:
         apk_path = extracted_apk
 
-    decompiled_dir = os.path.join(out_dir, "decompiled")
+    decompiled_dir = os.path.join(temp_dir, "decompiled")
     _ensure_dir(decompiled_dir)
 
-    # Decompile if needed
+    # Decompile
+    print("[+] Decompiling APK with jadx...")
+    _decompile(apk_path, decompiled_dir, jadx_path)
+
     manifest_path = os.path.join(decompiled_dir, "resources", "AndroidManifest.xml")
     if not os.path.exists(manifest_path):
-        print("[+] Decompiling APK with jadx...")
-        _decompile(apk_path, decompiled_dir, jadx_path)
-
-    if not os.path.exists(manifest_path):
         print("[!] Decompilation failed - manifest not found", file=sys.stderr)
+        shutil.rmtree(temp_dir, ignore_errors=True)
         return 1
 
     # Analyze application structure
     print("[+] Analyzing application structure...")
     analyzer = AppStructureAnalyzer(decompiled_dir)
     structure = analyzer.analyze()
+
+    # Get package name and create reports directory
+    package_name = structure.package_name or "unknown"
+    out_dir = _get_reports_dir(package_name)
 
     print(f"[+] Found {len(structure.classes)} classes")
     print(f"[+] Found {len(structure.components)} components")
@@ -1130,7 +1174,7 @@ def cmd_visualize(args) -> int:
     html_path = os.path.join(out_dir, "visualization.html")
     renderer.render_html(html_path)
 
-    print(f"[+] Visualization saved: {html_path}")
+    print(f"[+] {Icons.CHART} Visualization saved: {html_path}")
 
     # Print summary
     print("\n" + "=" * 50)
@@ -1157,11 +1201,16 @@ def cmd_visualize(args) -> int:
         if len(structure.entry_points) > 10:
             print(f"  ... and {len(structure.entry_points) - 10} more")
 
-    # Cleanup if requested
-    if not args.keep_decompiled:
-        import shutil
-        shutil.rmtree(decompiled_dir, ignore_errors=True)
-        print("\n[+] Cleaned decompiled output")
+    # Copy decompiled sources to reports dir if requested
+    if args.keep_decompiled:
+        dest_decompiled = os.path.join(out_dir, "decompiled")
+        if os.path.exists(dest_decompiled):
+            shutil.rmtree(dest_decompiled)
+        shutil.copytree(decompiled_dir, dest_decompiled)
+        print(f"[+] {Icons.FOLDER} Decompiled sources: {dest_decompiled}")
+
+    # Cleanup temp directory
+    shutil.rmtree(temp_dir, ignore_errors=True)
 
     return 0
 
