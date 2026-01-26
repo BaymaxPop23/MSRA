@@ -8,7 +8,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Tuple
 
 from .report import generate_html_report, render_pdf_from_html
 from .scanner import Scanner
@@ -17,6 +17,372 @@ from .utils import iter_source_files
 from .dynamic import GenymotionController, DynamicTestExecutor, AppMonitor
 from .crawler import ThreatIntelUpdater, UpdateConfig
 from .visualizer import AppStructureAnalyzer, VisualizationRenderer, VisualizationConfig
+
+
+# ============================================================================
+# Interactive Mode Helpers
+# ============================================================================
+
+class Colors:
+    """ANSI color codes for terminal output."""
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+    END = '\033[0m'
+
+
+def print_banner():
+    """Print the APK Analyzer banner."""
+    banner = f"""
+{Colors.CYAN}{Colors.BOLD}
+    _    ____  _  __     _                _
+   / \\  |  _ \\| |/ /    / \\   _ __   __ _| |_   _ _______ _ __
+  / _ \\ | |_) | ' /    / _ \\ | '_ \\ / _` | | | | |_  / _ \\ '__|
+ / ___ \\|  __/| . \\   / ___ \\| | | | (_| | | |_| |/ /  __/ |
+/_/   \\_\\_|   |_|\\_\\ /_/   \\_\\_| |_|\\__,_|_|\\__, /___\\___|_|
+                                            |___/
+{Colors.END}
+{Colors.YELLOW}Android Security Vulnerability Scanner{Colors.END}
+{Colors.BLUE}77+ patterns | Deep Analysis | Visualization{Colors.END}
+"""
+    print(banner)
+
+
+def print_step(step: int, total: int, message: str):
+    """Print a step indicator."""
+    print(f"\n{Colors.CYAN}[{step}/{total}]{Colors.END} {Colors.BOLD}{message}{Colors.END}")
+
+
+def print_success(message: str):
+    """Print a success message."""
+    print(f"{Colors.GREEN}✓{Colors.END} {message}")
+
+
+def print_error(message: str):
+    """Print an error message."""
+    print(f"{Colors.RED}✗{Colors.END} {message}")
+
+
+def print_info(message: str):
+    """Print an info message."""
+    print(f"{Colors.BLUE}ℹ{Colors.END} {message}")
+
+
+def prompt_input(prompt: str, default: str = None) -> str:
+    """Prompt for input with optional default."""
+    if default:
+        display = f"{prompt} {Colors.YELLOW}[{default}]{Colors.END}: "
+    else:
+        display = f"{prompt}: "
+
+    try:
+        value = input(display).strip()
+        return value if value else default
+    except (KeyboardInterrupt, EOFError):
+        print("\n")
+        sys.exit(0)
+
+
+def prompt_choice(prompt: str, choices: List[Tuple[str, str]], default: int = 1) -> str:
+    """Prompt for a choice from a list."""
+    print(f"\n{prompt}")
+    for i, (key, description) in enumerate(choices, 1):
+        marker = f"{Colors.GREEN}>{Colors.END}" if i == default else " "
+        print(f"  {marker} {Colors.BOLD}{i}{Colors.END}. {description}")
+
+    while True:
+        try:
+            choice = input(f"\nEnter choice {Colors.YELLOW}[{default}]{Colors.END}: ").strip()
+            if not choice:
+                return choices[default - 1][0]
+            idx = int(choice)
+            if 1 <= idx <= len(choices):
+                return choices[idx - 1][0]
+            print_error(f"Please enter a number between 1 and {len(choices)}")
+        except ValueError:
+            print_error("Please enter a valid number")
+        except (KeyboardInterrupt, EOFError):
+            print("\n")
+            sys.exit(0)
+
+
+def prompt_yes_no(prompt: str, default: bool = True) -> bool:
+    """Prompt for yes/no with default."""
+    default_str = "Y/n" if default else "y/N"
+    try:
+        response = input(f"{prompt} {Colors.YELLOW}[{default_str}]{Colors.END}: ").strip().lower()
+        if not response:
+            return default
+        return response in ('y', 'yes', 'true', '1')
+    except (KeyboardInterrupt, EOFError):
+        print("\n")
+        sys.exit(0)
+
+
+def prompt_file(prompt: str, must_exist: bool = True, extension: str = None) -> str:
+    """Prompt for a file path with validation."""
+    while True:
+        path = prompt_input(prompt)
+        if not path:
+            print_error("Please enter a path")
+            continue
+
+        path = os.path.expanduser(path)
+        path = os.path.abspath(path)
+
+        if must_exist and not os.path.exists(path):
+            print_error(f"File not found: {path}")
+            continue
+
+        if extension and not path.endswith(extension):
+            print_error(f"File must have {extension} extension")
+            continue
+
+        return path
+
+
+def interactive_mode() -> int:
+    """Run interactive mode for APK analysis."""
+    print_banner()
+
+    total_steps = 6
+
+    # Step 1: Select operation mode
+    print_step(1, total_steps, "What would you like to do?")
+    operation = prompt_choice("Select operation:", [
+        ("scan", "Security Scan - Find vulnerabilities in APK"),
+        ("visualize", "Visualize - Generate app structure diagrams"),
+        ("both", "Full Analysis - Scan + Visualize"),
+        ("patterns", "Pattern Management - List/validate patterns"),
+        ("update", "Update Threat Intel - Fetch latest patterns"),
+    ])
+
+    if operation == "patterns":
+        return cmd_patterns_interactive()
+
+    if operation == "update":
+        return cmd_update_interactive()
+
+    # Step 2: APK file
+    print_step(2, total_steps, "Select APK file")
+    apk_path = prompt_file("Enter path to APK file", must_exist=True, extension=".apk")
+    print_success(f"APK: {os.path.basename(apk_path)}")
+
+    # Step 3: Output directory
+    print_step(3, total_steps, "Output settings")
+    default_out = os.path.join(os.path.dirname(apk_path), "analysis_output")
+    out_dir = prompt_input("Output directory", default=default_out)
+    out_dir = os.path.abspath(os.path.expanduser(out_dir))
+    print_success(f"Output: {out_dir}")
+
+    # Step 4: Threat intelligence
+    print_step(4, total_steps, "Threat Intelligence")
+    update_mode = prompt_choice("Update threat patterns before scan?", [
+        ("auto", "Auto - Update if older than 24 hours (Recommended)"),
+        ("force", "Force - Always fetch latest patterns"),
+        ("skip", "Skip - Use existing patterns only"),
+    ])
+
+    # Step 5: Analysis options
+    print_step(5, total_steps, "Analysis Options")
+
+    keep_decompiled = prompt_yes_no("Keep decompiled sources after analysis?", default=False)
+
+    custom_patterns = prompt_yes_no("Use custom patterns directory?", default=False)
+    patterns_dir = None
+    if custom_patterns:
+        patterns_dir = prompt_input("Custom patterns directory path")
+        if patterns_dir:
+            patterns_dir = os.path.abspath(os.path.expanduser(patterns_dir))
+
+    # Step 6: Confirmation
+    print_step(6, total_steps, "Review & Confirm")
+    print(f"""
+{Colors.BOLD}Analysis Configuration:{Colors.END}
+  APK File:        {os.path.basename(apk_path)}
+  Output:          {out_dir}
+  Operation:       {operation.title()}
+  Threat Intel:    {update_mode.title()}
+  Keep Sources:    {'Yes' if keep_decompiled else 'No'}
+  Custom Patterns: {patterns_dir if patterns_dir else 'None'}
+""")
+
+    if not prompt_yes_no("Proceed with analysis?", default=True):
+        print_info("Analysis cancelled")
+        return 0
+
+    print(f"\n{Colors.BOLD}{'='*60}{Colors.END}")
+    print(f"{Colors.CYAN}Starting Analysis...{Colors.END}")
+    print(f"{'='*60}\n")
+
+    # Build args object
+    class Args:
+        pass
+
+    args = Args()
+    args.apk = apk_path
+    args.out = out_dir
+    args.jadx_path = None
+    args.adb_path = "adb"
+    args.patterns_dir = patterns_dir
+    args.keep_decompiled = keep_decompiled
+    args.no_update = (update_mode == "skip")
+    args.force_update = (update_mode == "force")
+    args.quiet_update = False
+
+    # Run scan
+    if operation in ("scan", "both"):
+        result = cmd_scan(args)
+        if result != 0:
+            return result
+
+    # Run visualization
+    if operation in ("visualize", "both"):
+        args.no_components = False
+        args.no_calls = False
+        args.no_dataflow = False
+        args.no_hierarchy = False
+        result = cmd_visualize(args)
+        if result != 0:
+            return result
+
+    # Final summary
+    print(f"\n{Colors.BOLD}{'='*60}{Colors.END}")
+    print(f"{Colors.GREEN}Analysis Complete!{Colors.END}")
+    print(f"{'='*60}")
+    print(f"\n{Colors.BOLD}Output Files:{Colors.END}")
+
+    if operation in ("scan", "both"):
+        print(f"  {Colors.CYAN}Report:{Colors.END}        {os.path.join(out_dir, 'report.html')}")
+    if operation in ("visualize", "both"):
+        print(f"  {Colors.CYAN}Visualization:{Colors.END} {os.path.join(out_dir, 'visualization.html')}")
+
+    # Offer to open reports
+    print()
+    if prompt_yes_no("Open reports in browser?", default=True):
+        if operation in ("scan", "both"):
+            _open_file(os.path.join(out_dir, "report.html"))
+        if operation in ("visualize", "both"):
+            _open_file(os.path.join(out_dir, "visualization.html"))
+
+    return 0
+
+
+def cmd_patterns_interactive() -> int:
+    """Interactive pattern management."""
+    print_step(1, 1, "Pattern Management")
+
+    action = prompt_choice("Select action:", [
+        ("list", "List all patterns"),
+        ("stats", "Show pattern statistics"),
+        ("validate", "Validate all patterns"),
+        ("search", "Search patterns"),
+    ])
+
+    manager = PatternManager()
+    manager.load_all()
+
+    if action == "list":
+        print(f"\n{Colors.BOLD}Loaded Patterns:{Colors.END}\n")
+        print(f"{'ID':<35} {'Title':<40} {'Severity':<10}")
+        print("-" * 90)
+        for p in manager.get_patterns(enabled_only=True):
+            title = p.title[:38] + ".." if len(p.title) > 40 else p.title
+            sev_color = Colors.RED if p.severity.value == "Critical" else Colors.YELLOW if p.severity.value == "High" else Colors.END
+            print(f"{p.id:<35} {title:<40} {sev_color}{p.severity.value:<10}{Colors.END}")
+
+        stats = manager.stats
+        print(f"\n{Colors.BOLD}Total:{Colors.END} {stats['total']} | {Colors.BOLD}Enabled:{Colors.END} {stats['enabled']}")
+
+    elif action == "stats":
+        stats = manager.stats
+        print(f"\n{Colors.BOLD}Pattern Statistics{Colors.END}")
+        print("=" * 40)
+        print(f"Total patterns: {stats['total']}")
+        print(f"Enabled: {stats['enabled']}")
+        print(f"\n{Colors.BOLD}By Severity:{Colors.END}")
+        for sev, count in sorted(stats['by_severity'].items()):
+            print(f"  {sev}: {count}")
+        print(f"\n{Colors.BOLD}By Category:{Colors.END}")
+        for cat, count in sorted(stats['by_category'].items()):
+            print(f"  {cat}: {count}")
+
+    elif action == "validate":
+        issues = manager.validate_all()
+        if not issues:
+            print_success("All patterns are valid!")
+        else:
+            print_error(f"Found issues in {len(issues)} patterns:")
+            for pattern_id, pattern_issues in issues.items():
+                print(f"\n  {pattern_id}:")
+                for issue in pattern_issues:
+                    print(f"    - {issue}")
+
+    elif action == "search":
+        query = prompt_input("Search query")
+        results = manager.search_patterns(query)
+        if results:
+            print(f"\n{Colors.BOLD}Found {len(results)} patterns:{Colors.END}\n")
+            for p in results:
+                print(f"  {Colors.CYAN}{p.id}{Colors.END}: {p.title}")
+        else:
+            print_info("No patterns found matching query")
+
+    return 0
+
+
+def cmd_update_interactive() -> int:
+    """Interactive threat intel update."""
+    print_step(1, 1, "Threat Intelligence Update")
+
+    config = UpdateConfig()
+    updater = ThreatIntelUpdater(config)
+
+    # Show current status
+    stats = updater.get_stats()
+    print(f"\n{Colors.BOLD}Current Status:{Colors.END}")
+    print(f"  Last update: {stats['last_update'] or 'Never'}")
+    print(f"  Patterns pending review: {stats['pending_patterns']}")
+
+    action = prompt_choice("\nSelect action:", [
+        ("update", "Update now (skip if recent)"),
+        ("force", "Force update"),
+        ("cancel", "Cancel"),
+    ])
+
+    if action == "cancel":
+        return 0
+
+    print(f"\n{Colors.CYAN}Updating threat intelligence...{Colors.END}\n")
+    result = updater.update(force=(action == "force"))
+
+    if result.success:
+        print_success("Update completed successfully")
+    else:
+        print_error("Update completed with errors")
+        for error in result.errors:
+            print(f"  - {error}")
+
+    return 0
+
+
+def _open_file(path: str):
+    """Open a file with the default application."""
+    import platform
+    try:
+        if platform.system() == "Darwin":
+            subprocess.run(["open", path], check=False)
+        elif platform.system() == "Windows":
+            os.startfile(path)
+        else:
+            subprocess.run(["xdg-open", path], check=False)
+    except Exception:
+        pass
 
 
 def _find_jadx(jadx_path: Optional[str]) -> str:
@@ -672,41 +1038,57 @@ def cmd_visualize(args) -> int:
 
 def main() -> int:
     """Main CLI entry point."""
+    # If no arguments, run interactive mode
+    if len(sys.argv) == 1:
+        return interactive_mode()
+
+    # Check for explicit interactive flag
+    if len(sys.argv) == 2 and sys.argv[1] in ('-i', '--interactive'):
+        return interactive_mode()
+
     parser = argparse.ArgumentParser(
         description="APK Security Analyzer - Vulnerability Scanner with Dynamic Patterns",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  Interactive mode (recommended for first-time users):
+    apk-analyzer                          # Launch interactive wizard
+    apk-analyzer --interactive            # Same as above
+
   Scan an APK (auto-updates threat intel):
-    python main.py scan app.apk --out report
-    python main.py scan app.apk --no-update      # Skip update
-    python main.py scan app.apk --force-update   # Force fresh update
+    apk-analyzer scan app.apk --out report
+    apk-analyzer scan app.apk --no-update      # Skip update
+    apk-analyzer scan app.apk --force-update   # Force fresh update
 
   Visualize application structure:
-    python main.py visualize app.apk             # Generate visualization
-    python main.py visualize app.apk --out viz   # Custom output dir
+    apk-analyzer visualize app.apk             # Generate visualization
+    apk-analyzer visualize app.apk --out viz   # Custom output dir
 
   Update threat intelligence:
-    python main.py update                        # Update if needed
-    python main.py update --force                # Force update
-    python main.py update --stats                # Show update status
+    apk-analyzer update                        # Update if needed
+    apk-analyzer update --force                # Force update
+    apk-analyzer update --stats                # Show update status
 
   List patterns:
-    python main.py patterns list
+    apk-analyzer patterns list
 
   Dynamic analysis:
-    python main.py dynamic --list-devices
-    python main.py dynamic app.apk --out dynamic_report
-    python main.py dynamic app.apk --device emulator-5554 --timeout 600
+    apk-analyzer dynamic --list-devices
+    apk-analyzer dynamic app.apk --out dynamic_report
+    apk-analyzer dynamic app.apk --device emulator-5554 --timeout 600
 
   Crawl HackerOne:
-    python main.py crawl hackerone --max 50 --extract
+    apk-analyzer crawl hackerone --max 50 --extract
 
   Review extracted patterns:
-    python main.py crawl review --list
-    python main.py crawl review --approve h1-123-webview
+    apk-analyzer crawl review --list
+    apk-analyzer crawl review --approve h1-123-webview
         """
     )
+
+    # Add interactive flag
+    parser.add_argument('-i', '--interactive', action='store_true',
+                        help='Launch interactive wizard')
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
@@ -801,6 +1183,10 @@ Examples:
     viz_parser.set_defaults(func=cmd_visualize)
 
     args = parser.parse_args()
+
+    # Handle interactive flag
+    if hasattr(args, 'interactive') and args.interactive:
+        return interactive_mode()
 
     # Handle legacy usage (no subcommand, just APK path)
     if args.command is None:
