@@ -34,6 +34,7 @@ class Colors:
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
     END = '\033[0m'
+    RESET = '\033[0m\033[39m\033[49m'  # Full reset including foreground/background
 
 
 def print_banner():
@@ -76,12 +77,14 @@ def print_info(message: str):
 def prompt_input(prompt: str, default: str = None) -> str:
     """Prompt for input with optional default."""
     if default:
-        display = f"{prompt} {Colors.YELLOW}[{default}]{Colors.END}: "
+        display = f"{prompt} {Colors.YELLOW}[{default}]{Colors.END}: {Colors.RESET}"
     else:
-        display = f"{prompt}: "
+        display = f"{prompt}: {Colors.RESET}"
 
     try:
-        value = input(display).strip()
+        sys.stdout.write(display)
+        sys.stdout.flush()
+        value = sys.stdin.readline().strip()
         return value if value else default
     except (KeyboardInterrupt, EOFError):
         print("\n")
@@ -97,7 +100,9 @@ def prompt_choice(prompt: str, choices: List[Tuple[str, str]], default: int = 1)
 
     while True:
         try:
-            choice = input(f"\nEnter choice {Colors.YELLOW}[{default}]{Colors.END}: ").strip()
+            sys.stdout.write(f"\nEnter choice {Colors.YELLOW}[{default}]{Colors.END}: {Colors.RESET}")
+            sys.stdout.flush()
+            choice = sys.stdin.readline().strip()
             if not choice:
                 return choices[default - 1][0]
             idx = int(choice)
@@ -115,7 +120,9 @@ def prompt_yes_no(prompt: str, default: bool = True) -> bool:
     """Prompt for yes/no with default."""
     default_str = "Y/n" if default else "y/N"
     try:
-        response = input(f"{prompt} {Colors.YELLOW}[{default_str}]{Colors.END}: ").strip().lower()
+        sys.stdout.write(f"{prompt} {Colors.YELLOW}[{default_str}]{Colors.END}: {Colors.RESET}")
+        sys.stdout.flush()
+        response = sys.stdin.readline().strip().lower()
         if not response:
             return default
         return response in ('y', 'yes', 'true', '1')
