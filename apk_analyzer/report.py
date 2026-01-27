@@ -11,8 +11,24 @@ from collections import Counter
 from .utils import Finding
 
 
-def generate_html_report(findings: List[Finding], output_path: str, metadata: dict) -> None:
-    """Generate a clean, interactive HTML security report."""
+def _get_attr(obj, key, default=None):
+    """Get attribute from object or dict uniformly."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def generate_html_report(findings: List, output_path: str, metadata: dict, json_data: dict = None) -> None:
+    """Generate a clean, interactive HTML security report.
+
+    Args:
+        findings: List of Finding objects
+        output_path: Path to write HTML report
+        metadata: Report metadata (title, package, apk, etc.)
+        json_data: Optional JSON data to embed in report for export
+    """
+    import json as json_module
+
     created = dt.datetime.now().strftime("%B %d, %Y at %I:%M %p")
     title = metadata.get("title", "APK Security Scan Report")
     pkg = metadata.get("package", "unknown")
@@ -24,10 +40,12 @@ def generate_html_report(findings: List[Finding], output_path: str, metadata: di
     category_set = set()
 
     for f in findings:
-        sev = f.severity if f.severity in severity_counts else "Medium"
+        sev = _get_attr(f, 'severity', 'Medium')
+        if sev not in severity_counts:
+            sev = "Medium"
         severity_counts[sev] += 1
-        extra = f.extra or {}
-        cat = extra.get("category", "Other")
+        extra = _get_attr(f, 'extra') or {}
+        cat = extra.get("category", "Other") if isinstance(extra, dict) else "Other"
         category_set.add(cat)
 
     categories = sorted(category_set)
@@ -43,6 +61,39 @@ def generate_html_report(findings: List[Finding], output_path: str, metadata: di
         f'<option value="{html.escape(cat)}">{html.escape(cat)}</option>'
         for cat in categories
     )
+
+    # Build embedded JSON data (must be done before HTML template)
+    if json_data:
+        embedded_json = json_module.dumps(json_data, indent=2)
+    else:
+        # Build JSON from findings if not provided
+        findings_list = []
+        for f in findings:
+            extra = _get_attr(f, 'extra') or {}
+            evidence = _get_attr(f, 'evidence')
+            findings_list.append({
+                'title': _get_attr(f, 'title'),
+                'severity': _get_attr(f, 'severity'),
+                'description': _get_attr(f, 'description'),
+                'evidence': {
+                    'file': _get_attr(evidence, 'file_path') if evidence else None,
+                    'line': _get_attr(evidence, 'line_number') if evidence else None,
+                    'snippet': _get_attr(evidence, 'snippet') if evidence else None,
+                } if evidence else None,
+                'adb_commands': _get_attr(f, 'adb_commands', []),
+                'references': _get_attr(f, 'references', []),
+                'attack_vector': extra.get('attack_vector') if isinstance(extra, dict) else None,
+                'attack_steps': extra.get('attack_steps') if isinstance(extra, dict) else None,
+                'mitigation': extra.get('mitigation') if isinstance(extra, dict) else None,
+            })
+        embedded_json = json_module.dumps({
+            'package': pkg,
+            'apk': apk_name,
+            'scan_time': created,
+            'total_findings': total_findings,
+            'severity_counts': severity_counts,
+            'findings': findings_list,
+        }, indent=2)
 
     html_content = f'''<!DOCTYPE html>
 <html lang="en">
@@ -86,6 +137,8 @@ def generate_html_report(findings: List[Finding], output_path: str, metadata: di
         .filter-row select:focus {{ border-color: #6366f1; outline: none; }}
         .filter-row button {{ padding: 10px 20px; background: #6366f1; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 0.9rem; }}
         .filter-row button:hover {{ background: #4f46e5; }}
+        .filter-row .export-btn {{ background: #059669; }}
+        .filter-row .export-btn:hover {{ background: #047857; }}
         .filter-summary {{ background: #6366f1; color: white; padding: 12px 20px; border-radius: 8px; text-align: center; font-weight: 600; margin-top: 15px; }}
 
         /* Finding Cards */
@@ -139,6 +192,31 @@ def generate_html_report(findings: List[Finding], output_path: str, metadata: di
         .copy-btn:hover {{ background: #475569; }}
 
         .remediation-box {{ background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px; padding: 15px; margin-top: 8px; color: #166534; }}
+
+        /* Attack Vector Box */
+        .attack-vector-box {{ background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%); border: 2px solid #f87171; border-radius: 8px; padding: 20px; margin-bottom: 15px; }}
+        .attack-vector-box h5 {{ margin: 0 0 15px 0; color: #dc2626; font-size: 1rem; display: flex; align-items: center; gap: 8px; }}
+        .attack-vector-box .attack-title {{ color: #991b1b; font-weight: 600; margin-bottom: 10px; }}
+        .attack-vector-box .attack-desc {{ color: #7f1d1d; line-height: 1.6; margin-bottom: 15px; white-space: pre-wrap; }}
+
+        .prerequisites-list {{ background: #fff; border-radius: 6px; padding: 12px; margin-bottom: 15px; }}
+        .prerequisites-list h6 {{ margin: 0 0 8px 0; color: #b91c1c; font-size: 0.85rem; }}
+        .prerequisites-list ul {{ margin: 0; padding-left: 20px; color: #991b1b; }}
+        .prerequisites-list li {{ margin: 4px 0; }}
+
+        .attack-steps {{ background: #fff; border-radius: 6px; padding: 12px; margin-bottom: 15px; }}
+        .attack-steps h6 {{ margin: 0 0 8px 0; color: #b91c1c; font-size: 0.85rem; }}
+        .attack-steps ol {{ margin: 0; padding-left: 20px; color: #7f1d1d; }}
+        .attack-steps li {{ margin: 6px 0; line-height: 1.5; }}
+
+        .impact-list {{ background: #fff; border-radius: 6px; padding: 12px; margin-bottom: 15px; }}
+        .impact-list h6 {{ margin: 0 0 8px 0; color: #b91c1c; font-size: 0.85rem; }}
+        .impact-list ul {{ margin: 0; padding-left: 20px; color: #991b1b; }}
+        .impact-list li {{ margin: 4px 0; }}
+
+        .malicious-code-box {{ background: #1e1e1e; border-radius: 8px; padding: 15px; margin-top: 15px; }}
+        .malicious-code-box h6 {{ margin: 0 0 10px 0; color: #f87171; font-size: 0.85rem; }}
+        .malicious-code-box code {{ color: #f87171; font-family: monospace; font-size: 0.8rem; white-space: pre-wrap; display: block; }}
 
         .cwe-list {{ display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }}
         .cwe-tag {{ background: #fef3c7; color: #92400e; padding: 4px 10px; border-radius: 6px; font-size: 0.8rem; font-weight: 600; }}
@@ -215,6 +293,7 @@ def generate_html_report(findings: List[Finding], output_path: str, metadata: di
                     <option value="pattern">📋 Pattern Match Only</option>
                 </select>
                 <button onclick="resetFilters()">Reset</button>
+                <button onclick="exportJSON()" class="export-btn">📥 Export JSON</button>
             </div>
             <div class="filter-summary">
                 Showing <span id="visibleCount">{total_findings}</span> of <span id="totalCount">{total_findings}</span> findings
@@ -290,6 +369,26 @@ def generate_html_report(findings: List[Finding], output_path: str, metadata: di
         // Expand first critical/high finding by default
         const firstImportant = document.querySelector('.finding-card.critical, .finding-card.high');
         if (firstImportant) firstImportant.classList.add('expanded');
+
+        // Export JSON functionality
+        function exportJSON() {{
+            const jsonData = document.getElementById('reportData');
+            if (jsonData) {{
+                const data = JSON.parse(jsonData.textContent);
+                const blob = new Blob([JSON.stringify(data, null, 2)], {{type: 'application/json'}});
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = '{pkg}_findings.json';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            }}
+        }}
+    </script>
+    <script type="application/json" id="reportData">
+{embedded_json}
     </script>
 </body>
 </html>'''
@@ -298,10 +397,12 @@ def generate_html_report(findings: List[Finding], output_path: str, metadata: di
         f.write(html_content)
 
 
-def _render_finding(finding: Finding, index: int, package: str) -> str:
-    """Render a single finding card."""
-    severity = (finding.severity or "Medium").lower()
-    extra = finding.extra or {}
+def _render_finding(finding, index: int, package: str) -> str:
+    """Render a single finding card. Accepts Finding object or dict."""
+    severity = (_get_attr(finding, 'severity') or "Medium").lower()
+    extra = _get_attr(finding, 'extra') or {}
+    if not isinstance(extra, dict):
+        extra = {}
     category = extra.get("category", "Other")
     is_deep = extra.get("deep_analysis", False)
 
@@ -340,25 +441,29 @@ def _render_finding(finding: Finding, index: int, package: str) -> str:
 
     # Evidence/Code
     evidence_html = ""
-    if finding.evidence:
-        file_path = finding.evidence.file_path
+    evidence = _get_attr(finding, 'evidence')
+    if evidence:
+        file_path = _get_attr(evidence, 'file_path') or ''
         if '/sources/' in file_path:
             file_path = 'sources/' + file_path.split('/sources/')[-1]
+        line_num = _get_attr(evidence, 'line') or _get_attr(evidence, 'line_number') or 0
+        snippet = _get_attr(evidence, 'snippet') or ''
         evidence_html = f'''
         <div class="finding-section">
             <div class="section-label">📍 Location</div>
             <div class="evidence-box">
-                <div class="file-path">📄 {html.escape(file_path)} : Line {finding.evidence.line}</div>
-                <code>{html.escape(finding.evidence.snippet)}</code>
+                <div class="file-path">📄 {html.escape(str(file_path))} : Line {line_num}</div>
+                <code>{html.escape(str(snippet))}</code>
             </div>
         </div>'''
 
     # ADB PoC
     poc_html = ""
-    if finding.adb_commands:
-        if is_deep and finding.adb_commands[0].startswith('#'):
+    adb_commands = _get_attr(finding, 'adb_commands') or []
+    if adb_commands:
+        if is_deep and adb_commands[0].startswith('#'):
             # Deep analysis detailed PoC
-            poc_content = finding.adb_commands[0].replace("<package>", package)
+            poc_content = adb_commands[0].replace("<package>", package)
             poc_html = f'''
         <div class="finding-section">
             <div class="section-label">⚡ Proof of Concept</div>
@@ -371,7 +476,7 @@ def _render_finding(finding: Finding, index: int, package: str) -> str:
             </div>
         </div>'''
         else:
-            adb_cmds = [cmd.replace("<package>", package) for cmd in finding.adb_commands]
+            adb_cmds = [cmd.replace("<package>", package) for cmd in adb_commands]
             poc_content = '\n'.join(adb_cmds)
             poc_html = f'''
         <div class="finding-section">
@@ -406,18 +511,75 @@ def _render_finding(finding: Finding, index: int, package: str) -> str:
 
     # References
     refs_html = ""
-    if finding.references:
-        ref_items = ''.join(f'<li><a href="{html.escape(ref)}" target="_blank">{html.escape(ref)}</a></li>' for ref in finding.references)
+    references = _get_attr(finding, 'references') or []
+    if references:
+        ref_items = ''.join(f'<li><a href="{html.escape(ref)}" target="_blank">{html.escape(ref)}</a></li>' for ref in references)
         refs_html = f'''
         <div class="finding-section">
             <div class="section-label">📚 References</div>
             <ul class="ref-list">{ref_items}</ul>
         </div>'''
 
+    # Attack Vector Exploitation Details
+    attack_vector_html = ""
+    if extra.get("attack_vector") and extra.get("attack_description"):
+        # Prerequisites
+        prereqs_html = ""
+        if extra.get("attack_prerequisites"):
+            prereq_items = ''.join(f'<li>{html.escape(p)}</li>' for p in extra["attack_prerequisites"])
+            prereqs_html = f'''
+            <div class="prerequisites-list">
+                <h6>📋 Prerequisites</h6>
+                <ul>{prereq_items}</ul>
+            </div>'''
+
+        # Attack Steps
+        steps_html = ""
+        if extra.get("attack_steps"):
+            step_items = ''.join(f'<li>{html.escape(s)}</li>' for s in extra["attack_steps"])
+            steps_html = f'''
+            <div class="attack-steps">
+                <h6>🎯 Attack Steps</h6>
+                <ol>{step_items}</ol>
+            </div>'''
+
+        # Impact
+        impact_html = ""
+        if extra.get("attack_impact"):
+            impact_items = ''.join(f'<li>{html.escape(i)}</li>' for i in extra["attack_impact"])
+            impact_html = f'''
+            <div class="impact-list">
+                <h6>💥 Potential Impact</h6>
+                <ul>{impact_items}</ul>
+            </div>'''
+
+        # Malicious APK Code
+        malicious_code_html = ""
+        if extra.get("malicious_apk_code"):
+            malicious_code_html = f'''
+            <div class="malicious-code-box">
+                <h6>📱 Malicious APK Exploitation Code</h6>
+                <code>{html.escape(extra["malicious_apk_code"])}</code>
+            </div>'''
+
+        attack_vector_html = f'''
+        <div class="attack-vector-box">
+            <h5>⚠️ Attacker Exploitation Scenario</h5>
+            <div class="attack-title">{html.escape(extra["attack_vector"])}</div>
+            <div class="attack-desc">{html.escape(extra["attack_description"])}</div>
+            {prereqs_html}
+            {steps_html}
+            {impact_html}
+            {malicious_code_html}
+        </div>'''
+
+    title = _get_attr(finding, 'title') or 'Unknown'
+    description = _get_attr(finding, 'description') or ''
+
     return f'''
     <div class="finding-card {severity}" data-severity="{severity}" data-category="{html.escape(category)}" data-deep="{str(is_deep).lower()}">
         <div class="finding-header">
-            <h4>#{index} - {html.escape(finding.title)}</h4>
+            <h4>#{index} - {html.escape(str(title))}</h4>
             <div class="badges">
                 {''.join(badges)}
                 <span class="expand-icon">▼</span>
@@ -425,9 +587,10 @@ def _render_finding(finding: Finding, index: int, package: str) -> str:
         </div>
         <div class="finding-body">
             {deep_context}
+            {attack_vector_html}
             <div class="finding-section">
                 <div class="section-label">📋 Description</div>
-                <div class="section-content">{html.escape(finding.description)}</div>
+                <div class="section-content">{html.escape(str(description))}</div>
             </div>
             {evidence_html}
             {poc_html}

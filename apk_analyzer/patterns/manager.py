@@ -98,15 +98,33 @@ class PatternManager:
             self._load_from_directory(community_dir, "community")
 
     def _load_crawled(self) -> None:
-        """Load crawled patterns that have been reviewed."""
-        crawled_dir = self.config.data_dir / "crawled"
-        if not crawled_dir.exists():
-            return
+        """Load crawled patterns that have been reviewed.
 
-        # Only load patterns NOT in pending_review
-        for subdir in crawled_dir.iterdir():
-            if subdir.is_dir() and subdir.name != "pending_review":
-                self._load_from_directory(subdir, f"crawled-{subdir.name}")
+        Crawled patterns are always stored in the user's home directory
+        (~/.apkanalyzer/data/crawled/) regardless of where builtin patterns
+        come from. This ensures patterns extracted from threat intel updates
+        are found even when running in development mode.
+        """
+        # Always check both locations for crawled patterns
+        crawled_locations = []
+
+        # 1. Check the configured data directory (project or fallback)
+        project_crawled = self.config.data_dir / "crawled"
+        if project_crawled.exists():
+            crawled_locations.append(project_crawled)
+
+        # 2. Always check user's home directory for crawled patterns
+        # This is where ThreatIntelUpdater saves patterns
+        user_crawled = Path.home() / ".apkanalyzer" / "data" / "crawled"
+        if user_crawled.exists() and user_crawled != project_crawled:
+            crawled_locations.append(user_crawled)
+
+        # Load from all crawled locations
+        for crawled_dir in crawled_locations:
+            # Only load patterns NOT in pending_review
+            for subdir in crawled_dir.iterdir():
+                if subdir.is_dir() and subdir.name != "pending_review":
+                    self._load_from_directory(subdir, f"crawled-{subdir.name}")
 
     def _load_custom(self, custom_dir: Path) -> None:
         """Load user's custom patterns."""

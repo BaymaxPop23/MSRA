@@ -160,7 +160,13 @@ class GenymotionController:
         return True
 
     def install_apk(self, apk_path: str, reinstall: bool = True) -> bool:
-        """Install APK on the connected device."""
+        """Install APK on the connected device.
+
+        Supports:
+        - Single APK files (.apk)
+        - Split APK bundles (.apkm, .xapk)
+        - Directories containing split APKs
+        """
         if not self.current_device:
             print("[!] No device connected")
             return False
@@ -169,14 +175,66 @@ class GenymotionController:
             print(f"[!] APK not found: {apk_path}")
             return False
 
-        cmd = [self.adb_path, "-s", self.current_device.serial, "install"]
-        if reinstall:
-            cmd.append("-r")
-        cmd.append(apk_path)
+        # Check if this is a split APK bundle
+        apk_files = []
+        temp_dir = None
 
-        print(f"[*] Installing APK: {apk_path}")
+        if apk_path.lower().endswith(('.apkm', '.xapk')):
+            # Extract split APK bundle
+            import zipfile
+            import tempfile
+
+            temp_dir = tempfile.mkdtemp(prefix="apk_install_")
+            try:
+                print(f"[*] Extracting split APK bundle: {os.path.basename(apk_path)}")
+                with zipfile.ZipFile(apk_path, 'r') as zf:
+                    for name in zf.namelist():
+                        if name.endswith('.apk'):
+                            extracted = os.path.join(temp_dir, os.path.basename(name))
+                            with zf.open(name) as src, open(extracted, 'wb') as dst:
+                                dst.write(src.read())
+                            apk_files.append(extracted)
+
+                if not apk_files:
+                    print("[!] No APK files found in bundle")
+                    return False
+
+                print(f"[+] Extracted {len(apk_files)} APK files")
+            except Exception as e:
+                print(f"[!] Failed to extract bundle: {e}")
+                if temp_dir:
+                    import shutil
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                return False
+
+        elif os.path.isdir(apk_path):
+            # Directory with split APKs
+            apk_files = [os.path.join(apk_path, f) for f in os.listdir(apk_path) if f.endswith('.apk')]
+            if not apk_files:
+                print("[!] No APK files found in directory")
+                return False
+        else:
+            # Single APK file
+            apk_files = [apk_path]
+
+        # Install using appropriate method
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if len(apk_files) == 1:
+                # Single APK - standard install
+                cmd = [self.adb_path, "-s", self.current_device.serial, "install"]
+                if reinstall:
+                    cmd.append("-r")
+                cmd.append(apk_files[0])
+                print(f"[*] Installing APK: {os.path.basename(apk_files[0])}")
+            else:
+                # Multiple APKs - use install-multiple
+                cmd = [self.adb_path, "-s", self.current_device.serial, "install-multiple"]
+                if reinstall:
+                    cmd.append("-r")
+                cmd.extend(apk_files)
+                print(f"[*] Installing split APKs ({len(apk_files)} files)...")
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
             if "Success" in result.stdout:
                 print("[+] APK installed successfully")
                 return True
@@ -186,6 +244,11 @@ class GenymotionController:
         except subprocess.TimeoutExpired:
             print("[!] Install timeout")
             return False
+        finally:
+            # Cleanup temp directory
+            if temp_dir:
+                import shutil
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
     def uninstall_app(self, package_name: str) -> bool:
         """Uninstall an app from the device."""

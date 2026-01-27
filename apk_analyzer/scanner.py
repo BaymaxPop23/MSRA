@@ -20,6 +20,9 @@ from .exploitability import ExploitabilityValidator, filter_false_positives
 # Reachability analysis for specific PoCs
 from .analysis.reachability import ReachabilityAnalyzer
 
+# Attack vector descriptions
+from .analysis.attack_vectors import get_attack_description
+
 ANDROID_NS = "http://schemas.android.com/apk/res/android"
 
 
@@ -111,7 +114,7 @@ class Scanner:
             print(f"[!] Deep analysis init warning: {e}")
 
     def _enrich_with_reachability(self, findings: List[Finding]) -> List[Finding]:
-        """Enrich findings with specific PoCs from reachability analysis."""
+        """Enrich findings with specific PoCs from reachability analysis and attack descriptions."""
         try:
             analyzer = ReachabilityAnalyzer(self.decompiled_dir)
             reachability_results = analyzer.analyze()
@@ -122,10 +125,11 @@ class Scanner:
                 if result.adb_commands:
                     component_pocs[name] = result
 
-            # Enrich findings with specific PoCs
+            # Enrich findings with specific PoCs and attack descriptions
             for finding in findings:
                 # Try to match finding to a component
                 matched_component = None
+                component_type = None
 
                 # Check evidence file path for component name
                 if finding.evidence and finding.evidence.file_path:
@@ -146,6 +150,18 @@ class Scanner:
                             if comp_from_extra in comp_name or comp_name.endswith(comp_from_extra):
                                 matched_component = comp_name
                                 break
+
+                # Determine component type from finding
+                fid_lower = finding.fid.lower() if finding.fid else ''
+                title_lower = finding.title.lower() if finding.title else ''
+                if 'activity' in fid_lower or 'activity' in title_lower:
+                    component_type = 'activity'
+                elif 'provider' in fid_lower or 'provider' in title_lower:
+                    component_type = 'provider'
+                elif 'receiver' in fid_lower or 'broadcast' in title_lower:
+                    component_type = 'receiver'
+                elif 'service' in fid_lower or 'service' in title_lower:
+                    component_type = 'service'
 
                 # If we found a matching component, use its specific PoCs
                 if matched_component and matched_component in component_pocs:
@@ -172,6 +188,27 @@ class Scanner:
                         if not finding.extra:
                             finding.extra = {}
                         finding.extra['entry_points'] = result.entry_points
+
+                # Get attack vector description for this finding
+                attack_info = get_attack_description(
+                    finding.fid or '',
+                    finding.title or '',
+                    component_type
+                )
+
+                if attack_info and attack_info.get('attack_vector'):
+                    if not finding.extra:
+                        finding.extra = {}
+
+                    # Add attack vector details to finding
+                    finding.extra['attack_vector'] = attack_info['attack_vector']
+                    finding.extra['attack_description'] = attack_info['description']
+                    finding.extra['attack_prerequisites'] = attack_info['prerequisites']
+                    finding.extra['attack_steps'] = attack_info['attack_steps']
+                    finding.extra['attack_impact'] = attack_info['impact']
+                    finding.extra['malicious_apk_code'] = attack_info['malicious_apk_code']
+                    finding.extra['deep_link_exploit'] = attack_info['deep_link_exploit']
+                    finding.extra['mitigation'] = attack_info['mitigation']
 
         except Exception as e:
             print(f"[!] Reachability analysis warning: {e}")

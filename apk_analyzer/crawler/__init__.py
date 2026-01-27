@@ -5,6 +5,7 @@ from .blogs import BlogCrawler, BlogSource, BlogArticle, BLOG_SOURCES
 from .extractor import PatternExtractor, ExtractionResult
 from .cache import CrawlerCache
 from .updater import ThreatIntelUpdater, UpdateConfig, UpdateResult
+from .sources import SourcesManager, CustomSource, PatternApprovalManager
 
 __all__ = [
     "HackerOneCrawler",
@@ -20,4 +21,7 @@ __all__ = [
     "ThreatIntelUpdater",
     "UpdateConfig",
     "UpdateResult",
+    "SourcesManager",
+    "CustomSource",
+    "PatternApprovalManager",
 ]

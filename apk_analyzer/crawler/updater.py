@@ -14,6 +14,7 @@ from .hackerone import HackerOneCrawler, HackerOneConfig
 from .blogs import BlogCrawler, BLOG_SOURCES
 from .extractor import PatternExtractor
 from .cache import CrawlerCache
+from .sources import SourcesManager
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,18 @@ class UpdateConfig:
 
 
 @dataclass
+class SourceStats:
+    """Statistics for a single source."""
+    name: str
+    articles_fetched: int = 0
+    patterns_found: int = 0
+    patterns_added: int = 0
+    patterns_pending: int = 0
+    pattern_titles: List[str] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)
+
+
+@dataclass
 class UpdateResult:
     """Result of a threat intelligence update."""
     success: bool
@@ -51,9 +64,11 @@ class UpdateResult:
     patterns_added: int = 0
     patterns_pending: int = 0
     sources_checked: List[str] = field(default_factory=list)
+    source_stats: Dict[str, SourceStats] = field(default_factory=dict)
     errors: List[str] = field(default_factory=list)
     duration_seconds: float = 0.0
     skipped_reason: Optional[str] = None
+    new_pattern_titles: List[str] = field(default_factory=list)
 
 
 class ThreatIntelUpdater:
@@ -141,6 +156,17 @@ class ThreatIntelUpdater:
                 result.patterns_added += h1_result["added"]
                 result.patterns_pending += h1_result["pending"]
                 result.sources_checked.append("HackerOne")
+                result.new_pattern_titles.extend(h1_result.get("pattern_titles", []))
+
+                # Store source stats
+                result.source_stats["HackerOne"] = SourceStats(
+                    name="HackerOne",
+                    articles_fetched=h1_result.get("articles", 0),
+                    patterns_found=h1_result["found"],
+                    patterns_added=h1_result["added"],
+                    patterns_pending=h1_result["pending"],
+                    pattern_titles=h1_result.get("pattern_titles", [])
+                )
             except Exception as e:
                 error_msg = f"HackerOne fetch failed: {e}"
                 result.errors.append(error_msg)
@@ -155,6 +181,18 @@ class ThreatIntelUpdater:
                 result.patterns_added += blog_result["added"]
                 result.patterns_pending += blog_result["pending"]
                 result.sources_checked.extend(blog_result["sources"])
+                result.new_pattern_titles.extend(blog_result.get("pattern_titles", []))
+
+                # Store per-source stats
+                for source_name, stats in blog_result.get("source_details", {}).items():
+                    result.source_stats[source_name] = SourceStats(
+                        name=source_name,
+                        articles_fetched=stats.get("articles", 0),
+                        patterns_found=stats.get("found", 0),
+                        patterns_added=stats.get("added", 0),
+                        patterns_pending=stats.get("pending", 0),
+                        pattern_titles=stats.get("patterns", [])
+                    )
             except Exception as e:
                 error_msg = f"Blog fetch failed: {e}"
                 result.errors.append(error_msg)
@@ -170,17 +208,33 @@ class ThreatIntelUpdater:
         result.duration_seconds = (datetime.now() - start_time).total_seconds()
 
         if not quiet:
-            print(f"[+] Threat intel update complete:")
-            print(f"    Sources checked: {', '.join(result.sources_checked)}")
-            print(f"    Patterns found: {result.patterns_found}")
-            print(f"    Patterns added: {result.patterns_added}")
-            print(f"    Pending review: {result.patterns_pending}")
+            print()
+            print("=" * 60)
+            print("THREAT INTELLIGENCE UPDATE SUMMARY")
+            print("=" * 60)
+            print(f"  Sources checked:   {len(result.sources_checked)}")
+            print(f"  Patterns found:    {result.patterns_found}")
+            print(f"  Patterns added:    {result.patterns_added}")
+            print(f"  Pending review:    {result.patterns_pending}")
+            print(f"  Duration:          {result.duration_seconds:.1f}s")
+
+            # Show new patterns if any
+            if result.new_pattern_titles:
+                print()
+                print("NEW PATTERNS EXTRACTED:")
+                print("-" * 40)
+                for title in result.new_pattern_titles[:20]:  # Show first 20
+                    print(f"  {title}")
+                if len(result.new_pattern_titles) > 20:
+                    print(f"  ... and {len(result.new_pattern_titles) - 20} more")
+
+            print("=" * 60)
 
         return result
 
-    def _fetch_hackerone(self, quiet: bool) -> Dict[str, int]:
+    def _fetch_hackerone(self, quiet: bool) -> Dict[str, Any]:
         """Fetch patterns from HackerOne by crawling the website."""
-        result = {"found": 0, "added": 0, "pending": 0}
+        result = {"found": 0, "added": 0, "pending": 0, "pattern_titles": [], "articles": 0}
 
         # Configure HackerOne crawler (web crawling, no API needed)
         h1_config = HackerOneConfig(
@@ -206,6 +260,8 @@ class ThreatIntelUpdater:
             use_cache=True
         ))
 
+        result["articles"] = len(reports)
+
         if not quiet:
             print(f"  [+] Found {len(reports)} Android-related reports")
 
@@ -221,22 +277,39 @@ class ThreatIntelUpdater:
                         extraction.confidence >= self.config.auto_approve_threshold):
                         self.extractor.save_pattern(pattern, pending_review=False)
                         result["added"] += 1
+                        result["pattern_titles"].append(f"✓ {pattern.title}")
                     else:
                         self.extractor.save_pattern(pattern, pending_review=True)
                         result["pending"] += 1
+                        result["pattern_titles"].append(f"⏳ {pattern.title}")
 
         return result
 
     def _fetch_blogs(self, quiet: bool) -> Dict[str, Any]:
-        """Fetch patterns from security blogs."""
-        result = {"found": 0, "added": 0, "pending": 0, "sources": []}
+        """Fetch patterns from security blogs (built-in + custom sources)."""
+        result = {"found": 0, "added": 0, "pending": 0, "sources": [], "source_details": {}, "pattern_titles": []}
 
-        crawler = BlogCrawler()
+        # Get all sources including custom ones
+        sources_manager = SourcesManager(self.data_dir)
+        all_sources = sources_manager.get_all_blog_sources()
+
+        crawler = BlogCrawler(sources=all_sources)
 
         if not quiet:
-            print(f"  [*] Fetching security blog articles...")
+            builtin_count = len(BLOG_SOURCES)
+            custom_count = len(all_sources) - builtin_count
+            print(f"  [*] Fetching from {len(all_sources)} sources ({builtin_count} built-in, {custom_count} custom)...")
+            print()
 
-        for source in BLOG_SOURCES:
+        for source in all_sources:
+            source_stats = {
+                "articles": 0,
+                "found": 0,
+                "added": 0,
+                "pending": 0,
+                "patterns": []
+            }
+
             try:
                 articles = list(crawler.crawl_source(
                     source.name,
@@ -244,28 +317,48 @@ class ThreatIntelUpdater:
                     use_cache=True
                 ))
 
+                source_stats["articles"] = len(articles)
                 result["sources"].append(source.name)
 
                 for article in articles:
                     extraction = self.extractor.extract_from_blog(article)
                     if extraction.success:
+                        source_stats["found"] += len(extraction.patterns)
                         result["found"] += len(extraction.patterns)
 
                         for pattern in extraction.patterns:
                             if (self.config.auto_approve_enabled and
                                 extraction.confidence >= self.config.auto_approve_threshold):
                                 self.extractor.save_pattern(pattern, pending_review=False)
+                                source_stats["added"] += 1
                                 result["added"] += 1
+                                source_stats["patterns"].append(f"✓ {pattern.title}")
+                                result["pattern_titles"].append(f"✓ {pattern.title} (from {source.name})")
                             else:
                                 self.extractor.save_pattern(pattern, pending_review=True)
+                                source_stats["pending"] += 1
                                 result["pending"] += 1
+                                source_stats["patterns"].append(f"⏳ {pattern.title}")
+                                result["pattern_titles"].append(f"⏳ {pattern.title} (from {source.name})")
+
+                # Show per-source stats if not quiet
+                if not quiet:
+                    status = "✓" if source_stats["articles"] > 0 else "○"
+                    patterns_info = ""
+                    if source_stats["found"] > 0:
+                        patterns_info = f" → {source_stats['found']} patterns"
+                    print(f"    {status} {source.name}: {source_stats['articles']} articles{patterns_info}")
 
             except Exception as e:
                 if not quiet:
-                    print(f"  [!] Failed to fetch from {source.name}: {e}")
+                    print(f"    ✗ {source.name}: failed ({str(e)[:50]})")
+                source_stats["error"] = str(e)
+
+            result["source_details"][source.name] = source_stats
 
         if not quiet:
-            print(f"  [+] Checked {len(result['sources'])} blog sources")
+            print()
+            print(f"  [+] Checked {len(result['sources'])} sources, found {result['found']} patterns")
 
         return result
 

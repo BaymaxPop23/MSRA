@@ -37,11 +37,18 @@ class BlogSource:
 
 # Pre-configured blog sources
 BLOG_SOURCES = [
+    # Mobile Security Specialists
     BlogSource(
         name="Oversecured",
         base_url="https://blog.oversecured.com",
         feed_url="https://blog.oversecured.com/feed.xml",
-        android_keywords=["android", "apk", "intent", "webview", "activity", "manifest", "mobile"]
+        android_keywords=["android", "apk", "intent", "webview", "activity", "manifest", "mobile", "contentprovider"]
+    ),
+    BlogSource(
+        name="NowSecure",
+        base_url="https://www.nowsecure.com",
+        feed_url="https://www.nowsecure.com/blog/feed/",
+        android_keywords=["android", "mobile", "apk", "security"]
     ),
     BlogSource(
         name="WithSecure Labs",
@@ -49,23 +56,81 @@ BLOG_SOURCES = [
         feed_url="https://labs.withsecure.com/rss",
         android_keywords=["android", "mobile", "apk"]
     ),
+
+    # Major Security Research
     BlogSource(
-        name="NowSecure",
-        base_url="https://www.nowsecure.com",
-        feed_url="https://www.nowsecure.com/blog/feed/",
-        android_keywords=["android", "mobile", "apk", "ios"]
+        name="Google Project Zero",
+        base_url="https://googleprojectzero.blogspot.com",
+        feed_url="https://googleprojectzero.blogspot.com/feeds/posts/default?alt=rss",
+        android_keywords=["android", "chrome", "kernel", "pixel", "samsung", "qualcomm"]
     ),
     BlogSource(
         name="PortSwigger Research",
         base_url="https://portswigger.net",
         feed_url="https://portswigger.net/research/rss",
-        android_keywords=["android", "mobile", "webview"]
+        android_keywords=["android", "mobile", "webview", "deep link"]
+    ),
+
+    # Security Companies
+    BlogSource(
+        name="Checkpoint Research",
+        base_url="https://research.checkpoint.com",
+        feed_url="https://research.checkpoint.com/feed/",
+        android_keywords=["android", "mobile", "apk", "malware", "play store"]
     ),
     BlogSource(
-        name="Google Project Zero",
-        base_url="https://googleprojectzero.blogspot.com",
-        feed_url="https://googleprojectzero.blogspot.com/feeds/posts/default?alt=rss",
-        android_keywords=["android", "chrome", "kernel", "pixel"]
+        name="Zimperium",
+        base_url="https://www.zimperium.com",
+        feed_url="https://www.zimperium.com/blog/feed/",
+        android_keywords=["android", "mobile", "apk", "threat", "vulnerability"]
+    ),
+    BlogSource(
+        name="Lookout Threat Intelligence",
+        base_url="https://www.lookout.com",
+        feed_url="https://www.lookout.com/blog/feed/",
+        android_keywords=["android", "mobile", "surveillance", "spyware", "malware"]
+    ),
+    BlogSource(
+        name="Promon Security",
+        base_url="https://promon.co",
+        feed_url="https://promon.co/feed/",
+        android_keywords=["android", "mobile", "app shielding", "runtime protection"]
+    ),
+
+    # Bug Bounty & Vulnerability Research
+    BlogSource(
+        name="Assetnote Research",
+        base_url="https://blog.assetnote.io",
+        feed_url="https://blog.assetnote.io/rss/",
+        android_keywords=["android", "mobile", "api", "oauth"]
+    ),
+    BlogSource(
+        name="Synack Red Team",
+        base_url="https://www.synack.com",
+        feed_url="https://www.synack.com/blog/feed/",
+        android_keywords=["android", "mobile", "penetration testing"]
+    ),
+
+    # Individual Researchers
+    BlogSource(
+        name="8ksec",
+        base_url="https://8ksec.io",
+        feed_url="https://8ksec.io/feed/",
+        android_keywords=["android", "ios", "mobile", "reverse engineering", "frida"]
+    ),
+
+    # General Security with Android Coverage
+    BlogSource(
+        name="Snyk Security",
+        base_url="https://snyk.io",
+        feed_url="https://snyk.io/blog/feed/",
+        android_keywords=["android", "gradle", "dependency", "supply chain"]
+    ),
+    BlogSource(
+        name="OWASP",
+        base_url="https://owasp.org",
+        feed_url="https://owasp.org/feed.xml",
+        android_keywords=["android", "mobile", "MASTG", "MASVS", "security testing"]
     ),
 ]
 

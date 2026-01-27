@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Tuple
@@ -88,6 +89,14 @@ class Icons:
 
 def print_banner():
     """Print the APK Analyzer banner."""
+    # Get actual pattern count
+    try:
+        manager = PatternManager()
+        manager.load_all()
+        pattern_count = manager.stats.get('enabled', 77)
+    except Exception:
+        pattern_count = 77
+
     banner = f"""
 ╔══════════════════════════════════════════════════════════════╗
 ║                                                              ║
@@ -95,7 +104,7 @@ def print_banner():
 ║                                                              ║
 ║   Android Security Vulnerability Scanner                     ║
 ║   ──────────────────────────────────────                     ║
-║   {Icons.BULLET} 77+ Security Patterns                              ║
+║   {Icons.BULLET} {pattern_count}+ Security Patterns                              ║
 ║   {Icons.BULLET} Deep Analysis Engine                               ║
 ║   {Icons.BULLET} Visual Reports & Graphs                            ║
 ║                                                              ║
@@ -202,8 +211,14 @@ def prompt_yes_no(prompt: str, default: bool = True) -> bool:
         sys.exit(0)
 
 
-def prompt_file(prompt: str, must_exist: bool = True, extension: str = None) -> str:
-    """Prompt for a file path with validation."""
+def prompt_file(prompt: str, must_exist: bool = True, extensions: list = None) -> str:
+    """Prompt for a file path with validation.
+
+    Args:
+        prompt: The prompt text to display
+        must_exist: Whether the file must exist
+        extensions: List of valid extensions (e.g., ['.apk', '.apkm'])
+    """
     print(f"   {Icons.FOLDER} Tab completion enabled for paths")
     while True:
         path = prompt_input(prompt, icon=Icons.FILE)
@@ -218,9 +233,11 @@ def prompt_file(prompt: str, must_exist: bool = True, extension: str = None) -> 
             print_error(f"File not found: {path}")
             continue
 
-        if extension and not path.endswith(extension):
-            print_error(f"File must have {extension} extension")
-            continue
+        if extensions:
+            if not any(path.lower().endswith(ext.lower()) for ext in extensions):
+                ext_list = ', '.join(extensions)
+                print_error(f"File must have one of these extensions: {ext_list}")
+                continue
 
         return path
 
@@ -288,7 +305,7 @@ def interactive_static() -> int:
 
     # APK file
     print(f"   {Icons.FILE} APK Selection")
-    apk_path = prompt_file("Enter path to APK file", must_exist=True, extension=".apk")
+    apk_path = prompt_file("Enter path to APK file", must_exist=True, extensions=[".apk", ".apkm", ".xapk"])
     print_success(f"APK: {os.path.basename(apk_path)}")
 
     # Threat intel update
@@ -364,7 +381,7 @@ def interactive_dynamic() -> int:
             return 1
 
     elif input_mode == "apk":
-        apk_path = prompt_file("Enter path to APK file", must_exist=True, extension=".apk")
+        apk_path = prompt_file("Enter path to APK file", must_exist=True, extensions=[".apk", ".apkm", ".xapk"])
 
     elif input_mode == "findings":
         # Look for recent scan reports
@@ -438,7 +455,7 @@ def interactive_visualize() -> int:
 """)
 
     # APK file
-    apk_path = prompt_file("Enter path to APK file", must_exist=True, extension=".apk")
+    apk_path = prompt_file("Enter path to APK file", must_exist=True, extensions=[".apk", ".apkm", ".xapk"])
     print_success(f"APK: {os.path.basename(apk_path)}")
 
     keep_decompiled = prompt_yes_no("Keep decompiled sources?", default=False)
@@ -492,7 +509,7 @@ def interactive_full_pipeline() -> int:
 
     # APK file
     print(f"   {Icons.FILE} APK Selection")
-    apk_path = prompt_file("Enter path to APK file", must_exist=True, extension=".apk")
+    apk_path = prompt_file("Enter path to APK file", must_exist=True, extensions=[".apk", ".apkm", ".xapk"])
     print_success(f"APK: {os.path.basename(apk_path)}")
 
     # Check for devices
@@ -534,6 +551,39 @@ def interactive_full_pipeline() -> int:
 ║  STEP 1/3: Threat Intelligence Update                        ║
 ╚══════════════════════════════════════════════════════════════╝
 """)
+
+    # Ask about custom sources
+    from .crawler.sources import SourcesManager
+    sources_mgr = SourcesManager()
+    custom_sources = sources_mgr.get_custom_sources()
+
+    print(f"   {Icons.PACKAGE} Current sources: 14 built-in blogs + HackerOne")
+    if custom_sources:
+        print(f"   {Icons.CHECK} Custom sources: {len(custom_sources)}")
+        for src in custom_sources:
+            print(f"      • {src.name}")
+
+    if prompt_yes_no(f"Add custom threat intelligence source?", default=False):
+        print(f"\n   {Icons.INFO} Enter a security blog URL to add as a source")
+        print(f"   {Icons.INFO} Example: https://blog.example.com/security")
+        source_url = prompt_input("Source URL (or press Enter to skip)")
+
+        if source_url:
+            source_name = prompt_input("Source name (optional, will auto-detect)")
+            try:
+                if source_name:
+                    new_source = sources_mgr.add_source(name=source_name, url=source_url)
+                else:
+                    # Auto-detect name from URL
+                    from urllib.parse import urlparse
+                    parsed = urlparse(source_url)
+                    auto_name = parsed.netloc.replace('www.', '').split('.')[0].title()
+                    new_source = sources_mgr.add_source(name=auto_name, url=source_url)
+
+                print_success(f"Added source: {new_source.name}")
+                print(f"      URL: {new_source.url}")
+            except ValueError as e:
+                print_error(f"Could not add source: {e}")
 
     config = UpdateConfig()
     updater = ThreatIntelUpdater(config)
@@ -790,32 +840,119 @@ def _get_reports_dir(package_name: str = None) -> str:
     return str(reports_dir)
 
 
-def _extract_apkm_bundle(apkm_path: str, out_dir: str) -> Optional[str]:
+def _extract_split_apk_bundle(bundle_path: str, out_dir: str) -> Optional[str]:
     """
-    Check if file is an APKM bundle (split APKs from APKMirror) and extract base.apk.
-    Returns path to extracted base.apk, or None if not an APKM bundle.
+    Extract split APK bundles (APKM, XAPK, or similar formats).
+
+    Supports:
+    - APKM: APKMirror format (contains base.apk + split_config.*.apk)
+    - XAPK: APKPure format (contains manifest.json + APKs in various layouts)
+    - Generic split bundles: Any ZIP containing base.apk or *.apk files
+
+    Returns path to merged/extracted APK, or None if not a split bundle.
     """
     import zipfile
+    import json
 
     try:
-        with zipfile.ZipFile(apkm_path, 'r') as zf:
+        with zipfile.ZipFile(bundle_path, 'r') as zf:
             names = zf.namelist()
-            # APKM bundles contain base.apk and split_config.*.apk files
-            if 'base.apk' in names and any('split_config.' in n for n in names):
-                print(f"[+] {Icons.PACKAGE} Detected APKM bundle (split APKs)")
-                print(f"[+] {Icons.ARROW} Extracting base.apk...")
+            apk_files = [n for n in names if n.endswith('.apk')]
 
-                # Extract base.apk
-                extracted_path = os.path.join(out_dir, 'base.apk')
-                with zf.open('base.apk') as src, open(extracted_path, 'wb') as dst:
-                    dst.write(src.read())
+            if not apk_files:
+                return None
 
-                print(f"[+] {Icons.CHECK} Extracted: {extracted_path}")
-                return extracted_path
-    except (zipfile.BadZipFile, Exception):
-        pass
+            # Detect bundle type
+            bundle_type = None
+            base_apk = None
+
+            # Check for XAPK format (has manifest.json)
+            if 'manifest.json' in names:
+                bundle_type = "XAPK"
+                try:
+                    manifest_data = json.loads(zf.read('manifest.json'))
+                    print(f"[+] {Icons.PACKAGE} Detected XAPK bundle")
+                    if 'package_name' in manifest_data:
+                        print(f"    Package: {manifest_data['package_name']}")
+                    if 'version_name' in manifest_data:
+                        print(f"    Version: {manifest_data['version_name']}")
+                except:
+                    pass
+
+            # Check for APKM format (base.apk + split_config.*.apk)
+            elif 'base.apk' in apk_files:
+                if any('split_config.' in n or 'split_' in n for n in apk_files):
+                    bundle_type = "APKM"
+                    print(f"[+] {Icons.PACKAGE} Detected APKM bundle (split APKs)")
+                else:
+                    bundle_type = "APKM"
+                    print(f"[+] {Icons.PACKAGE} Detected APK bundle")
+
+            if not bundle_type:
+                # Check if it's just a ZIP with APKs
+                if len(apk_files) >= 1:
+                    bundle_type = "Generic"
+                    print(f"[+] {Icons.PACKAGE} Detected APK archive ({len(apk_files)} APK files)")
+                else:
+                    return None
+
+            # List split APKs
+            split_apks = [n for n in apk_files if n != 'base.apk' and 'split' in n.lower()]
+            if split_apks:
+                print(f"[+] {Icons.ARROW} Split APKs found:")
+                for split in split_apks[:5]:  # Show first 5
+                    print(f"    - {split}")
+                if len(split_apks) > 5:
+                    print(f"    ... and {len(split_apks) - 5} more")
+
+            # Find the base APK to extract
+            if 'base.apk' in apk_files:
+                base_apk = 'base.apk'
+            else:
+                # Look for main APK in common locations
+                for candidate in apk_files:
+                    # Skip split configs
+                    if 'split_config' not in candidate and 'split_' not in candidate.lower():
+                        base_apk = candidate
+                        break
+                # If no suitable APK found, use the first one
+                if not base_apk:
+                    base_apk = apk_files[0]
+
+            print(f"[+] {Icons.ARROW} Extracting {base_apk}...")
+
+            # Extract base APK
+            extracted_path = os.path.join(out_dir, 'base.apk')
+            with zf.open(base_apk) as src, open(extracted_path, 'wb') as dst:
+                dst.write(src.read())
+
+            print(f"[+] {Icons.CHECK} Extracted: {extracted_path}")
+
+            # Also extract all APKs for comprehensive analysis
+            apks_dir = os.path.join(out_dir, 'split_apks')
+            os.makedirs(apks_dir, exist_ok=True)
+
+            for apk in apk_files:
+                if apk != base_apk:
+                    apk_out = os.path.join(apks_dir, os.path.basename(apk))
+                    with zf.open(apk) as src, open(apk_out, 'wb') as dst:
+                        dst.write(src.read())
+
+            if len(apk_files) > 1:
+                print(f"[+] {Icons.FOLDER} All APKs extracted to: {apks_dir}")
+
+            return extracted_path
+
+    except zipfile.BadZipFile:
+        print(f"[!] {Icons.WARNING} File is not a valid ZIP archive")
+    except Exception as e:
+        print(f"[!] {Icons.WARNING} Error extracting bundle: {e}")
 
     return None
+
+
+# Alias for backward compatibility
+_extract_apkm_bundle = _extract_split_apk_bundle
 
 
 def _decompile(apk_path: str, out_dir: str, jadx_path: str) -> None:
@@ -886,18 +1023,7 @@ def cmd_scan(args) -> int:
     print(f"[+] Vulnerabilities found: {len(findings)}")
 
     # Generate reports in the package-specific reports directory
-    html_path = os.path.join(out_dir, "report.html")
-    metadata = {
-        "title": "APK Analyzer Security Report",
-        "package": package_name,
-        "apk": os.path.basename(apk_path),
-        "scan_time": datetime.now().isoformat(),
-        "patterns_loaded": scanner.pattern_stats.get('total', 0),
-    }
-    generate_html_report(findings, html_path, metadata)
-    print(f"[+] {Icons.FILE} HTML report: {html_path}")
-
-    # Export findings to JSON for dynamic analysis
+    # Build findings data for JSON export
     findings_json_path = os.path.join(out_dir, "findings.json")
     findings_data = []
     for f in findings:
@@ -927,19 +1053,45 @@ def cmd_scan(args) -> int:
             'deep_links': extra_data.get('deep_links', []),
             'attack_scenarios': extra_data.get('attack_scenarios', []),
             'entry_points': extra_data.get('entry_points', []),
+            # Attack vector details (how attackers can exploit this)
+            'attack_vector': extra_data.get('attack_vector'),
+            'attack_description': extra_data.get('attack_description'),
+            'attack_prerequisites': extra_data.get('attack_prerequisites', []),
+            'attack_steps': extra_data.get('attack_steps', []),
+            'attack_impact': extra_data.get('attack_impact', []),
+            'malicious_apk_code': extra_data.get('malicious_apk_code'),
+            'deep_link_exploit': extra_data.get('deep_link_exploit'),
+            'mitigation': extra_data.get('mitigation'),
             'extra': extra_data,
         }
         findings_data.append(finding_dict)
 
+    scan_time = datetime.now().isoformat()
+
+    # Build JSON data (used for both report embedding and dynamic analysis)
+    json_data = {
+        'package': package_name,
+        'apk': os.path.basename(apk_path),
+        'scan_time': scan_time,
+        'total_findings': len(findings),
+        'findings': findings_data
+    }
+
+    # Save JSON for dynamic analysis pipeline
     with open(findings_json_path, 'w') as jf:
-        json.dump({
-            'package': package_name,
-            'apk': os.path.basename(apk_path),
-            'scan_time': metadata['scan_time'],
-            'total_findings': len(findings),
-            'findings': findings_data
-        }, jf, indent=2)
-    print(f"[+] {Icons.FILE} Findings JSON: {findings_json_path}")
+        json.dump(json_data, jf, indent=2)
+
+    # Generate HTML report with embedded JSON
+    html_path = os.path.join(out_dir, "report.html")
+    metadata = {
+        "title": "APK Analyzer Security Report",
+        "package": package_name,
+        "apk": os.path.basename(apk_path),
+        "scan_time": scan_time,
+        "patterns_loaded": scanner.pattern_stats.get('total', 0),
+    }
+    generate_html_report(findings, html_path, metadata, json_data=json_data)
+    print(f"[+] {Icons.FILE} Report: {html_path}")
 
     pdf_path = os.path.join(out_dir, "report.pdf")
     pdf_rendered = render_pdf_from_html(html_path, pdf_path)
@@ -1214,11 +1366,29 @@ def cmd_dynamic(args) -> int:
         return 2
 
     apk_path = None
+    original_apk_path = None  # Keep track of original for display
+    temp_extract_dir = None   # Track temp dir for cleanup
+
     if args.apk:
         apk_path = os.path.abspath(args.apk)
+        original_apk_path = apk_path
         if not os.path.exists(apk_path):
             print(f"APK not found: {apk_path}", file=sys.stderr)
             return 2
+
+        # Handle split APK bundles (.apkm, .xapk)
+        if apk_path.lower().endswith(('.apkm', '.xapk')):
+            temp_extract_dir = tempfile.mkdtemp(prefix="apk_dynamic_")
+            extracted_apk = _extract_split_apk_bundle(apk_path, temp_extract_dir)
+            if extracted_apk:
+                # For installation, we'll use the original bundle path
+                # The install_apk method in genymotion.py handles extraction
+                print(f"[+] Bundle will be installed with all split APKs")
+            else:
+                print(f"[!] Failed to process APK bundle", file=sys.stderr)
+                if temp_extract_dir:
+                    shutil.rmtree(temp_extract_dir, ignore_errors=True)
+                return 2
 
     out_dir = os.path.abspath(args.out)
     _ensure_dir(out_dir)
@@ -1268,8 +1438,17 @@ def cmd_dynamic(args) -> int:
             decompiled_dir = os.path.join(out_dir, "decompiled")
             _ensure_dir(decompiled_dir)
 
+            # For APKM/XAPK bundles, extract base.apk for decompilation
+            decompile_apk_path = apk_path
+            if apk_path.lower().endswith(('.apkm', '.xapk')):
+                if temp_extract_dir:
+                    base_apk = os.path.join(temp_extract_dir, 'base.apk')
+                    if os.path.exists(base_apk):
+                        decompile_apk_path = base_apk
+                        print(f"[+] Using extracted base.apk for decompilation")
+
             print("[+] Decompiling APK with jadx...")
-            _decompile(apk_path, decompiled_dir, jadx_path)
+            _decompile(decompile_apk_path, decompiled_dir, jadx_path)
 
             pattern_config = PatternConfig()
             scanner = Scanner(decompiled_dir, adb_path=args.adb_path, pattern_config=pattern_config)
@@ -1295,9 +1474,16 @@ def cmd_dynamic(args) -> int:
     if not package_name and apk_path:
         print("\n[+] Extracting package name from APK...")
         try:
+            # For APKM/XAPK bundles, use extracted base.apk
+            aapt_apk_path = apk_path
+            if apk_path.lower().endswith(('.apkm', '.xapk')) and temp_extract_dir:
+                base_apk = os.path.join(temp_extract_dir, 'base.apk')
+                if os.path.exists(base_apk):
+                    aapt_apk_path = base_apk
+
             # Use aapt if available for accurate parsing
             result = subprocess.run(
-                ["aapt", "dump", "badging", apk_path],
+                ["aapt", "dump", "badging", aapt_apk_path],
                 capture_output=True, text=True, timeout=30
             )
             for line in result.stdout.split('\n'):
@@ -1334,7 +1520,8 @@ def cmd_dynamic(args) -> int:
     # Setup (install app, start monitoring)
     print("\n[+] Setting up dynamic analysis...")
     if apk_path:
-        print(f"[+] Will install APK: {os.path.basename(apk_path)}")
+        display_name = os.path.basename(original_apk_path or apk_path)
+        print(f"[+] Will install APK: {display_name}")
     if not executor.setup():
         print("[!] Setup failed")
         return 1
@@ -1414,7 +1601,7 @@ def cmd_dynamic(args) -> int:
         metadata = {
             "title": "APK Analyzer - Combined Security Report",
             "package": package_name,
-            "apk": os.path.basename(apk_path) if apk_path else "N/A",
+            "apk": os.path.basename(original_apk_path or apk_path) if apk_path else "N/A",
             "scan_time": datetime.now().isoformat(),
             "dynamic_results": {
                 "confirmed": len(confirmed),
@@ -1427,6 +1614,10 @@ def cmd_dynamic(args) -> int:
         }
         generate_html_report(findings, html_path, metadata)
         print(f"[+] Combined HTML report: {html_path}")
+
+    # Cleanup temp extraction directory
+    if temp_extract_dir and os.path.exists(temp_extract_dir):
+        shutil.rmtree(temp_extract_dir, ignore_errors=True)
 
     return 0
 
@@ -1453,6 +1644,28 @@ def cmd_dynamic_list_devices(args) -> int:
 
 def cmd_update(args) -> int:
     """Update threat intelligence feeds by crawling security sources."""
+    from .crawler.blogs import BLOG_SOURCES
+
+    # List sources option
+    if args.list_sources:
+        print("\n" + "=" * 60)
+        print("THREAT INTELLIGENCE SOURCES")
+        print("=" * 60)
+
+        print("\n[HackerOne]")
+        print("  Bug bounty reports with Android vulnerabilities")
+        print("  URL: https://hackerone.com/hacktivity")
+
+        print(f"\n[Security Blogs] ({len(BLOG_SOURCES)} sources)")
+        for source in BLOG_SOURCES:
+            print(f"  • {source.name}")
+            print(f"    {source.base_url}")
+
+        print("\n" + "=" * 60)
+        print(f"Total: {len(BLOG_SOURCES) + 1} sources configured")
+        print("=" * 60)
+        return 0
+
     config = UpdateConfig(
         max_hackerone_reports=args.max_reports,
         max_blog_articles_per_source=args.max_articles,
@@ -1469,6 +1682,8 @@ def cmd_update(args) -> int:
         print(f"Last update: {stats['last_update'] or 'Never'}")
         print(f"Total updates: {stats['update_count']}")
         print(f"Patterns pending review: {stats['pending_patterns']}")
+        print(f"\nConfigured sources: {len(BLOG_SOURCES) + 1}")
+        print("  Run 'apk-analyzer update --list-sources' to see all sources")
         return 0
 
     result = updater.update(force=args.force)
@@ -1479,6 +1694,132 @@ def cmd_update(args) -> int:
             print(f"    - {error}")
 
     return 0 if result.success else 1
+
+
+def cmd_sources(args) -> int:
+    """Manage threat intelligence sources."""
+    from .crawler.sources import SourcesManager, PatternApprovalManager
+    from .crawler.blogs import BLOG_SOURCES
+
+    sources_mgr = SourcesManager()
+    approval_mgr = PatternApprovalManager()
+
+    # Add source
+    if args.add:
+        try:
+            # Parse name and URL from add argument
+            if '=' in args.add:
+                name, url = args.add.split('=', 1)
+            else:
+                url = args.add
+                # Extract name from URL
+                from urllib.parse import urlparse
+                parsed = urlparse(url)
+                name = parsed.netloc.replace('www.', '').split('.')[0].title()
+
+            # Get optional keywords
+            keywords = args.keywords.split(',') if args.keywords else None
+
+            source = sources_mgr.add_source(
+                name=name,
+                url=url,
+                feed_url=args.feed_url,
+                keywords=keywords
+            )
+            print(f"[+] Added source: {source.name}")
+            print(f"    URL: {source.url}")
+            print(f"    Feed: {source.feed_url or 'Auto-detect'}")
+            print(f"    Keywords: {', '.join(source.keywords)}")
+            return 0
+        except ValueError as e:
+            print(f"[!] Error: {e}")
+            return 1
+
+    # Remove source
+    if args.remove:
+        if sources_mgr.remove_source(args.remove):
+            print(f"[+] Removed source: {args.remove}")
+            return 0
+        else:
+            print(f"[!] Source not found: {args.remove}")
+            return 1
+
+    # List sources
+    if args.list or (not args.pending and not args.approve and not args.approve_all):
+        print("\n" + "=" * 60)
+        print("THREAT INTELLIGENCE SOURCES")
+        print("=" * 60)
+
+        print(f"\n[Built-in Sources] ({len(BLOG_SOURCES)} sources)")
+        for source in BLOG_SOURCES:
+            print(f"  • {source.name}")
+            print(f"    {source.base_url}")
+
+        custom = sources_mgr.get_custom_sources()
+        if custom:
+            print(f"\n[Custom Sources] ({len(custom)} sources)")
+            for source in custom:
+                status = "✓" if source.enabled else "○"
+                print(f"  {status} {source.name}")
+                print(f"    {source.url}")
+                if source.patterns_extracted > 0:
+                    print(f"    Patterns extracted: {source.patterns_extracted}")
+
+        print("\n" + "-" * 60)
+        stats = approval_mgr.get_stats()
+        print(f"Patterns: {stats['approved']} approved, {stats['pending']} pending review")
+        print("=" * 60)
+        return 0
+
+    # Show pending patterns
+    if args.pending:
+        pending = approval_mgr.get_pending_patterns()
+        if not pending:
+            print("[+] No patterns pending review")
+            return 0
+
+        print("\n" + "=" * 60)
+        print(f"PATTERNS PENDING REVIEW ({len(pending)})")
+        print("=" * 60)
+
+        for i, pattern in enumerate(pending, 1):
+            severity = pattern.get('severity', 'unknown')
+            title = pattern.get('title', 'Unknown')
+            source_url = pattern.get('metadata', {}).get('source', {}).get('url', 'Unknown')
+            pattern_id = pattern.get('id', 'unknown')
+
+            print(f"\n[{i}] {title}")
+            print(f"    ID: {pattern_id}")
+            print(f"    Severity: {severity}")
+            print(f"    Source: {source_url}")
+            if pattern.get('description'):
+                desc = pattern['description'][:100] + '...' if len(pattern.get('description', '')) > 100 else pattern.get('description', '')
+                print(f"    Description: {desc}")
+
+        print("\n" + "-" * 60)
+        print("To approve: apk-analyzer sources --approve <pattern-id>")
+        print("To approve all: apk-analyzer sources --approve-all")
+        print("=" * 60)
+        return 0
+
+    # Approve pattern
+    if args.approve:
+        if approval_mgr.approve_pattern(args.approve):
+            print(f"[+] Approved pattern: {args.approve}")
+            print("[+] Pattern will be used in future scans")
+            return 0
+        else:
+            print(f"[!] Pattern not found: {args.approve}")
+            return 1
+
+    # Approve all patterns
+    if args.approve_all:
+        count = approval_mgr.approve_all()
+        print(f"[+] Approved {count} patterns")
+        print("[+] Patterns will be used in future scans")
+        return 0
+
+    return 0
 
 
 def cmd_visualize(args) -> int:
@@ -1714,11 +2055,24 @@ Examples:
     update_parser = subparsers.add_parser("update", help="Update threat intelligence feeds")
     update_parser.add_argument("--force", action="store_true", help="Force update even if recently updated")
     update_parser.add_argument("--stats", action="store_true", help="Show update statistics")
+    update_parser.add_argument("--list-sources", action="store_true", help="List all threat intelligence sources")
     update_parser.add_argument("--max-reports", type=int, default=30, help="Max HackerOne reports to fetch")
     update_parser.add_argument("--max-articles", type=int, default=10, help="Max blog articles per source")
     update_parser.add_argument("--no-hackerone", action="store_true", help="Skip HackerOne feed")
     update_parser.add_argument("--no-blogs", action="store_true", help="Skip security blog feeds")
     update_parser.set_defaults(func=cmd_update)
+
+    # Sources management command
+    sources_parser = subparsers.add_parser("sources", help="Manage threat intelligence sources and patterns")
+    sources_parser.add_argument("--list", action="store_true", help="List all sources (default)")
+    sources_parser.add_argument("--add", metavar="NAME=URL", help="Add custom source (e.g., 'MyBlog=https://blog.example.com')")
+    sources_parser.add_argument("--remove", metavar="NAME", help="Remove a custom source")
+    sources_parser.add_argument("--feed-url", help="RSS/Atom feed URL for custom source")
+    sources_parser.add_argument("--keywords", help="Comma-separated keywords for filtering (default: android,mobile,apk)")
+    sources_parser.add_argument("--pending", action="store_true", help="Show patterns pending review")
+    sources_parser.add_argument("--approve", metavar="PATTERN_ID", help="Approve a pending pattern")
+    sources_parser.add_argument("--approve-all", action="store_true", help="Approve all pending patterns")
+    sources_parser.set_defaults(func=cmd_sources)
 
     # Visualize command
     viz_parser = subparsers.add_parser("visualize", help="Visualize application structure")
