@@ -266,10 +266,10 @@ def interactive_mode() -> int:
 
     operation = prompt_choice("Select operation:", [
         ("pipeline", "Full Pipeline - Threat Intel → Static → Dynamic (Recommended)"),
-        ("threat_intel", "1. Threat Intelligence - Update vulnerability patterns"),
-        ("static", "2. Static Analysis - Scan APK for vulnerabilities"),
-        ("dynamic", "3. Dynamic Analysis - Test vulnerabilities on device"),
-        ("visualize", "4. Visualization - Generate app structure diagrams"),
+        ("threat_intel", "Threat Intelligence - Update vulnerability patterns"),
+        ("static", "Static Analysis - Scan APK for vulnerabilities"),
+        ("dynamic", "Dynamic Analysis - Test vulnerabilities on device"),
+        ("visualize", "Visualization - Generate app structure diagrams"),
         ("patterns", "Pattern Management - List/validate patterns"),
     ])
 
