@@ -16,6 +16,7 @@ from .scanner import Scanner
 from .patterns import PatternManager, PatternConfig
 from .utils import iter_source_files
 from .dynamic import GenymotionController, DynamicTestExecutor, AppMonitor, generate_dynamic_report
+from .dynamic.executor import EnhancedDynamicExecutor, create_executor
 from .crawler import ThreatIntelUpdater, UpdateConfig
 from .visualizer import AppStructureAnalyzer, VisualizationRenderer, VisualizationConfig
 
@@ -1338,6 +1339,10 @@ def cmd_crawl_review(args) -> int:
 
 def cmd_dynamic(args) -> int:
     """Run dynamic analysis on APK using Genymotion/emulator."""
+    # Check if enhanced mode is requested
+    if getattr(args, 'enhanced', False):
+        return cmd_dynamic_enhanced(args)
+
     # Initialize controller
     controller = GenymotionController(adb_path=args.adb_path)
 
@@ -1618,6 +1623,217 @@ def cmd_dynamic(args) -> int:
     # Cleanup temp extraction directory
     if temp_extract_dir and os.path.exists(temp_extract_dir):
         shutil.rmtree(temp_extract_dir, ignore_errors=True)
+
+    return 0
+
+
+def cmd_dynamic_enhanced(args) -> int:
+    """Run enhanced dynamic analysis with Frida, traffic capture, and verification."""
+    from .dynamic import (
+        DynamicConfig, AnalysisMode, FridaConfig, ProxyConfig,
+        create_device, EnhancedDynamicExecutor,
+        is_frida_available, is_mitmproxy_available
+    )
+
+    # Handle list-devices first
+    if getattr(args, 'list_devices', False):
+        controller = GenymotionController(adb_path=args.adb_path)
+        devices = controller.list_devices()
+        if not devices:
+            print("No devices found. Start Genymotion or connect a device.")
+            return 1
+        print(f"\nAvailable devices ({len(devices)}):\n")
+        print(f"{'Serial':<25} {'Model':<20} {'State':<10} {'Type':<15} {'API':<5}")
+        print("-" * 80)
+        for d in devices:
+            dtype = "Genymotion" if d.is_genymotion else ("Emulator" if d.is_emulator else "Physical")
+            api = str(d.api_level) if d.api_level else "?"
+            print(f"{d.serial:<25} {d.model:<20} {d.state:<10} {dtype:<15} {api:<5}")
+        return 0
+
+    # Validate args
+    if not args.apk and not args.package:
+        print("APK path or --package name is required for dynamic analysis.", file=sys.stderr)
+        return 2
+
+    apk_path = None
+    if args.apk:
+        apk_path = os.path.abspath(args.apk)
+        if not os.path.exists(apk_path):
+            print(f"APK not found: {apk_path}", file=sys.stderr)
+            return 2
+
+    out_dir = os.path.abspath(args.out)
+    _ensure_dir(out_dir)
+
+    # Parse analysis mode
+    mode_map = {
+        "passive": AnalysisMode.PASSIVE,
+        "active": AnalysisMode.ACTIVE,
+        "aggressive": AnalysisMode.AGGRESSIVE,
+    }
+    mode = mode_map.get(args.mode, AnalysisMode.ACTIVE)
+
+    # Create configuration
+    config = DynamicConfig(
+        mode=mode,
+        use_frida=not getattr(args, 'no_frida', False),
+        use_proxy=not getattr(args, 'no_traffic', False),
+        proxy=ProxyConfig(port=getattr(args, 'proxy_port', 8080)),
+    )
+
+    # Show capabilities
+    print(f"\n{Icons.GEAR} Enhanced Dynamic Analysis Configuration")
+    print("=" * 50)
+    print(f"Mode: {mode.value}")
+    print(f"Frida: {'Enabled' if config.use_frida and is_frida_available() else 'Disabled'}")
+    print(f"Traffic Capture: {'Enabled' if config.use_proxy and is_mitmproxy_available() else 'Disabled'}")
+    print(f"Proxy Port: {config.proxy.port}")
+    print("=" * 50)
+
+    # Create device
+    print(f"\n[+] Connecting to device...")
+    from .dynamic import DeviceType
+    use_uiautomator = not getattr(args, 'no_ui_automation', False)
+    device_type = DeviceType.AUTO if use_uiautomator else DeviceType.ADB
+    device = create_device(
+        serial=args.device,
+        device_type=device_type
+    )
+
+    if not device or not device.connect(args.device):
+        print("[!] Failed to connect to device")
+        return 1
+
+    device_info = device.get_device_info()
+    if device_info:
+        print(f"[+] Connected: {device_info.model} (API {device_info.api_level})")
+
+    # Create enhanced executor
+    print(f"\n[+] Initializing enhanced executor...")
+    executor = EnhancedDynamicExecutor(
+        device=device,
+        config=config,
+        output_dir=out_dir,
+    )
+
+    # Show capabilities
+    caps = executor.get_capabilities()
+    print(f"[+] Capabilities:")
+    print(f"    Device: {'Connected' if caps['device_connected'] else 'Not connected'}")
+    print(f"    Frida: {'Available' if caps['frida_available'] else 'Not available'}")
+    print(f"    Traffic Capture: {'Available' if caps['proxy_available'] else 'Not available'}")
+    print(f"    UI Automation: {'Available' if caps['ui_automation'] else 'Basic ADB only'}")
+
+    # Check if Frida server is running on device
+    if config.use_frida and is_frida_available() and not caps['frida_available']:
+        print(f"\n{Icons.WARNING}Frida server not detected on device. To enable Frida:")
+        print(f"    1. Download frida-server for your device architecture")
+        print(f"    2. Push to device: adb push frida-server /data/local/tmp/")
+        print(f"    3. Make executable: adb shell chmod 755 /data/local/tmp/frida-server")
+        print(f"    4. Start server: adb shell /data/local/tmp/frida-server &")
+        print(f"    Continuing without Frida instrumentation...\n")
+
+    # Get package name
+    package_name = args.package
+    if not package_name and apk_path:
+        # Extract from APK
+        try:
+            result = subprocess.run(
+                ["aapt", "dump", "badging", apk_path],
+                capture_output=True, text=True, timeout=30
+            )
+            for line in result.stdout.split('\n'):
+                if line.startswith("package:"):
+                    for part in line.split():
+                        if part.startswith("name='"):
+                            package_name = part.split("'")[1]
+                            break
+                    break
+        except Exception as e:
+            print(f"[!] Could not extract package name: {e}")
+
+    if not package_name:
+        print("[!] Package name is required. Use --package.")
+        return 1
+
+    print(f"[+] Package: {package_name}")
+
+    # Setup - this will launch app and attach Frida
+    print(f"\n[+] Setting up for {package_name}...")
+    print(f"    Launching app and attaching instrumentation...")
+    if not executor.setup(package_name, apk_path):
+        print("[!] Setup failed")
+        executor.cleanup()
+        return 1
+    print(f"[+] Setup complete")
+
+    # Load findings
+    findings = []
+    findings_json_path = os.path.join(out_dir, "findings.json")
+    if os.path.exists(findings_json_path):
+        print(f"\n[+] Loading static analysis findings...")
+        try:
+            with open(findings_json_path, 'r') as f:
+                findings_data = json.load(f)
+            findings = findings_data.get('findings', [])
+            print(f"[+] Loaded {len(findings)} findings")
+        except Exception as e:
+            print(f"[!] Could not load findings: {e}")
+
+    # Run verification
+    if findings:
+        print(f"\n[+] Verifying {len(findings)} findings...")
+        results = executor.verify_findings(findings, timeout=args.timeout)
+    else:
+        print(f"\n[+] No static findings - running basic analysis...")
+        # Create some basic findings from app exploration
+        results = []
+
+    # Print summary
+    summary = executor.get_summary()
+    print("\n" + "=" * 60)
+    print(f"{Icons.CHART} ENHANCED DYNAMIC ANALYSIS RESULTS")
+    print("=" * 60)
+    print(f"Package: {summary['package']}")
+    print(f"\nFindings Verified: {summary['total_findings']}")
+    print(f"  Confirmed: {summary['verified']} {Icons.CHECK}")
+    print(f"  Likely: {summary['likely']}")
+    print(f"  Not Vulnerable: {summary['not_vulnerable']}")
+    print(f"  Inconclusive: {summary['inconclusive']}")
+    print(f"  Errors: {summary['errors']}")
+
+    # Show traffic analysis if available
+    if summary.get('traffic'):
+        traffic = summary['traffic']
+        print(f"\n{Icons.SEARCH} Traffic Analysis:")
+        print(f"  Total Flows: {traffic['total_flows']}")
+        print(f"  Data Leak Alerts: {len(traffic['leak_alerts'])}")
+        if traffic['leak_alerts']:
+            print(f"  Leak Types:")
+            leak_types = {}
+            for alert in traffic['leak_alerts']:
+                cat = alert.get('category', 'unknown')
+                leak_types[cat] = leak_types.get(cat, 0) + 1
+            for lt, count in sorted(leak_types.items(), key=lambda x: -x[1]):
+                print(f"    - {lt}: {count}")
+
+    print("=" * 60)
+
+    # Export results
+    results_path = os.path.join(out_dir, "enhanced_results.json")
+    executor.export_results(results_path)
+    print(f"\n[+] Results saved: {results_path}")
+
+    # Generate HTML report
+    html_report_path = os.path.join(out_dir, "enhanced_report.html")
+    with open(results_path, 'r') as f:
+        report_data = json.load(f)
+    generate_dynamic_report(report_data, html_report_path)
+    print(f"[+] HTML report: {html_report_path}")
+
+    # Cleanup
+    executor.cleanup()
 
     return 0
 
@@ -2049,6 +2265,21 @@ Examples:
     dynamic_parser.add_argument("--skip-static", action="store_true", help="Skip static analysis")
     dynamic_parser.add_argument("--timeout", type=int, default=300, help="Test timeout in seconds")
     dynamic_parser.add_argument("--list-devices", action="store_true", help="List available devices")
+    # Enhanced dynamic analysis options
+    dynamic_parser.add_argument("--enhanced", action="store_true",
+                                help="Use enhanced executor with Frida, traffic capture, and verification")
+    dynamic_parser.add_argument("--mode", choices=["passive", "active", "aggressive"], default="active",
+                                help="Analysis mode: passive (observe), active (test), aggressive (bypass)")
+    dynamic_parser.add_argument("--no-frida", action="store_true",
+                                help="Disable Frida instrumentation")
+    dynamic_parser.add_argument("--no-traffic", action="store_true",
+                                help="Disable traffic interception")
+    dynamic_parser.add_argument("--no-ui-automation", action="store_true",
+                                help="Use basic ADB only (no uiautomator2)")
+    dynamic_parser.add_argument("--proxy-port", type=int, default=8080,
+                                help="Proxy port for traffic interception")
+    dynamic_parser.add_argument("--explore-depth", type=int, default=5,
+                                help="UI exploration depth for discovering attack surfaces")
     dynamic_parser.set_defaults(func=cmd_dynamic)
 
     # Update command

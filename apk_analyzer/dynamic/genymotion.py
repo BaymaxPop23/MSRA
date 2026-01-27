@@ -3,6 +3,9 @@ Genymotion Emulator Controller
 
 Handles connection and control of Genymotion emulators for dynamic analysis.
 Also supports standard Android emulators and physical devices via ADB.
+
+This module provides backwards compatibility while integrating with the new
+DeviceInterface abstraction layer.
 """
 
 import subprocess
@@ -10,8 +13,11 @@ import time
 import os
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, TYPE_CHECKING
 from pathlib import Path
+
+if TYPE_CHECKING:
+    from .device.base import DeviceInterface
 
 
 @dataclass
@@ -549,3 +555,335 @@ class GenymotionController:
             return True
         except:
             return False
+
+    def to_device_interface(self) -> 'DeviceInterface':
+        """Convert to DeviceInterface for use with new dynamic analysis modules.
+
+        Returns:
+            DeviceInterface adapter wrapping this controller
+        """
+        return GenymotionDeviceAdapter(self)
+
+
+class GenymotionDeviceAdapter:
+    """Adapter to make GenymotionController compatible with DeviceInterface.
+
+    This allows the legacy controller to be used with the new verification
+    and automation modules while maintaining backwards compatibility.
+    """
+
+    def __init__(self, controller: GenymotionController):
+        self._controller = controller
+
+    def is_connected(self) -> bool:
+        return self._controller.current_device is not None
+
+    def connect(self, serial: Optional[str] = None) -> bool:
+        return self._controller.connect(serial)
+
+    def get_device_info(self):
+        """Get device information."""
+        from .device.base import DeviceInfo
+
+        if not self._controller.current_device:
+            return None
+
+        dev = self._controller.current_device
+        return DeviceInfo(
+            serial=dev.serial,
+            model=dev.model,
+            manufacturer="Unknown",
+            android_version="Unknown",
+            api_level=dev.api_level or 0,
+            is_emulator=dev.is_emulator,
+            is_rooted=False,  # Would need root check
+        )
+
+    def execute_shell(self, command: str, timeout: int = 30) -> Tuple[bool, str]:
+        return self._controller.execute_command(command, timeout)
+
+    def install_app(self, apk_path: str, reinstall: bool = True) -> bool:
+        return self._controller.install_apk(apk_path, reinstall)
+
+    def uninstall_app(self, package: str) -> bool:
+        return self._controller.uninstall_app(package)
+
+    def launch_app(self, package: str, activity: Optional[str] = None) -> bool:
+        return self._controller.launch_app(package, activity)
+
+    def stop_app(self, package: str) -> bool:
+        return self._controller.stop_app(package)
+
+    def is_app_running(self, package: str) -> bool:
+        return self._controller.is_app_running(package)
+
+    def take_screenshot(self, output_path: str) -> bool:
+        return self._controller.take_screenshot(output_path)
+
+    def press_back(self) -> bool:
+        return self._controller.press_back()
+
+    def press_home(self) -> bool:
+        return self._controller.press_home()
+
+    def input_text(self, text: str) -> bool:
+        return self._controller.input_text(text)
+
+    def tap(self, x: int, y: int) -> bool:
+        return self._controller.tap(x, y)
+
+    def set_proxy(self, host: str, port: int) -> bool:
+        return self._controller.set_proxy(host, port)
+
+    def clear_proxy(self) -> bool:
+        return self._controller.clear_proxy()
+
+    def push_file(self, local_path: str, remote_path: str) -> bool:
+        """Push file to device."""
+        if not self._controller.current_device:
+            return False
+
+        try:
+            result = subprocess.run(
+                [self._controller.adb_path, "-s", self._controller.current_device.serial,
+                 "push", local_path, remote_path],
+                capture_output=True, timeout=60
+            )
+            return result.returncode == 0
+        except:
+            return False
+
+    def pull_file(self, remote_path: str, local_path: str) -> bool:
+        """Pull file from device."""
+        if not self._controller.current_device:
+            return False
+
+        try:
+            result = subprocess.run(
+                [self._controller.adb_path, "-s", self._controller.current_device.serial,
+                 "pull", remote_path, local_path],
+                capture_output=True, timeout=60
+            )
+            return result.returncode == 0
+        except:
+            return False
+
+    def find_element(self, **selectors):
+        """Find element - basic implementation via uiautomator dump."""
+        from .device.base import Element, Bounds
+        import xml.etree.ElementTree as ET
+
+        success, output = self.execute_shell("uiautomator dump /dev/tty")
+        if not success or not output:
+            return None
+
+        try:
+            # Extract XML from output
+            xml_start = output.find('<?xml')
+            if xml_start == -1:
+                return None
+
+            xml_content = output[xml_start:]
+            root = ET.fromstring(xml_content)
+
+            # Build XPath-like query
+            for node in root.iter('node'):
+                match = True
+
+                if 'text' in selectors and selectors['text'] != node.get('text', ''):
+                    match = False
+                if 'resource_id' in selectors and selectors['resource_id'] != node.get('resource-id', ''):
+                    match = False
+                if 'class_name' in selectors and selectors['class_name'] != node.get('class', ''):
+                    match = False
+
+                if match:
+                    bounds_str = node.get('bounds', '[0,0][0,0]')
+                    # Parse bounds like [0,0][100,100]
+                    import re
+                    match = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds_str)
+                    if match:
+                        bounds = Bounds(
+                            left=int(match.group(1)),
+                            top=int(match.group(2)),
+                            right=int(match.group(3)),
+                            bottom=int(match.group(4))
+                        )
+                    else:
+                        bounds = Bounds(0, 0, 0, 0)
+
+                    return Element(
+                        resource_id=node.get('resource-id', ''),
+                        class_name=node.get('class', ''),
+                        text=node.get('text', ''),
+                        content_desc=node.get('content-desc', ''),
+                        bounds=bounds,
+                        clickable=node.get('clickable', 'false') == 'true',
+                        enabled=node.get('enabled', 'true') == 'true',
+                        focused=node.get('focused', 'false') == 'true',
+                        package=node.get('package', ''),
+                    )
+
+        except Exception:
+            pass
+
+        return None
+
+    def click(self, element=None, x: Optional[int] = None, y: Optional[int] = None) -> bool:
+        """Click element or coordinates."""
+        if element and hasattr(element, 'bounds'):
+            center_x = (element.bounds.left + element.bounds.right) // 2
+            center_y = (element.bounds.top + element.bounds.bottom) // 2
+            return self.tap(center_x, center_y)
+        elif x is not None and y is not None:
+            return self.tap(x, y)
+        return False
+
+    def scroll(self, direction: str = "down", amount: int = 500) -> bool:
+        """Scroll screen."""
+        if not self._controller.current_device:
+            return False
+
+        # Get screen dimensions (approximate)
+        center_x, center_y = 540, 960  # Common phone resolution
+
+        if direction == "down":
+            start_y, end_y = center_y + amount // 2, center_y - amount // 2
+        elif direction == "up":
+            start_y, end_y = center_y - amount // 2, center_y + amount // 2
+        elif direction == "left":
+            # Swipe left
+            return self._swipe(center_x + amount // 2, center_y, center_x - amount // 2, center_y)
+        elif direction == "right":
+            return self._swipe(center_x - amount // 2, center_y, center_x + amount // 2, center_y)
+        else:
+            return False
+
+        return self._swipe(center_x, start_y, center_x, end_y)
+
+    def _swipe(self, x1: int, y1: int, x2: int, y2: int, duration: int = 300) -> bool:
+        """Perform swipe gesture."""
+        if not self._controller.current_device:
+            return False
+
+        try:
+            subprocess.run(
+                [self._controller.adb_path, "-s", self._controller.current_device.serial,
+                 "shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), str(duration)],
+                capture_output=True, timeout=10
+            )
+            return True
+        except:
+            return False
+
+    def get_current_activity(self) -> Tuple[str, str]:
+        """Get current foreground activity."""
+        success, output = self.execute_shell("dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'")
+
+        package = ""
+        activity = ""
+
+        if success and output:
+            # Parse something like "mCurrentFocus=Window{xxx com.pkg/.Activity}"
+            import re
+            match = re.search(r'([a-zA-Z0-9_.]+)/([a-zA-Z0-9_.]+)', output)
+            if match:
+                package = match.group(1)
+                activity = match.group(2)
+
+        return package, activity
+
+    def get_screen_state(self):
+        """Get current screen state."""
+        from .device.base import ScreenState, Element, Bounds
+        import xml.etree.ElementTree as ET
+
+        success, output = self.execute_shell("uiautomator dump /dev/tty")
+
+        elements = []
+        if success and output:
+            try:
+                xml_start = output.find('<?xml')
+                if xml_start != -1:
+                    xml_content = output[xml_start:]
+                    root = ET.fromstring(xml_content)
+
+                    for node in root.iter('node'):
+                        bounds_str = node.get('bounds', '[0,0][0,0]')
+                        import re
+                        match = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds_str)
+                        if match:
+                            bounds = Bounds(
+                                left=int(match.group(1)),
+                                top=int(match.group(2)),
+                                right=int(match.group(3)),
+                                bottom=int(match.group(4))
+                            )
+                        else:
+                            bounds = Bounds(0, 0, 0, 0)
+
+                        elements.append(Element(
+                            resource_id=node.get('resource-id', ''),
+                            class_name=node.get('class', ''),
+                            text=node.get('text', ''),
+                            content_desc=node.get('content-desc', ''),
+                            bounds=bounds,
+                            clickable=node.get('clickable', 'false') == 'true',
+                            enabled=node.get('enabled', 'true') == 'true',
+                            focused=node.get('focused', 'false') == 'true',
+                            package=node.get('package', ''),
+                        ))
+            except Exception:
+                pass
+
+        package, activity = self.get_current_activity()
+
+        return ScreenState(
+            activity=activity,
+            package=package,
+            elements=elements,
+            xml_dump=output if success else "",
+        )
+
+    def open_deep_link(self, uri: str) -> bool:
+        """Open a deep link URI."""
+        success, _ = self.execute_shell(f'am start -a android.intent.action.VIEW -d "{uri}"')
+        return success
+
+    def send_broadcast(self, action: str, component: Optional[str] = None,
+                      extras: Optional[dict] = None) -> Tuple[bool, str]:
+        """Send broadcast intent."""
+        cmd = f'am broadcast -a {action}'
+        if component:
+            cmd += f' -n {component}'
+        if extras:
+            for key, value in extras.items():
+                if isinstance(value, str):
+                    cmd += f' --es {key} "{value}"'
+                elif isinstance(value, int):
+                    cmd += f' --ei {key} {value}'
+                elif isinstance(value, bool):
+                    cmd += f' --ez {key} {str(value).lower()}'
+
+        return self.execute_shell(cmd)
+
+    def start_service(self, component: str, extras: Optional[dict] = None) -> Tuple[bool, str]:
+        """Start a service."""
+        cmd = f'am startservice -n {component}'
+        if extras:
+            for key, value in extras.items():
+                if isinstance(value, str):
+                    cmd += f' --es {key} "{value}"'
+
+        return self.execute_shell(cmd)
+
+    def query_content_provider(self, uri: str, projection: Optional[List[str]] = None,
+                               selection: Optional[str] = None) -> Tuple[bool, str]:
+        """Query a content provider."""
+        cmd = f'content query --uri {uri}'
+        if projection:
+            cmd += f' --projection {":".join(projection)}'
+        if selection:
+            cmd += f' --where "{selection}"'
+
+        return self.execute_shell(cmd)

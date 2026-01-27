@@ -6,16 +6,23 @@ Monitors the application during dynamic testing for:
 - Sensitive data in logs
 - Network traffic indicators
 - Security-relevant events
+- Runtime API calls (via Frida when available)
 """
 
 import re
 import subprocess
 import threading
 import time
+import logging
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Callable
+from typing import List, Optional, Dict, Callable, Any, TYPE_CHECKING
 from queue import Queue
 from datetime import datetime
+
+if TYPE_CHECKING:
+    from .instrumentation import FridaManager
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -295,3 +302,369 @@ class NetworkMonitor:
                 pass
 
         return None
+
+
+@dataclass
+class RuntimeEvent:
+    """Event captured from runtime instrumentation (Frida)."""
+    timestamp: datetime
+    event_type: str  # 'api_call', 'hook_trigger', 'data_access', 'crypto', 'network'
+    class_name: str
+    method_name: str
+    arguments: List[Any] = field(default_factory=list)
+    return_value: Any = None
+    stack_trace: Optional[str] = None
+    severity: str = "info"
+    context: Dict = field(default_factory=dict)
+
+
+class EnhancedAppMonitor:
+    """
+    Enhanced application monitor with Frida integration.
+
+    Combines logcat monitoring with runtime instrumentation to provide
+    comprehensive visibility into application behavior during testing.
+    """
+
+    # Sensitive API patterns to monitor
+    SENSITIVE_APIS = {
+        'crypto': [
+            ('javax.crypto.Cipher', 'getInstance'),
+            ('javax.crypto.Cipher', 'doFinal'),
+            ('java.security.MessageDigest', 'digest'),
+            ('javax.crypto.Mac', 'doFinal'),
+        ],
+        'network': [
+            ('java.net.URL', 'openConnection'),
+            ('okhttp3.OkHttpClient', 'newCall'),
+            ('android.webkit.WebView', 'loadUrl'),
+        ],
+        'storage': [
+            ('android.content.SharedPreferences$Editor', 'putString'),
+            ('android.database.sqlite.SQLiteDatabase', 'execSQL'),
+            ('android.database.sqlite.SQLiteDatabase', 'rawQuery'),
+        ],
+        'sensitive': [
+            ('android.telephony.TelephonyManager', 'getDeviceId'),
+            ('android.telephony.TelephonyManager', 'getSubscriberId'),
+            ('android.location.LocationManager', 'getLastKnownLocation'),
+            ('android.accounts.AccountManager', 'getAccounts'),
+        ],
+    }
+
+    def __init__(
+        self,
+        controller,
+        package_name: str,
+        frida_manager: Optional['FridaManager'] = None
+    ):
+        self.controller = controller
+        self.package_name = package_name
+        self._frida = frida_manager
+
+        # Events from different sources
+        self.logcat_events: List[SecurityEvent] = []
+        self.runtime_events: List[RuntimeEvent] = []
+
+        # Monitoring state
+        self._monitoring = False
+        self._logcat_thread: Optional[threading.Thread] = None
+        self._log_queue: Queue = Queue()
+        self._callbacks: List[Callable[[SecurityEvent], None]] = []
+        self._runtime_callbacks: List[Callable[[RuntimeEvent], None]] = []
+
+        # Base app monitor for logcat
+        self._base_monitor = AppMonitor(controller, package_name)
+
+    def start(self, enable_frida_hooks: bool = True) -> bool:
+        """Start comprehensive monitoring.
+
+        Args:
+            enable_frida_hooks: Enable Frida API monitoring if available
+
+        Returns:
+            True if monitoring started
+        """
+        if self._monitoring:
+            return True
+
+        self._monitoring = True
+
+        # Start logcat monitoring
+        self._base_monitor.start()
+
+        # Start Frida hooks if available
+        if enable_frida_hooks and self._frida and self._frida.is_attached():
+            self._setup_frida_monitoring()
+
+        logger.info(f"Started enhanced monitoring for {self.package_name}")
+        return True
+
+    def _setup_frida_monitoring(self):
+        """Setup Frida hooks for runtime monitoring."""
+        if not self._frida:
+            return
+
+        # Create comprehensive monitoring script
+        monitor_script = """
+        Java.perform(function() {
+            // Monitor SharedPreferences writes
+            try {
+                var SharedPrefsEditor = Java.use('android.content.SharedPreferences$Editor');
+                SharedPrefsEditor.putString.implementation = function(key, value) {
+                    send({
+                        type: 'api_call',
+                        class: 'SharedPreferences$Editor',
+                        method: 'putString',
+                        args: [key, value ? value.substring(0, 100) : null],
+                        category: 'storage'
+                    });
+                    return this.putString(key, value);
+                };
+            } catch(e) {}
+
+            // Monitor SQLite queries
+            try {
+                var SQLiteDatabase = Java.use('android.database.sqlite.SQLiteDatabase');
+                SQLiteDatabase.rawQuery.overload('java.lang.String', '[Ljava.lang.String;').implementation = function(sql, args) {
+                    send({
+                        type: 'api_call',
+                        class: 'SQLiteDatabase',
+                        method: 'rawQuery',
+                        args: [sql],
+                        category: 'storage'
+                    });
+                    return this.rawQuery(sql, args);
+                };
+            } catch(e) {}
+
+            // Monitor WebView loads
+            try {
+                var WebView = Java.use('android.webkit.WebView');
+                WebView.loadUrl.overload('java.lang.String').implementation = function(url) {
+                    send({
+                        type: 'api_call',
+                        class: 'WebView',
+                        method: 'loadUrl',
+                        args: [url],
+                        category: 'network'
+                    });
+                    return this.loadUrl(url);
+                };
+            } catch(e) {}
+
+            // Monitor HTTP connections
+            try {
+                var URL = Java.use('java.net.URL');
+                URL.openConnection.overload().implementation = function() {
+                    send({
+                        type: 'api_call',
+                        class: 'URL',
+                        method: 'openConnection',
+                        args: [this.toString()],
+                        category: 'network'
+                    });
+                    return this.openConnection();
+                };
+            } catch(e) {}
+
+            // Monitor crypto operations
+            try {
+                var Cipher = Java.use('javax.crypto.Cipher');
+                Cipher.doFinal.overload('[B').implementation = function(data) {
+                    send({
+                        type: 'api_call',
+                        class: 'Cipher',
+                        method: 'doFinal',
+                        args: ['<' + data.length + ' bytes>'],
+                        category: 'crypto',
+                        extra: {algorithm: this.getAlgorithm()}
+                    });
+                    return this.doFinal(data);
+                };
+            } catch(e) {}
+
+            // Monitor sensitive device info access
+            try {
+                var TelephonyManager = Java.use('android.telephony.TelephonyManager');
+                TelephonyManager.getDeviceId.overload().implementation = function() {
+                    var result = this.getDeviceId();
+                    send({
+                        type: 'api_call',
+                        class: 'TelephonyManager',
+                        method: 'getDeviceId',
+                        args: [],
+                        category: 'sensitive',
+                        severity: 'high'
+                    });
+                    return result;
+                };
+            } catch(e) {}
+
+            // Monitor location access
+            try {
+                var LocationManager = Java.use('android.location.LocationManager');
+                LocationManager.getLastKnownLocation.implementation = function(provider) {
+                    var result = this.getLastKnownLocation(provider);
+                    send({
+                        type: 'api_call',
+                        class: 'LocationManager',
+                        method: 'getLastKnownLocation',
+                        args: [provider],
+                        category: 'sensitive',
+                        severity: 'medium'
+                    });
+                    return result;
+                };
+            } catch(e) {}
+        });
+        """
+
+        try:
+            self._frida.load_script(
+                "enhanced_monitor",
+                monitor_script,
+                on_message=self._handle_frida_message
+            )
+            logger.info("Frida monitoring hooks installed")
+        except Exception as e:
+            logger.warning(f"Failed to setup Frida monitoring: {e}")
+
+    def _handle_frida_message(self, message: Dict):
+        """Handle message from Frida script."""
+        if message.get('type') == 'send':
+            payload = message.get('payload', {})
+
+            event = RuntimeEvent(
+                timestamp=datetime.now(),
+                event_type=payload.get('type', 'unknown'),
+                class_name=payload.get('class', ''),
+                method_name=payload.get('method', ''),
+                arguments=payload.get('args', []),
+                severity=payload.get('severity', 'info'),
+                context={
+                    'category': payload.get('category', 'unknown'),
+                    'extra': payload.get('extra', {}),
+                }
+            )
+
+            self.runtime_events.append(event)
+
+            # Notify callbacks
+            for callback in self._runtime_callbacks:
+                try:
+                    callback(event)
+                except Exception:
+                    pass
+
+    def stop(self) -> Dict:
+        """Stop monitoring and return all collected data.
+
+        Returns:
+            Dictionary with all events and summary
+        """
+        self._monitoring = False
+
+        # Stop logcat monitoring
+        self._base_monitor.stop()
+
+        # Collect logcat events
+        self.logcat_events = self._base_monitor.events
+
+        return {
+            'logcat_events': self.logcat_events,
+            'runtime_events': self.runtime_events,
+            'summary': self.get_summary(),
+        }
+
+    def add_callback(self, callback: Callable[[SecurityEvent], None]):
+        """Add callback for logcat security events."""
+        self._base_monitor.add_callback(callback)
+
+    def add_runtime_callback(self, callback: Callable[[RuntimeEvent], None]):
+        """Add callback for runtime events."""
+        self._runtime_callbacks.append(callback)
+
+    def get_events_by_category(self, category: str) -> List[RuntimeEvent]:
+        """Get runtime events by category."""
+        return [e for e in self.runtime_events
+                if e.context.get('category') == category]
+
+    def get_summary(self) -> Dict:
+        """Get comprehensive monitoring summary."""
+        logcat_summary = self._base_monitor.get_summary()
+
+        runtime_by_category = {}
+        for event in self.runtime_events:
+            cat = event.context.get('category', 'unknown')
+            runtime_by_category[cat] = runtime_by_category.get(cat, 0) + 1
+
+        return {
+            'logcat': logcat_summary,
+            'runtime': {
+                'total_events': len(self.runtime_events),
+                'by_category': runtime_by_category,
+                'sensitive_calls': len([e for e in self.runtime_events
+                                       if e.context.get('category') == 'sensitive']),
+                'crypto_operations': len([e for e in self.runtime_events
+                                         if e.context.get('category') == 'crypto']),
+                'network_calls': len([e for e in self.runtime_events
+                                     if e.context.get('category') == 'network']),
+                'storage_operations': len([e for e in self.runtime_events
+                                          if e.context.get('category') == 'storage']),
+            },
+            'has_sensitive_data': (
+                logcat_summary.get('sensitive_leaks', 0) > 0 or
+                len([e for e in self.runtime_events if e.severity in ['high', 'critical']]) > 0
+            ),
+        }
+
+    def has_sensitive_api_calls(self) -> bool:
+        """Check if sensitive APIs were called."""
+        return any(e.context.get('category') == 'sensitive'
+                  for e in self.runtime_events)
+
+    def get_crypto_operations(self) -> List[RuntimeEvent]:
+        """Get all cryptographic operations."""
+        return self.get_events_by_category('crypto')
+
+    def get_network_activity(self) -> List[RuntimeEvent]:
+        """Get all network-related events."""
+        return self.get_events_by_category('network')
+
+    def export_events(self, output_path: str):
+        """Export all events to JSON file."""
+        import json
+
+        data = {
+            'package': self.package_name,
+            'timestamp': datetime.now().isoformat(),
+            'logcat_events': [
+                {
+                    'timestamp': e.timestamp.isoformat(),
+                    'type': e.event_type,
+                    'severity': e.severity,
+                    'description': e.description,
+                    'data': e.raw_data[:500],
+                }
+                for e in self.logcat_events
+            ],
+            'runtime_events': [
+                {
+                    'timestamp': e.timestamp.isoformat(),
+                    'type': e.event_type,
+                    'class': e.class_name,
+                    'method': e.method_name,
+                    'args': [str(a)[:100] for a in e.arguments],
+                    'severity': e.severity,
+                    'category': e.context.get('category'),
+                }
+                for e in self.runtime_events
+            ],
+            'summary': self.get_summary(),
+        }
+
+        with open(output_path, 'w') as f:
+            json.dump(data, f, indent=2)
+
+        return output_path

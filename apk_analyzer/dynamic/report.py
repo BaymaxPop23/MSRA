@@ -442,13 +442,26 @@ def _render_findings_section(title: str, findings: List[Dict], section_type: str
 
 def _render_finding(finding: Dict) -> str:
     """Render a single finding."""
-    title = html.escape(finding.get('title', 'Unknown'))
+    title = html.escape(finding.get('title', finding.get('finding_id', 'Unknown')))
     severity = finding.get('severity', 'medium').lower()
     confidence = finding.get('confidence', 0)
     notes = html.escape(finding.get('notes', ''))
     evidence = finding.get('evidence', {})
-    poc_command = evidence.get('command', '')
-    poc_output = evidence.get('output', '')
+
+    # Handle both legacy (dict) and new (list) evidence formats
+    poc_command = ''
+    poc_output = ''
+    if isinstance(evidence, dict):
+        poc_command = evidence.get('command', '')
+        poc_output = evidence.get('output', '')
+    elif isinstance(evidence, list) and evidence:
+        # New format: list of evidence objects
+        for e in evidence:
+            if isinstance(e, dict):
+                if e.get('type') == 'command':
+                    poc_command = e.get('data', '') or e.get('description', '')
+                elif e.get('type') in ['screenshot', 'logcat', 'hook']:
+                    poc_output = e.get('description', '')
 
     # Generate risk assessment based on finding type
     risk_html = _generate_risk_assessment(finding)

@@ -3,19 +3,59 @@ Dynamic Test Executor
 
 Executes vulnerability PoCs against a running application and
 validates if vulnerabilities are actually exploitable.
+
+Supports multiple modes:
+- Legacy mode: Uses GenymotionController directly (backwards compatible)
+- Enhanced mode: Uses DeviceInterface + Frida + mitmproxy for full verification
 """
 
 import os
 import re
 import time
 import json
+import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 from datetime import datetime
 from pathlib import Path
 
 from .genymotion import GenymotionController
 from .monitor import AppMonitor
+from .config import DynamicConfig, AnalysisMode
+from .exceptions import DynamicAnalysisError, VerificationError
+
+# Import device abstraction
+from .device import DeviceInterface, create_device, ADBDevice
+
+# Import verification framework
+from .verification import (
+    BaseVerifier,
+    VerificationResult,
+    VerificationStatus,
+    WebViewVerifier,
+    ProviderVerifier,
+    IntentVerifier,
+    DeepLinkVerifier,
+    get_verifier_for_finding,
+)
+
+# Optional imports
+try:
+    from .instrumentation import FridaManager, is_frida_available
+except ImportError:
+    FridaManager = None
+    def is_frida_available():
+        return False
+
+try:
+    from .traffic import ProxyManager, TrafficAnalyzer, is_mitmproxy_available
+except ImportError:
+    ProxyManager = None
+    TrafficAnalyzer = None
+    def is_mitmproxy_available():
+        return False
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -907,3 +947,445 @@ class DynamicTestExecutor:
         self.controller.stop_logcat()
 
         print("[+] Cleanup complete")
+
+
+class EnhancedDynamicExecutor:
+    """
+    Enhanced dynamic test executor with full verification capabilities.
+
+    Uses DeviceInterface abstraction, Frida instrumentation, and mitmproxy
+    traffic interception for comprehensive vulnerability verification.
+
+    Gracefully degrades when optional components aren't available.
+    """
+
+    def __init__(
+        self,
+        device: Optional[DeviceInterface] = None,
+        config: Optional[DynamicConfig] = None,
+        frida: Optional['FridaManager'] = None,
+        proxy: Optional['ProxyManager'] = None,
+        output_dir: Optional[str] = None,
+    ):
+        """Initialize enhanced executor.
+
+        Args:
+            device: Device interface (auto-detected if not provided)
+            config: Dynamic analysis configuration
+            frida: Frida manager (created if available and not provided)
+            proxy: Proxy manager (created if available and not provided)
+            output_dir: Output directory for screenshots and reports
+        """
+        self._config = config or DynamicConfig()
+        self._output_dir = Path(output_dir) if output_dir else Path("./dynamic_output")
+        self._output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Initialize device
+        if device:
+            self._device = device
+        else:
+            self._device = create_device()
+
+        # Initialize Frida if available and not disabled
+        self._frida: Optional['FridaManager'] = None
+        if frida:
+            self._frida = frida
+        elif self._config.use_frida and is_frida_available():
+            try:
+                self._frida = FridaManager(self._device)
+                logger.info("Frida instrumentation enabled")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Frida: {e}")
+
+        # Initialize proxy if available and not disabled
+        self._proxy: Optional['ProxyManager'] = None
+        self._traffic_analyzer: Optional['TrafficAnalyzer'] = None
+        if proxy:
+            self._proxy = proxy
+        elif self._config.use_proxy and is_mitmproxy_available():
+            try:
+                self._proxy = ProxyManager(
+                    self._device,
+                    port=self._config.proxy.port if self._config.proxy else 8080
+                )
+                self._traffic_analyzer = TrafficAnalyzer()
+                logger.info("Traffic interception enabled")
+            except Exception as e:
+                logger.warning(f"Failed to initialize proxy: {e}")
+
+        # Initialize verifiers
+        self._verifiers: List[BaseVerifier] = self._init_verifiers()
+
+        # State
+        self._package_name: Optional[str] = None
+        self._results: List[VerificationResult] = []
+        self._monitor: Optional[AppMonitor] = None
+
+    def _init_verifiers(self) -> List[BaseVerifier]:
+        """Initialize verification modules."""
+        verifiers = []
+
+        # Create verifiers with available components
+        for verifier_class in [WebViewVerifier, ProviderVerifier, IntentVerifier, DeepLinkVerifier]:
+            try:
+                verifier = verifier_class(
+                    device=self._device,
+                    frida=self._frida,
+                    output_dir=str(self._output_dir),
+                )
+                verifiers.append(verifier)
+            except Exception as e:
+                logger.warning(f"Failed to initialize {verifier_class.__name__}: {e}")
+
+        return verifiers
+
+    def get_capabilities(self) -> Dict[str, bool]:
+        """Get current analysis capabilities."""
+        return {
+            "device_connected": self._device.is_connected() if self._device else False,
+            "frida_available": self._frida is not None and self._frida.is_available(),
+            "proxy_available": self._proxy is not None,
+            "ui_automation": hasattr(self._device, 'find_element'),
+            "ssl_bypass": self._frida is not None,
+            "traffic_capture": self._proxy is not None,
+            "mode": self._config.mode.value,
+        }
+
+    def setup(self, package_name: str, apk_path: Optional[str] = None) -> bool:
+        """Setup for testing.
+
+        Args:
+            package_name: Package to test
+            apk_path: APK to install (optional)
+
+        Returns:
+            True if setup successful
+        """
+        self._package_name = package_name
+
+        # Connect device if needed
+        if not self._device.is_connected():
+            if not self._device.connect():
+                logger.error("Failed to connect to device")
+                return False
+
+        # Install APK if provided
+        if apk_path and os.path.exists(apk_path):
+            logger.info(f"Installing APK: {apk_path}")
+            if not self._device.install_app(apk_path):
+                logger.error("Failed to install APK")
+                return False
+
+        # Setup proxy if available
+        if self._proxy:
+            try:
+                self._proxy.start()
+                self._proxy.configure_device()
+                logger.info("Proxy configured")
+            except Exception as e:
+                logger.warning(f"Failed to setup proxy: {e}")
+
+        # Launch app and attach Frida if available
+        if self._frida and self._config.mode != AnalysisMode.PASSIVE:
+            frida_attached = False
+            try:
+                # Try spawn_and_attach first (most reliable)
+                logger.info(f"Spawning app with Frida: {package_name}")
+                if self._frida.spawn_and_attach(package_name):
+                    logger.info("Frida spawned and attached successfully")
+                    frida_attached = True
+
+                    # Apply bypasses if aggressive mode
+                    if self._config.mode == AnalysisMode.AGGRESSIVE:
+                        logger.info("Applying SSL and root bypasses...")
+                        self._frida.bypass_ssl_pinning()
+                        self._frida.bypass_root_detection()
+            except Exception as e:
+                logger.warning(f"Frida spawn failed: {e}, trying regular attach...")
+
+                # Fallback: launch app manually and attach
+                try:
+                    logger.info(f"Launching app: {package_name}")
+                    self._device.launch_app(package_name)
+
+                    # Wait for app to start
+                    for i in range(5):
+                        time.sleep(1)
+                        if self._device.is_app_running(package_name):
+                            logger.info(f"App is running (checked after {i+1}s)")
+                            break
+
+                    # Try to attach
+                    if self._frida.attach(package_name):
+                        logger.info("Frida attached successfully")
+                        frida_attached = True
+
+                        if self._config.mode == AnalysisMode.AGGRESSIVE:
+                            self._frida.bypass_ssl_pinning()
+                            self._frida.bypass_root_detection()
+                except Exception as e2:
+                    logger.warning(f"Frida attach also failed: {e2}")
+
+            if not frida_attached:
+                logger.warning("Continuing without Frida instrumentation (graceful degradation)")
+                # Make sure app is launched
+                if not self._device.is_app_running(package_name):
+                    self._device.launch_app(package_name)
+                    time.sleep(2)
+
+        elif self._config.mode != AnalysisMode.PASSIVE:
+            # No Frida available, just launch the app
+            logger.info(f"Launching app without Frida: {package_name}")
+            self._device.launch_app(package_name)
+            time.sleep(2)
+
+        logger.info(f"Setup complete for {package_name}")
+        return True
+
+    def verify_finding(self, finding: Dict) -> VerificationResult:
+        """Verify a single finding.
+
+        Args:
+            finding: Finding dictionary from static analysis
+
+        Returns:
+            VerificationResult
+        """
+        # Find appropriate verifier
+        verifier = get_verifier_for_finding(
+            finding,
+            self._device,
+            self._frida,
+            str(self._output_dir)
+        )
+
+        if verifier and verifier.can_verify(finding):
+            try:
+                result = verifier.verify(finding)
+                self._results.append(result)
+                return result
+            except Exception as e:
+                logger.error(f"Verification failed: {e}")
+                return VerificationResult(
+                    finding_id=finding.get('fid', 'unknown'),
+                    status=VerificationStatus.ERROR,
+                    error_message=str(e)
+                )
+
+        # Fallback to basic verification
+        return self._basic_verify(finding)
+
+    def _basic_verify(self, finding: Dict) -> VerificationResult:
+        """Basic verification using ADB commands only."""
+        finding_id = finding.get('fid', 'unknown')
+        adb_commands = finding.get('adb_commands', [])
+
+        result = VerificationResult(
+            finding_id=finding_id,
+            status=VerificationStatus.NOT_VERIFIED,
+        )
+
+        if not adb_commands:
+            result.notes = "No ADB commands available"
+            return result
+
+        for cmd in adb_commands:
+            if isinstance(cmd, str) and cmd.strip():
+                # Clean command
+                clean_cmd = cmd.strip()
+                if clean_cmd.startswith('adb shell '):
+                    clean_cmd = clean_cmd[10:]
+                elif clean_cmd.startswith('adb '):
+                    clean_cmd = clean_cmd[4:]
+
+                try:
+                    success, output = self._device.execute_shell(clean_cmd)
+                    if success:
+                        result.status = VerificationStatus.POSSIBLE
+                        result.confidence = 0.4
+                        result.add_evidence(
+                            "command",
+                            f"Command executed: {cmd[:50]}",
+                            data=output[:500]
+                        )
+                except Exception as e:
+                    result.notes = f"Command failed: {e}"
+
+        return result
+
+    def verify_findings(self, findings: List[Dict], timeout: int = 300) -> List[VerificationResult]:
+        """Verify multiple findings.
+
+        Args:
+            findings: List of finding dictionaries
+            timeout: Total timeout in seconds
+
+        Returns:
+            List of VerificationResult objects
+        """
+        if not self._package_name:
+            raise RuntimeError("Call setup() first")
+
+        start_time = time.time()
+        results = []
+
+        logger.info(f"Verifying {len(findings)} findings...")
+
+        for i, finding in enumerate(findings):
+            if time.time() - start_time > timeout:
+                logger.warning("Timeout reached, stopping verification")
+                break
+
+            finding_id = finding.get('fid', f'finding_{i}')
+            logger.info(f"[{i+1}/{len(findings)}] Verifying: {finding.get('title', finding_id)}")
+
+            result = self.verify_finding(finding)
+            results.append(result)
+
+            # Log result
+            if result.status == VerificationStatus.VERIFIED:
+                logger.info(f"  VERIFIED (confidence: {result.confidence:.0%})")
+            elif result.status == VerificationStatus.LIKELY:
+                logger.info(f"  LIKELY (confidence: {result.confidence:.0%})")
+            elif result.status == VerificationStatus.NOT_VULNERABLE:
+                logger.info(f"  Not vulnerable")
+            else:
+                logger.info(f"  {result.status.value}")
+
+            # Brief pause between tests
+            time.sleep(0.5)
+
+        self._results = results
+        return results
+
+    def get_traffic_analysis(self) -> Optional[Dict]:
+        """Get traffic analysis results.
+
+        Returns:
+            Traffic analysis summary or None if not available
+        """
+        if not self._proxy or not self._traffic_analyzer:
+            return None
+
+        flows = self._proxy.get_flows()
+        if not flows:
+            return None
+
+        alerts = self._traffic_analyzer.analyze_flows(flows)
+        summary = self._traffic_analyzer.get_summary(alerts)
+
+        return {
+            "total_flows": len(flows),
+            "leak_alerts": [a.to_dict() for a in alerts],
+            "summary": summary,
+        }
+
+    def get_summary(self) -> Dict:
+        """Get verification summary."""
+        total = len(self._results)
+        verified = sum(1 for r in self._results if r.status == VerificationStatus.VERIFIED)
+        likely = sum(1 for r in self._results if r.status == VerificationStatus.LIKELY)
+        not_vuln = sum(1 for r in self._results if r.status == VerificationStatus.NOT_VULNERABLE)
+        errors = sum(1 for r in self._results if r.status == VerificationStatus.ERROR)
+
+        summary = {
+            "package": self._package_name,
+            "capabilities": self.get_capabilities(),
+            "total_findings": total,
+            "verified": verified,
+            "likely": likely,
+            "not_vulnerable": not_vuln,
+            "errors": errors,
+            "inconclusive": total - verified - likely - not_vuln - errors,
+        }
+
+        # Add traffic analysis if available
+        traffic = self.get_traffic_analysis()
+        if traffic:
+            summary["traffic"] = traffic
+
+        return summary
+
+    def export_results(self, output_path: str) -> str:
+        """Export results to JSON file.
+
+        Args:
+            output_path: Output file path
+
+        Returns:
+            Path to exported file
+        """
+        data = {
+            "summary": self.get_summary(),
+            "results": [r.to_dict() for r in self._results],
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        with open(output_path, 'w') as f:
+            json.dump(data, f, indent=2, default=str)
+
+        return output_path
+
+    def cleanup(self):
+        """Clean up resources."""
+        # Detach Frida
+        if self._frida:
+            try:
+                self._frida.detach()
+            except Exception:
+                pass
+
+        # Stop proxy
+        if self._proxy:
+            try:
+                self._proxy.clear_device_proxy()
+                self._proxy.stop()
+            except Exception:
+                pass
+
+        # Stop app
+        if self._device and self._package_name:
+            try:
+                self._device.stop_app(self._package_name)
+            except Exception:
+                pass
+
+        logger.info("Cleanup complete")
+
+
+def create_executor(
+    config: Optional[DynamicConfig] = None,
+    legacy: bool = False,
+    controller: Optional[GenymotionController] = None,
+    output_dir: str = "./dynamic_output",
+    **kwargs
+) -> Union[DynamicTestExecutor, EnhancedDynamicExecutor]:
+    """Factory function to create appropriate executor.
+
+    Args:
+        config: Dynamic analysis configuration
+        legacy: Force legacy executor
+        controller: Legacy controller (for backwards compatibility)
+        output_dir: Output directory
+        **kwargs: Additional arguments
+
+    Returns:
+        DynamicTestExecutor or EnhancedDynamicExecutor
+    """
+    if legacy or controller:
+        # Use legacy executor
+        if not controller:
+            controller = GenymotionController()
+            controller.connect()
+        return DynamicTestExecutor(
+            controller=controller,
+            output_dir=output_dir,
+            **kwargs
+        )
+
+    # Use enhanced executor
+    return EnhancedDynamicExecutor(
+        config=config,
+        output_dir=output_dir,
+        **kwargs
+    )

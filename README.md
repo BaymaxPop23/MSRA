@@ -46,8 +46,11 @@ Android APK security vulnerability scanner with pattern-based detection, deep an
 
 ### Dynamic Analysis
 - **Genymotion/Emulator integration** - Automated runtime testing
-- **Frida instrumentation** - Hook and monitor app behavior
-- **Network traffic capture** - SSL/TLS inspection
+- **Enhanced verification engine** - Real exploit verification with evidence collection
+- **Device abstraction layer** - ADB fallback with uiautomator2 support
+- **Frida instrumentation** - Hook and monitor app behavior (optional)
+- **Traffic interception** - mitmproxy integration with leak detection (optional)
+- **Graceful degradation** - Works with or without optional dependencies
 
 ## Requirements
 
@@ -229,12 +232,48 @@ python main.py crawl blogs --max 20 --extract
 # List available devices/emulators
 python main.py dynamic --list-devices
 
-# Run dynamic analysis
+# Run basic dynamic analysis (legacy mode)
 python main.py dynamic app.apk --out dynamic_report
+
+# Run enhanced dynamic analysis with verification
+python main.py dynamic app.apk --out dynamic_report --enhanced
+
+# Enhanced mode with aggressive testing (SSL/root bypass)
+python main.py dynamic app.apk --enhanced --mode aggressive
 
 # Specify device and timeout
 python main.py dynamic app.apk --device emulator-5554 --timeout 600
+
+# Disable optional features
+python main.py dynamic app.apk --enhanced --no-frida --no-traffic
 ```
+
+#### Enhanced Dynamic Analysis Options
+
+| Option | Description |
+|--------|-------------|
+| `--enhanced` | Use new verification engine with evidence collection |
+| `--mode` | Analysis mode: `passive`, `active`, `aggressive` |
+| `--no-frida` | Disable Frida instrumentation |
+| `--no-traffic` | Disable traffic interception |
+| `--no-ui-automation` | Use basic ADB only |
+| `--proxy-port` | Proxy port for traffic capture (default: 8080) |
+| `--explore-depth` | UI exploration depth (default: 5) |
+
+#### Optional Dependencies for Enhanced Mode
+
+```bash
+# For UI automation (recommended)
+pip install uiautomator2
+
+# For runtime instrumentation (requires rooted device or frida-gadget)
+pip install frida-tools
+
+# For traffic interception
+pip install mitmproxy
+```
+
+The enhanced mode gracefully degrades when optional dependencies aren't available.
 
 ## Vulnerability Categories
 
@@ -312,7 +351,30 @@ apk-analyzer/
 │   │   ├── graphs.py      # Graph builders (with size limits)
 │   │   └── renderer.py    # HTML rendering
 │   └── dynamic/           # Dynamic analysis
-│       └── executor.py    # Runtime testing
+│       ├── executor.py    # Test executor (legacy + enhanced)
+│       ├── genymotion.py  # Genymotion/emulator control
+│       ├── monitor.py     # App monitoring
+│       ├── config.py      # Configuration management
+│       ├── exceptions.py  # Custom exceptions
+│       ├── device/        # Device abstraction layer
+│       │   ├── base.py    # DeviceInterface ABC
+│       │   ├── adb_device.py      # ADB fallback
+│       │   └── uiautomator_device.py  # uiautomator2
+│       ├── automation/    # UI automation
+│       │   ├── navigator.py       # Screen exploration
+│       │   └── form_filler.py     # Form detection/filling
+│       ├── instrumentation/  # Frida integration
+│       │   ├── frida_manager.py   # Session management
+│       │   └── hooks/     # JS hook scripts
+│       ├── verification/  # Exploit verification
+│       │   ├── base.py    # BaseVerifier ABC
+│       │   ├── webview.py # WebView XSS verification
+│       │   ├── provider.py # SQLi/traversal verification
+│       │   ├── intent.py  # Intent verification
+│       │   └── deeplink.py # Deep link verification
+│       └── traffic/       # Traffic interception
+│           ├── proxy.py   # mitmproxy management
+│           └── analyzer.py # Leak detection
 └── data/
     └── builtin/           # 77+ built-in patterns
         └── patterns.json
@@ -369,6 +431,17 @@ $ python main.py scan app.apk --out report
 
 ## Recent Updates
 
+### v2.0 - Enhanced Dynamic Analysis
+- **Enhanced Dynamic Executor** - New verification engine with real exploit confirmation
+- **Device Abstraction Layer** - Unified interface for ADB, uiautomator2, Genymotion
+- **UI Automation** - Screen exploration, form detection, and payload injection
+- **Frida Integration** - SSL bypass, root bypass, API monitoring hooks
+- **Traffic Interception** - mitmproxy integration with sensitive data leak detection
+- **Exploit Verifiers** - WebView XSS, Provider SQLi, Intent hijacking, DeepLink injection
+- **Graceful Degradation** - Works without optional dependencies (Frida, mitmproxy)
+- **Evidence Collection** - Screenshots, hook results, traffic logs for verified vulns
+
+### Previous Updates
 - **Visualization Filters** - Filter findings by risk level, category, or search text
 - **Enhanced Data Flow** - Parameters, taint chains, and risk level analysis
 - **Attack Surface Mapping** - ADB commands, deep links, and Frida hooks for testing
