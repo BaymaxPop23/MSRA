@@ -1,6 +1,6 @@
 # APK Analyzer
 
-A comprehensive Android APK security vulnerability scanner with pattern-based detection, deep analysis, visualization, and dynamic testing capabilities.
+Android APK security vulnerability scanner with pattern-based detection, deep analysis, visualization, and dynamic testing capabilities.
 
 ![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![License MIT](https://img.shields.io/badge/license-MIT-green.svg)
