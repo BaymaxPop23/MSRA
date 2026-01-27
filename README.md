@@ -29,10 +29,13 @@ A comprehensive Android APK security vulnerability scanner with pattern-based de
 - **Auto-open reports** - View results immediately in browser
 
 ### Visualization
+- **Interactive filters** - Filter by risk level, category, or search text
 - **Component interaction graphs** - Activities, Services, Receivers, Providers
-- **Data flow analysis** - Track data from sources to sinks
+- **Data flow analysis** - Track data with parameters and taint chains
+- **Attack surface mapping** - Exported components with ADB test commands
+- **Injection point detection** - SQL, Path, Command, XSS, Intent injections
+- **Frida script generation** - Ready-to-use hooks for dynamic testing
 - **Class hierarchy diagrams** - Inheritance relationships
-- **Entry point mapping** - Attack surface visualization
 - **Optimized rendering** - Handles large apps without overflow
 
 ### Threat Intelligence
@@ -137,15 +140,17 @@ python main.py scan app.apk --out report --patterns-dir ./my-patterns
 ### Visualization
 
 ```bash
-# Generate all visualizations
+# Generate visualization report
 python main.py visualize app.apk --out report
 
-# Generates:
-#   - Component Interaction Graph
-#   - Call Graph
-#   - Data Flow Graph
-#   - Class Hierarchy
-#   - Entry Points & Attack Surface
+# Generates visualization.html with:
+#   - Filter bar (risk level, category, search)
+#   - Data Flow Details (with parameters & taint chains)
+#   - Attack Surface (ADB commands, deep links, Frida hooks)
+#   - Injection Points (SQL, Path, Command, XSS, Intent)
+#   - Frida Scripts (SSL bypass, crypto logging, etc.)
+#   - Component/Call/Data Flow graphs
+#   - Class Hierarchy diagram
 ```
 
 ### Pattern Management
@@ -226,12 +231,25 @@ python main.py dynamic app.apk --device emulator-5554 --timeout 600
   - Remediation guidance
 
 ### Visualization Report (`visualization.html`)
-- Interactive Mermaid.js diagrams
-- Component interaction flows
-- Data flow from sources to sinks
-- Class hierarchy browser
-- Entry point attack surface map
-- Optimized for large applications (auto-limits nodes)
+- **Filter bar** - Filter findings by risk level, category, or search text
+- **Data Flow Details** - Source-to-sink analysis with:
+  - Risk levels (Critical/High/Medium/Low)
+  - Parameters involved in the flow
+  - Taint chain showing variable propagation
+- **Attack Surface** - Exported components with:
+  - Ready-to-use ADB commands (one-click copy)
+  - Deep link URLs for testing
+  - Frida hooks for runtime analysis
+- **Injection Points** - Potential vulnerabilities:
+  - SQL, Path Traversal, Command, XSS, Intent injection
+  - Exploit examples for each finding
+- **Frida Scripts** - Pre-built scripts for:
+  - SSL pinning bypass
+  - Crypto operation logging
+  - Intent monitoring
+  - File operation tracking
+- **Interactive diagrams** - Mermaid.js graphs for components, calls, data flow
+- **Optimized rendering** - Handles large applications (auto-limits nodes)
 
 ## Project Structure
 
@@ -318,10 +336,15 @@ $ python main.py scan app.apk --out report
 
 ## Recent Updates
 
-- **Interactive CLI** - New step-by-step wizard for easy usage
+- **Visualization Filters** - Filter findings by risk level, category, or search text
+- **Enhanced Data Flow** - Parameters, taint chains, and risk level analysis
+- **Attack Surface Mapping** - ADB commands, deep links, and Frida hooks for testing
+- **Injection Detection** - SQL, Path, Command, XSS, Intent injection points
+- **Frida Script Generation** - Ready-to-use hooks for dynamic analysis
+- **APKM Bundle Support** - Auto-detects and extracts split APKs from APKMirror
+- **Organized Reports** - Saved to `reports/<package_name>/` directory
+- **Interactive CLI** - Step-by-step wizard for easy usage
 - **Improved Credential Detection** - Reduced false positives from debug/log strings
-- **Optimized Visualization** - Fixed graph rendering for large applications
-- **Better Graph Labels** - Component names now display correctly in diagrams
 
 ## Contributing
 
