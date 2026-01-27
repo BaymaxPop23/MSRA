@@ -901,16 +901,24 @@ def cmd_scan(args) -> int:
     findings_json_path = os.path.join(out_dir, "findings.json")
     findings_data = []
     for f in findings:
+        # Extract category from fid (e.g., "webview-js-interface" -> "webview")
+        category = f.fid.split('-')[0] if f.fid and '-' in f.fid else 'other'
+        # Also check extra dict for category
+        if hasattr(f, 'extra') and f.extra and 'category' in f.extra:
+            category = f.extra['category']
+
         finding_dict = {
             'fid': f.fid,
             'title': f.title,
             'severity': f.severity.value if hasattr(f.severity, 'value') else str(f.severity),
-            'category': f.category.value if hasattr(f.category, 'value') else str(f.category),
+            'category': category,
             'description': f.description,
+            'attack_path': f.attack_path if hasattr(f, 'attack_path') else '',
             'evidence': {
                 'file_path': f.evidence.file_path if f.evidence else None,
                 'line_number': f.evidence.line_number if f.evidence else None,
-                'matched_text': f.evidence.matched_text if f.evidence else None,
+                'matched_text': getattr(f.evidence, 'matched_text', None) if f.evidence else None,
+                'snippet': getattr(f.evidence, 'snippet', None) if f.evidence else None,
             } if f.evidence else None,
             'adb_commands': f.adb_commands if hasattr(f, 'adb_commands') else [],
             'extra': f.extra if hasattr(f, 'extra') else {},
