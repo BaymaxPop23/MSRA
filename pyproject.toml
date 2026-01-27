@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apk-analyzer"
+version = "1.0.0"
+description = "Android APK security vulnerability scanner with pattern-based detection and visualization"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [
+    {name = "Sai Jagadeesh"}
+]
+keywords = ["android", "apk", "security", "vulnerability", "scanner", "pentesting"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Software Development :: Testing",
+]
+
+[project.scripts]
+apk-analyzer = "apk_analyzer.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Sai-Jagadeesh/apk-analyzer"
+Repository = "https://github.com/Sai-Jagadeesh/apk-analyzer"
+Issues = "https://github.com/Sai-Jagadeesh/apk-analyzer/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["apk_analyzer*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.json"]

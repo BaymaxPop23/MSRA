@@ -53,14 +53,47 @@ A comprehensive Android APK security vulnerability scanner with pattern-based de
 
 - Python 3.8+
 - `jadx` for APK decompilation ([install](https://github.com/skylot/jadx))
-- `adb` for device communication
-- Optional: `wkhtmltopdf` or `weasyprint` for PDF reports
+- `adb` for device communication (Android SDK)
 
 ## Installation
 
 ```bash
+# Clone the repository
 git clone https://github.com/Sai-Jagadeesh/apk-analyzer.git
 cd apk-analyzer
+
+# Option 1: Run directly (no install needed)
+python main.py
+
+# Option 2: Install as package
+pip install -e .
+
+# Then run from anywhere
+apk-analyzer
+```
+
+### Installing jadx (required)
+
+```bash
+# macOS
+brew install jadx
+
+# Linux (Ubuntu/Debian)
+sudo apt install jadx
+
+# Or download from: https://github.com/skylot/jadx/releases
+```
+
+### Installing adb (for dynamic analysis)
+
+```bash
+# macOS
+brew install android-platform-tools
+
+# Linux (Ubuntu/Debian)
+sudo apt install adb
+
+# Or install Android SDK
 ```
 
 ## Quick Start

@@ -1,0 +1,11 @@
+# APK Analyzer - Requirements
+#
+# Core dependencies: None (stdlib only)
+#
+# External tools required:
+#   - jadx: APK decompilation (https://github.com/skylot/jadx)
+#   - adb: Android Debug Bridge (Android SDK)
+#
+# Optional dependencies for PDF reports:
+# weasyprint>=52.0    # PDF generation (uncomment if needed)
+# wkhtmltopdf         # Alternative PDF generation
