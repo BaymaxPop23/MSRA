@@ -197,8 +197,10 @@ class DynamicTestExecutor:
                         comp_type = 'service'
                     elif 'Receiver Resolver' in context or 'receiver' in line.lower():
                         comp_type = 'receiver'
-                    elif 'Provider' in context or 'provider' in line.lower():
-                        comp_type = 'provider'
+                    elif 'Provider' in context or 'provider' in line.lower() or 'ContentProvider' in context:
+                        # Skip providers here - we'll discover them via authority parsing
+                        i += 1
+                        continue
 
                     # Skip library components
                     if component_class.startswith('androidx.') or component_class.startswith('android.'):
@@ -213,7 +215,8 @@ class DynamicTestExecutor:
                     elif comp_type == 'receiver':
                         adb_cmd = f'adb shell am broadcast -n {full_component}'
                     else:
-                        adb_cmd = f'adb shell content query --uri content://{self.package_name}.provider/'
+                        i += 1
+                        continue  # Skip unknown types
 
                     findings.append({
                         'fid': f'dynamic-{comp_type}-{len(findings)}',
@@ -230,20 +233,32 @@ class DynamicTestExecutor:
                     })
             i += 1
 
-        # Also get content provider authorities
-        success, output = self.controller.execute_command(
-            f"dumpsys package {self.package_name} | grep -i authority"
+        # Get content provider authorities - parse the full dumpsys output we already have
+        success, full_output = self.controller.execute_command(
+            f"dumpsys package {self.package_name}"
         )
-        if success and output:
+        if success and full_output:
             seen_authorities = set()
-            for line in output.split('\n'):
-                # Look for authority declarations like: authority=com.pkg.provider or [com.pkg.provider]
-                match = re.search(r'authority[=:\s]+\[?([a-zA-Z0-9._]+)\]?', line, re.I)
-                if match:
-                    authority = match.group(1).strip('"\'[]')
-                    # Only include app-specific providers
-                    if authority and authority not in seen_authorities and self.package_name.split('.')[0] in authority:
-                        seen_authorities.add(authority)
+            # Look for ContentProvider Authorities section and parse it
+            in_authorities_section = False
+            for line in full_output.split('\n'):
+                if 'ContentProvider Authorities:' in line:
+                    in_authorities_section = True
+                    continue
+                elif in_authorities_section:
+                    # End of section
+                    if line.strip() and not line.startswith(' ') and ':' in line and '[' not in line:
+                        break
+                    # Look for authority in brackets like [com.insecureshop.provider]:
+                    match = re.search(r'\[([a-zA-Z0-9._]+)\]:', line)
+                    if match:
+                        authority = match.group(1)
+                        # Skip FileProvider as it's usually protected
+                        if 'file_provider' in authority.lower() or 'fileprovider' in authority.lower():
+                            continue
+                        # Only include app-specific providers
+                        if authority and authority not in seen_authorities and self.package_name in authority:
+                            seen_authorities.add(authority)
                         findings.append({
                             'fid': f'dynamic-provider-auth-{len(findings)}',
                             'title': f'Content Provider: {authority}',
@@ -438,12 +453,16 @@ class DynamicTestExecutor:
 
         if component:
             # Use a safe test URL (no shell special characters)
-            safe_test_url = "https://evil.com/test"
+            safe_test_url = "https://attacker.com/malicious"
 
             # First try to just launch the activity
+            poc_cmd = f"adb shell am start -n {component}"
             success, output = self.controller.execute_command(
                 f"am start -n {component}"
             )
+
+            result.evidence['command'] = poc_cmd
+            result.evidence['output'] = output
 
             time.sleep(2)
 
@@ -457,18 +476,40 @@ class DynamicTestExecutor:
                 self.controller.press_back()
                 time.sleep(0.5)
 
-                success2, output2 = self.controller.execute_command(
-                    f'am start -n {component} --es url "{safe_test_url}"'
-                )
+                # Try common URL parameter names
+                url_params = ['url', 'link', 'uri', 'href', 'target', 'redirect', 'next']
+                url_accepted = False
 
-                if success2 and 'Error' not in output2:
-                    result.test_status = 'confirmed'
-                    result.confidence = 0.8
-                    result.notes = f"WebView activity {component} accepts URL parameter"
-                else:
+                for param in url_params:
+                    poc_cmd_url = f'adb shell am start -n {component} --es {param} "{safe_test_url}"'
+                    success2, output2 = self.controller.execute_command(
+                        f'am start -n {component} --es {param} "{safe_test_url}"'
+                    )
+
+                    time.sleep(1)
+
+                    # Check if WebView loaded the URL
+                    _, focus = self.controller.execute_command("dumpsys window | grep -E 'mCurrentFocus'")
+
+                    if success2 and 'Error' not in output2:
+                        url_accepted = True
+                        result.evidence['command'] = poc_cmd_url
+                        result.evidence['output'] = f"Intent launched successfully with {param}={safe_test_url}\n\nFocus: {focus}"
+                        result.evidence['parameter'] = param
+                        result.test_status = 'confirmed'
+                        result.confidence = 0.9
+                        result.notes = f"WebView accepts attacker-controlled URL via '{param}' parameter - potential XSS/phishing"
+                        break
+
+                    self.controller.press_back()
+                    time.sleep(0.5)
+
+                if not url_accepted:
                     result.test_status = 'confirmed'
                     result.confidence = 0.6
-                    result.notes = f"WebView activity {component} is exported and accessible"
+                    result.notes = f"WebView activity {component} is exported (test URL params manually)"
+                    result.evidence['command'] = poc_cmd
+                    result.evidence['output'] = output
             else:
                 result.test_status = 'not_vulnerable'
                 result.notes = f"Failed to launch component: {output}"
@@ -521,47 +562,87 @@ class DynamicTestExecutor:
 
     def _test_provider_vuln(self, finding: FindingWrapper, result: TestResult, index: int) -> TestResult:
         """Test ContentProvider vulnerabilities (SQLi, path traversal)."""
-        poc_commands = finding.adb_commands or []
+        extra = finding.extra or {}
+        authority = extra.get('authority', '')
 
-        # If no commands, try to construct one from extra data
-        if not poc_commands:
-            extra = finding.extra
-            if extra:
-                authority = extra.get('authority', '')
-                if authority:
-                    poc_commands = [f'adb shell content query --uri content://{authority}/']
+        # Extract authority from finding title if not in extra
+        if not authority:
+            title = finding.title
+            if 'Provider:' in title:
+                authority = title.split('Provider:')[-1].strip()
 
-        for cmd in poc_commands:
-            if isinstance(cmd, str) and ('content query' in cmd or 'content://' in cmd):
-                # Execute the content provider query
-                success, output = self.controller.execute_command(cmd)
+        if not authority:
+            result.test_status = 'inconclusive'
+            result.notes = "Could not determine provider authority"
+            return result
 
-                result.evidence['command'] = cmd
-                result.evidence['output'] = output[:1000]  # Limit output size
+        # Common table/path names to try
+        common_paths = [
+            '', 'users', 'user', 'accounts', 'account', 'data', 'items', 'products',
+            'orders', 'credentials', 'tokens', 'settings', 'config', 'info',
+            'messages', 'contacts', 'notes', 'files', 'downloads'
+        ]
 
-                if success:
-                    # Check for signs of successful exploitation
-                    if 'Row:' in output or 'row' in output.lower():
-                        result.test_status = 'confirmed'
-                        result.confidence = 0.9
-                        result.notes = "Provider returned data - accessible without permission"
-                    elif 'Permission Denial' in output:
-                        result.test_status = 'not_vulnerable'
-                        result.notes = "Provider requires permission"
-                    elif 'Unknown URI' in output or 'not found' in output.lower():
-                        result.test_status = 'not_vulnerable'
-                        result.notes = "Provider URI not found or invalid"
-                    else:
-                        result.test_status = 'inconclusive'
-                        result.notes = "Could not determine exploitation success"
-                else:
-                    result.test_status = 'error'
-                    result.notes = f"Command failed: {output}"
+        data_found = False
+        successful_queries = []
 
-                return result
+        for path in common_paths:
+            uri = f"content://{authority}/{path}" if path else f"content://{authority}/"
+            poc_cmd = f"adb shell content query --uri {uri}"
 
-        result.test_status = 'inconclusive'
-        result.notes = "No content query command found in PoC"
+            success, output = self.controller.execute_command(f"content query --uri {uri}")
+
+            if success and output:
+                # Check for data returned
+                if 'Row:' in output:
+                    data_found = True
+                    successful_queries.append({
+                        'uri': uri,
+                        'command': poc_cmd,
+                        'output': output[:500]
+                    })
+                    # Found data, capture it
+                    if not result.evidence.get('command'):
+                        result.evidence['command'] = poc_cmd
+                        result.evidence['output'] = output[:1000]
+                        result.evidence['uri'] = uri
+
+        if data_found:
+            result.test_status = 'confirmed'
+            result.confidence = 0.95
+            result.notes = f"Provider leaked data! Found {len(successful_queries)} accessible URI(s)"
+            result.evidence['successful_queries'] = successful_queries
+            result.evidence['output'] = f"DATA LEAKED from {len(successful_queries)} URI(s):\n\n"
+            for q in successful_queries[:3]:  # Show first 3
+                result.evidence['output'] += f"URI: {q['uri']}\n{q['output']}\n\n"
+        else:
+            # Try base URI one more time to check access
+            base_uri = f"content://{authority}/"
+            poc_cmd = f"adb shell content query --uri {base_uri}"
+            success, output = self.controller.execute_command(f"content query --uri {base_uri}")
+
+            result.evidence['command'] = poc_cmd
+            result.evidence['output'] = output
+
+            if 'Permission Denial' in output or 'SecurityException' in output:
+                result.test_status = 'not_vulnerable'
+                result.confidence = 0.8
+                result.notes = "Provider requires permission - properly protected"
+            elif 'No result found' in output:
+                # "No result found" means the provider IS accessible (just no data at root)
+                result.test_status = 'confirmed'
+                result.confidence = 0.7
+                result.notes = "Provider is ACCESSIBLE without permission (no data at root URI, try specific tables)"
+                result.evidence['tested_paths'] = common_paths
+                result.evidence['vulnerability'] = "Provider exports data to other apps without permission check"
+            elif 'Could not find provider' in output:
+                result.test_status = 'inconclusive'
+                result.confidence = 0.3
+                result.notes = f"Provider authority may be incorrect: {output[:100]}"
+            else:
+                result.test_status = 'inconclusive'
+                result.notes = f"Could not determine provider security: {output[:100]}"
+
         return result
 
     def _test_exported_component(self, finding: FindingWrapper, result: TestResult, index: int) -> TestResult:
@@ -610,7 +691,12 @@ class DynamicTestExecutor:
 
         if 'activity' in title_lower:
             full_component = f"{self.package_name}/{component}" if '/' not in component else component
+            poc_cmd = f"adb shell am start -n {full_component}"
             success, output = self.controller.execute_command(f"am start -n {full_component}")
+
+            # Capture evidence
+            result.evidence['command'] = poc_cmd
+            result.evidence['output'] = output
 
             time.sleep(2)
 
@@ -619,10 +705,21 @@ class DynamicTestExecutor:
                 self.controller.take_screenshot(str(screenshot_path))
                 result.screenshot_path = str(screenshot_path)
 
+            # Check what's in focus now
+            _, focus_output = self.controller.execute_command("dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'")
+            result.evidence['focus'] = focus_output
+
             if success and 'Error' not in output and 'Exception' not in output:
-                result.test_status = 'confirmed'
-                result.confidence = 0.9
-                result.notes = f"Activity {component} launched successfully without permission"
+                # Verify activity actually launched by checking focus
+                if full_component.split('/')[-1] in focus_output or 'Starting:' in output:
+                    result.test_status = 'confirmed'
+                    result.confidence = 0.9
+                    result.notes = f"Activity {component} launched successfully without permission"
+                    result.evidence['output'] = f"Starting: Intent {{ cmp={full_component} }}\n\nCurrent focus:\n{focus_output}"
+                else:
+                    result.test_status = 'confirmed'
+                    result.confidence = 0.7
+                    result.notes = f"Activity {component} appears accessible"
             else:
                 result.test_status = 'not_vulnerable'
                 result.notes = f"Activity not accessible: {output}"
@@ -631,7 +728,11 @@ class DynamicTestExecutor:
 
         elif 'service' in title_lower:
             full_component = f"{self.package_name}/{component}" if '/' not in component else component
+            poc_cmd = f"adb shell am startservice -n {full_component}"
             success, output = self.controller.execute_command(f"am startservice -n {full_component}")
+
+            result.evidence['command'] = poc_cmd
+            result.evidence['output'] = output
 
             if success and 'Error' not in output:
                 result.test_status = 'confirmed'

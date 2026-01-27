@@ -14,7 +14,7 @@ from .report import generate_html_report, render_pdf_from_html
 from .scanner import Scanner
 from .patterns import PatternManager, PatternConfig
 from .utils import iter_source_files
-from .dynamic import GenymotionController, DynamicTestExecutor, AppMonitor
+from .dynamic import GenymotionController, DynamicTestExecutor, AppMonitor, generate_dynamic_report
 from .crawler import ThreatIntelUpdater, UpdateConfig
 from .visualizer import AppStructureAnalyzer, VisualizationRenderer, VisualizationConfig
 
@@ -1027,8 +1027,8 @@ def cmd_dynamic(args) -> int:
     print(f"\nConfirmed vulnerabilities: {len(confirmed)}")
     for r in confirmed:
         print(f"  [{r.severity.upper()}] {r.finding_title}")
-        if r.evidence:
-            print(f"    Evidence: {r.evidence[:100]}...")
+        if r.evidence and r.evidence.get('command'):
+            print(f"    PoC: {r.evidence.get('command', '')[:80]}")
 
     print(f"\nLikely vulnerable: {len(likely)}")
     for r in likely:
@@ -1044,10 +1044,17 @@ def cmd_dynamic(args) -> int:
     if report.sensitive_data_leaks:
         print(f"\n[!] SENSITIVE DATA LEAKS: {report.sensitive_data_leaks}")
 
-    # Export report
+    # Export JSON report
     report_path = os.path.join(out_dir, "dynamic_report.json")
     executor.export_report(report_path)
-    print(f"\n[+] Dynamic report saved: {report_path}")
+    print(f"\n[+] JSON report saved: {report_path}")
+
+    # Generate HTML report with PoC evidence
+    with open(report_path, 'r') as f:
+        report_data = json.load(f)
+    html_report_path = os.path.join(out_dir, "dynamic_report.html")
+    generate_dynamic_report(report_data, html_report_path)
+    print(f"[+] HTML report saved: {html_report_path}")
 
     # Cleanup
     executor.cleanup()
