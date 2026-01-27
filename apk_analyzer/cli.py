@@ -229,152 +229,415 @@ def interactive_mode() -> int:
     """Run interactive mode for APK analysis."""
     print_banner()
 
-    total_steps = 5
-
     # Step 1: Select operation mode
-    print_step(1, total_steps, "What would you like to do?")
+    print(f"""
+┌──────────────────────────────────────────────────────────────┐
+│  {Icons.GEAR} Select Operation                                      │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Analysis Pipeline (Recommended Order):                      │
+│  ─────────────────────────────────────                       │
+│  1. Threat Intel  →  2. Static  →  3. Dynamic                │
+│                                                              │
+│  Standalone:                                                 │
+│  ───────────                                                 │
+│  4. Visualization (App structure diagrams)                   │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+""")
+
     operation = prompt_choice("Select operation:", [
-        ("scan", "Security Scan - Find vulnerabilities in APK"),
-        ("visualize", "Visualize - Generate app structure diagrams"),
-        ("both", "Full Analysis - Scan + Visualize"),
+        ("pipeline", "Full Pipeline - Threat Intel → Static → Dynamic (Recommended)"),
+        ("threat_intel", "1. Threat Intelligence - Update vulnerability patterns"),
+        ("static", "2. Static Analysis - Scan APK for vulnerabilities"),
+        ("dynamic", "3. Dynamic Analysis - Test vulnerabilities on device"),
+        ("visualize", "4. Visualization - Generate app structure diagrams"),
         ("patterns", "Pattern Management - List/validate patterns"),
-        ("update", "Update Threat Intel - Fetch latest patterns"),
     ])
 
     if operation == "patterns":
         return cmd_patterns_interactive()
 
-    if operation == "update":
+    if operation == "threat_intel":
         return cmd_update_interactive()
 
-    # Step 2: APK file
-    print_step(2, total_steps, "Select APK file")
+    if operation == "visualize":
+        return interactive_visualize()
+
+    if operation == "dynamic":
+        return interactive_dynamic()
+
+    if operation == "static":
+        return interactive_static()
+
+    if operation == "pipeline":
+        return interactive_full_pipeline()
+
+    return 0
+
+
+def interactive_static() -> int:
+    """Interactive static analysis."""
+    print(f"""
+╔══════════════════════════════════════════════════════════════╗
+║  {Icons.SEARCH} Static Analysis                                      ║
+║  ────────────────────────────────────────────────────────    ║
+║  Scan APK for vulnerabilities using 77+ security patterns    ║
+╚══════════════════════════════════════════════════════════════╝
+""")
+
+    # APK file
+    print(f"   {Icons.FILE} APK Selection")
     apk_path = prompt_file("Enter path to APK file", must_exist=True, extension=".apk")
     print_success(f"APK: {os.path.basename(apk_path)}")
 
-    # Step 3: Threat intelligence
-    print_step(3, total_steps, "Threat Intelligence")
-    update_mode = prompt_choice("Update threat patterns before scan?", [
+    # Threat intel update
+    print(f"\n   {Icons.PACKAGE} Threat Intelligence")
+    update_mode = prompt_choice("Update patterns before scan?", [
         ("auto", "Auto - Update if older than 24 hours (Recommended)"),
-        ("force", "Force - Always fetch latest patterns"),
-        ("skip", "Skip - Use existing patterns only"),
+        ("skip", "Skip - Use existing patterns"),
+        ("force", "Force - Always fetch latest"),
     ])
 
-    # Step 4: Analysis options
-    print_step(4, total_steps, "Analysis Options")
+    # Options
+    keep_decompiled = prompt_yes_no("Keep decompiled sources?", default=False)
 
-    keep_decompiled = prompt_yes_no("Keep decompiled sources after analysis?", default=False)
-
-    custom_patterns = prompt_yes_no("Use custom patterns directory?", default=False)
-    patterns_dir = None
-    if custom_patterns:
-        patterns_dir = prompt_input("Custom patterns directory path")
-        if patterns_dir:
-            patterns_dir = os.path.abspath(os.path.expanduser(patterns_dir))
-
-    # Get reports directory path for display
-    reports_base = _get_reports_dir()
-
-    # Step 5: Confirmation
-    print_step(5, total_steps, "Review & Confirm")
-
-    # Operation icons
-    op_icons = {"scan": Icons.SEARCH, "visualize": Icons.CHART, "both": Icons.ROCKET}
-    op_icon = op_icons.get(operation, Icons.BULLET)
-
-    print(f"""
-   ┌──────────────────────────────────────────────────────────┐
-   │  {Icons.GEAR} Analysis Configuration                            │
-   ├──────────────────────────────────────────────────────────┤
-   │  {Icons.PACKAGE} APK File:        {os.path.basename(apk_path):<35} │
-   │  {op_icon} Operation:       {operation.title():<35} │
-   │  {Icons.PACKAGE} Threat Intel:    {update_mode.title():<35} │
-   │  {Icons.FILE} Keep Sources:    {'Yes' if keep_decompiled else 'No':<35} │
-   │  {Icons.FOLDER} Reports:         reports/<package_name>/{'':15} │
-   └──────────────────────────────────────────────────────────┘
-""")
-
-    if not prompt_yes_no(f"{Icons.ROCKET} Proceed with analysis?", default=True):
-        print_info("Analysis cancelled")
-        return 0
-
-    print(f"""
-╔══════════════════════════════════════════════════════════╗
-║  {Icons.ROCKET} Starting Analysis...                             ║
-╚══════════════════════════════════════════════════════════╝
-""")
-
-    # Build args object
+    # Build args
     class Args:
         pass
 
     args = Args()
     args.apk = apk_path
-    args.out = None  # Will be auto-determined based on package name
+    args.out = None
     args.jadx_path = None
     args.adb_path = "adb"
-    args.patterns_dir = patterns_dir
+    args.patterns_dir = None
     args.keep_decompiled = keep_decompiled
     args.no_update = (update_mode == "skip")
     args.force_update = (update_mode == "force")
     args.quiet_update = False
 
-    # Track the output directory (will be set by cmd_scan/cmd_visualize)
-    report_dir = None
+    print(f"\n{Icons.ROCKET} Starting static analysis...")
+    return cmd_scan(args)
 
-    # Run scan
-    if operation in ("scan", "both"):
-        result = cmd_scan(args)
-        if result != 0:
-            return result
 
-    # Run visualization
-    if operation in ("visualize", "both"):
-        args.no_components = False
-        args.no_calls = False
-        args.no_dataflow = False
-        args.no_hierarchy = False
-        result = cmd_visualize(args)
-        if result != 0:
-            return result
-
-    # Find the most recent reports directory
-    reports_base = Path(__file__).parent.parent / "reports"
-    if reports_base.exists():
-        # Get the most recently modified subdirectory
-        subdirs = [d for d in reports_base.iterdir() if d.is_dir()]
-        if subdirs:
-            report_dir = str(max(subdirs, key=lambda d: d.stat().st_mtime))
-
-    # Final summary
+def interactive_dynamic() -> int:
+    """Interactive dynamic analysis."""
     print(f"""
-╔══════════════════════════════════════════════════════════╗
-║  {Icons.CHECK} Analysis Complete!                                ║
-╚══════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════╗
+║  {Icons.BUG} Dynamic Analysis                                        ║
+║  ────────────────────────────────────────────────────────    ║
+║  Test vulnerabilities on a real device/emulator              ║
+╚══════════════════════════════════════════════════════════════╝
+""")
+
+    # Check for devices first
+    controller = GenymotionController()
+    devices = controller.list_devices()
+
+    if not devices:
+        print_error("No devices found!")
+        print_info("Start Genymotion or connect an Android device via ADB")
+        return 1
+
+    print(f"\n   {Icons.CHECK} Found {len(devices)} device(s):")
+    for d in devices:
+        dtype = "Genymotion" if d.is_genymotion else ("Emulator" if d.is_emulator else "Physical")
+        print(f"      • {d.model} ({d.serial}) - {dtype}")
+
+    # Ask for input method
+    print(f"\n   {Icons.GEAR} Test Configuration")
+    input_mode = prompt_choice("What do you want to test?", [
+        ("package", "Installed app - Test app already on device"),
+        ("apk", "APK file - Install and test APK"),
+        ("findings", "Static findings - Load findings from previous scan"),
+    ])
+
+    package_name = None
+    apk_path = None
+    static_findings = None
+
+    if input_mode == "package":
+        package_name = prompt_input("Enter package name (e.g., com.example.app)")
+        if not package_name:
+            print_error("Package name is required")
+            return 1
+
+    elif input_mode == "apk":
+        apk_path = prompt_file("Enter path to APK file", must_exist=True, extension=".apk")
+
+    elif input_mode == "findings":
+        # Look for recent scan reports
+        reports_base = Path(__file__).parent.parent / "reports"
+        if reports_base.exists():
+            subdirs = sorted([d for d in reports_base.iterdir() if d.is_dir()],
+                           key=lambda d: d.stat().st_mtime, reverse=True)
+            if subdirs:
+                print(f"\n   Recent scans:")
+                choices = []
+                for i, d in enumerate(subdirs[:5]):
+                    report_file = d / "report.html"
+                    if report_file.exists():
+                        choices.append((str(d), d.name))
+                        print(f"      {i+1}. {d.name}")
+
+                if choices:
+                    report_dir = prompt_input("Enter package name from above (or path to report dir)")
+                    # Find matching directory
+                    for path, name in choices:
+                        if name == report_dir or path == report_dir:
+                            # Load findings from JSON if available
+                            json_report = Path(path) / "findings.json"
+                            if json_report.exists():
+                                with open(json_report) as f:
+                                    static_findings = json.load(f)
+                            package_name = name
+                            break
+
+        if not package_name:
+            print_error("No previous scan found. Run static analysis first.")
+            return 1
+
+    # Select device if multiple
+    device_serial = None
+    if len(devices) > 1:
+        print(f"\n   {Icons.GEAR} Select device:")
+        device_choices = [(d.serial, f"{d.model} ({d.serial})") for d in devices]
+        device_serial = prompt_choice("Choose device:", device_choices)
+
+    # Output directory
+    out_dir = _get_reports_dir(package_name) if package_name else "dynamic_report"
+
+    # Build args
+    class Args:
+        pass
+
+    args = Args()
+    args.apk = apk_path
+    args.package = package_name
+    args.out = out_dir
+    args.device = device_serial
+    args.adb_path = "adb"
+    args.jadx_path = None
+    args.skip_static = (input_mode == "package" or input_mode == "findings")
+    args.timeout = 300
+    args.list_devices = False
+
+    print(f"\n{Icons.ROCKET} Starting dynamic analysis...")
+    return cmd_dynamic(args)
+
+
+def interactive_visualize() -> int:
+    """Interactive visualization."""
+    print(f"""
+╔══════════════════════════════════════════════════════════════╗
+║  {Icons.CHART} Visualization                                         ║
+║  ────────────────────────────────────────────────────────    ║
+║  Generate interactive diagrams of app structure              ║
+╚══════════════════════════════════════════════════════════════╝
+""")
+
+    # APK file
+    apk_path = prompt_file("Enter path to APK file", must_exist=True, extension=".apk")
+    print_success(f"APK: {os.path.basename(apk_path)}")
+
+    keep_decompiled = prompt_yes_no("Keep decompiled sources?", default=False)
+
+    # Build args
+    class Args:
+        pass
+
+    args = Args()
+    args.apk = apk_path
+    args.out = None
+    args.jadx_path = None
+    args.keep_decompiled = keep_decompiled
+    args.no_components = False
+    args.no_calls = False
+    args.no_dataflow = False
+    args.no_hierarchy = False
+
+    print(f"\n{Icons.ROCKET} Generating visualization...")
+    result = cmd_visualize(args)
+
+    if result == 0:
+        # Offer to open
+        reports_base = Path(__file__).parent.parent / "reports"
+        if reports_base.exists():
+            subdirs = sorted([d for d in reports_base.iterdir() if d.is_dir()],
+                           key=lambda d: d.stat().st_mtime, reverse=True)
+            if subdirs:
+                viz_file = subdirs[0] / "visualization.html"
+                if viz_file.exists() and prompt_yes_no("Open visualization in browser?", default=True):
+                    _open_file(str(viz_file))
+
+    return result
+
+
+def interactive_full_pipeline() -> int:
+    """Run full analysis pipeline: Threat Intel → Static → Dynamic."""
+    print(f"""
+╔══════════════════════════════════════════════════════════════╗
+║  {Icons.ROCKET} Full Analysis Pipeline                               ║
+║  ────────────────────────────────────────────────────────    ║
+║                                                              ║
+║  Step 1: Update Threat Intelligence                          ║
+║       ↓                                                      ║
+║  Step 2: Static Analysis (Scan APK)                          ║
+║       ↓                                                      ║
+║  Step 3: Dynamic Analysis (Test on Device)                   ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝
+""")
+
+    # APK file
+    print(f"   {Icons.FILE} APK Selection")
+    apk_path = prompt_file("Enter path to APK file", must_exist=True, extension=".apk")
+    print_success(f"APK: {os.path.basename(apk_path)}")
+
+    # Check for devices
+    print(f"\n   {Icons.GEAR} Checking for devices...")
+    controller = GenymotionController()
+    devices = controller.list_devices()
+
+    has_device = len(devices) > 0
+    if has_device:
+        print_success(f"Found {len(devices)} device(s) for dynamic analysis")
+        for d in devices:
+            dtype = "Genymotion" if d.is_genymotion else ("Emulator" if d.is_emulator else "Physical")
+            print(f"      • {d.model} ({d.serial}) - {dtype}")
+    else:
+        print_info("No devices found - will skip dynamic analysis")
+        print_info("Start Genymotion or connect a device to enable dynamic testing")
+
+    # Confirm
+    print(f"""
+   ┌──────────────────────────────────────────────────────────┐
+   │  {Icons.GEAR} Pipeline Configuration                            │
+   ├──────────────────────────────────────────────────────────┤
+   │  {Icons.FILE} APK:             {os.path.basename(apk_path):<35} │
+   │  {Icons.PACKAGE} Threat Intel:    Will update                         │
+   │  {Icons.SEARCH} Static Analysis: Enabled                             │
+   │  {Icons.BUG} Dynamic Analysis: {'Enabled' if has_device else 'Skipped (no device)':<30} │
+   └──────────────────────────────────────────────────────────┘
+""")
+
+    if not prompt_yes_no(f"{Icons.ROCKET} Start full pipeline?", default=True):
+        print_info("Pipeline cancelled")
+        return 0
+
+    # ═══════════════════════════════════════════════════════════
+    # STEP 1: Threat Intelligence
+    # ═══════════════════════════════════════════════════════════
+    print(f"""
+╔══════════════════════════════════════════════════════════════╗
+║  STEP 1/3: Threat Intelligence Update                        ║
+╚══════════════════════════════════════════════════════════════╝
+""")
+
+    config = UpdateConfig()
+    updater = ThreatIntelUpdater(config)
+    updater.update(force=False, quiet=False)
+
+    # ═══════════════════════════════════════════════════════════
+    # STEP 2: Static Analysis
+    # ═══════════════════════════════════════════════════════════
+    print(f"""
+╔══════════════════════════════════════════════════════════════╗
+║  STEP 2/3: Static Analysis                                   ║
+╚══════════════════════════════════════════════════════════════╝
+""")
+
+    class Args:
+        pass
+
+    args = Args()
+    args.apk = apk_path
+    args.out = None
+    args.jadx_path = None
+    args.adb_path = "adb"
+    args.patterns_dir = None
+    args.keep_decompiled = True  # Keep for dynamic analysis
+    args.no_update = True  # Already updated
+    args.force_update = False
+    args.quiet_update = True
+
+    result = cmd_scan(args)
+    if result != 0:
+        print_error("Static analysis failed")
+        return result
+
+    # Find the report directory
+    reports_base = Path(__file__).parent.parent / "reports"
+    report_dir = None
+    package_name = None
+    if reports_base.exists():
+        subdirs = sorted([d for d in reports_base.iterdir() if d.is_dir()],
+                        key=lambda d: d.stat().st_mtime, reverse=True)
+        if subdirs:
+            report_dir = subdirs[0]
+            package_name = report_dir.name
+
+    # ═══════════════════════════════════════════════════════════
+    # STEP 3: Dynamic Analysis
+    # ═══════════════════════════════════════════════════════════
+    if has_device and package_name:
+        print(f"""
+╔══════════════════════════════════════════════════════════════╗
+║  STEP 3/3: Dynamic Analysis                                  ║
+╚══════════════════════════════════════════════════════════════╝
+""")
+
+        # Select device if multiple
+        device_serial = None
+        if len(devices) > 1:
+            device_choices = [(d.serial, f"{d.model} ({d.serial})") for d in devices]
+            device_serial = prompt_choice("Choose device:", device_choices)
+
+        args = Args()
+        args.apk = apk_path
+        args.package = package_name
+        args.out = str(report_dir)
+        args.device = device_serial
+        args.adb_path = "adb"
+        args.jadx_path = None
+        args.skip_static = True  # Already did static analysis
+        args.timeout = 300
+        args.list_devices = False
+
+        result = cmd_dynamic(args)
+        if result != 0:
+            print_info("Dynamic analysis encountered issues (results may be partial)")
+
+    # ═══════════════════════════════════════════════════════════
+    # SUMMARY
+    # ═══════════════════════════════════════════════════════════
+    print(f"""
+╔══════════════════════════════════════════════════════════════╗
+║  {Icons.CHECK} Pipeline Complete!                                    ║
+╚══════════════════════════════════════════════════════════════╝
 """)
 
     if report_dir:
-        print(f"   {Icons.FOLDER} Reports saved to:")
-        print(f"   {report_dir}")
-        print("   " + "─" * 50)
+        print(f"   {Icons.FOLDER} Reports saved to: {report_dir}")
+        print(f"   ───────────────────────────────────────────")
 
-        report_html = os.path.join(report_dir, 'report.html')
-        viz_html = os.path.join(report_dir, 'visualization.html')
+        report_html = report_dir / "report.html"
+        dynamic_html = report_dir / "dynamic_report.html"
 
-        if operation in ("scan", "both") and os.path.exists(report_html):
-            print(f"   {Icons.FILE} report.html")
-        if operation in ("visualize", "both") and os.path.exists(viz_html):
-            print(f"   {Icons.CHART} visualization.html")
+        if report_html.exists():
+            print(f"   {Icons.FILE} Static Analysis:  report.html")
+        if dynamic_html.exists():
+            print(f"   {Icons.FILE} Dynamic Analysis: dynamic_report.html")
 
-        # Offer to open reports
+        # Offer to open
         print()
-        if prompt_yes_no(f"{Icons.ROCKET} Open reports in browser?", default=True):
-            if operation in ("scan", "both") and os.path.exists(report_html):
-                _open_file(report_html)
-            if operation in ("visualize", "both") and os.path.exists(viz_html):
-                _open_file(viz_html)
+        if prompt_yes_no("Open reports in browser?", default=True):
+            if report_html.exists():
+                _open_file(str(report_html))
+            if dynamic_html.exists():
+                _open_file(str(dynamic_html))
 
-    print(f"\n   {Icons.INFO} Thank you for using APK Analyzer!\n")
     return 0
 
 
