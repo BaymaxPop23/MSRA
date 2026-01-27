@@ -17,6 +17,9 @@ from .deep_analysis.provider import ContentProviderAnalyzer
 # Exploitability validation
 from .exploitability import ExploitabilityValidator, filter_false_positives
 
+# Reachability analysis for specific PoCs
+from .analysis.reachability import ReachabilityAnalyzer
+
 ANDROID_NS = "http://schemas.android.com/apk/res/android"
 
 
@@ -92,6 +95,9 @@ class Scanner:
         # Deduplicate findings (same title + same file = duplicate)
         findings = self._deduplicate_findings(findings)
 
+        # Run reachability analysis to generate specific PoCs
+        findings = self._enrich_with_reachability(findings)
+
         return findings
 
     def _init_deep_analyzers(self, sources_root: str):
@@ -103,6 +109,74 @@ class Scanner:
             self._provider_analyzer = ContentProviderAnalyzer(sources_root, self.manifest_data)
         except Exception as e:
             print(f"[!] Deep analysis init warning: {e}")
+
+    def _enrich_with_reachability(self, findings: List[Finding]) -> List[Finding]:
+        """Enrich findings with specific PoCs from reachability analysis."""
+        try:
+            analyzer = ReachabilityAnalyzer(self.decompiled_dir)
+            reachability_results = analyzer.analyze()
+
+            # Build a map of component name to reachability data
+            component_pocs = {}
+            for name, result in reachability_results.items():
+                if result.adb_commands:
+                    component_pocs[name] = result
+
+            # Enrich findings with specific PoCs
+            for finding in findings:
+                # Try to match finding to a component
+                matched_component = None
+
+                # Check evidence file path for component name
+                if finding.evidence and finding.evidence.file_path:
+                    file_name = os.path.basename(finding.evidence.file_path)
+                    class_name = file_name.replace('.java', '').replace('.kt', '')
+
+                    # Try to find matching component
+                    for comp_name in component_pocs:
+                        if class_name in comp_name or comp_name.endswith('.' + class_name):
+                            matched_component = comp_name
+                            break
+
+                # Check extra dict for component info
+                if not matched_component and finding.extra:
+                    comp_from_extra = finding.extra.get('component', '') or finding.extra.get('activity', '')
+                    if comp_from_extra:
+                        for comp_name in component_pocs:
+                            if comp_from_extra in comp_name or comp_name.endswith(comp_from_extra):
+                                matched_component = comp_name
+                                break
+
+                # If we found a matching component, use its specific PoCs
+                if matched_component and matched_component in component_pocs:
+                    result = component_pocs[matched_component]
+
+                    # Replace generic PoCs with specific ones
+                    if result.adb_commands:
+                        finding.adb_commands = result.adb_commands
+
+                    # Add deep links to extra
+                    if result.deep_links:
+                        if not finding.extra:
+                            finding.extra = {}
+                        finding.extra['deep_links'] = result.deep_links
+
+                    # Add attack scenarios
+                    if result.attack_scenarios:
+                        if not finding.extra:
+                            finding.extra = {}
+                        finding.extra['attack_scenarios'] = result.attack_scenarios
+
+                    # Add entry points
+                    if result.entry_points:
+                        if not finding.extra:
+                            finding.extra = {}
+                        finding.extra['entry_points'] = result.entry_points
+
+        except Exception as e:
+            print(f"[!] Reachability analysis warning: {e}")
+
+        return findings
 
     def _run_deep_analysis(self, sources_root: str) -> List[Finding]:
         """Run deep analysis on source files for comprehensive vulnerability detection."""

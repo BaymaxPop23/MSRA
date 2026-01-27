@@ -907,6 +907,9 @@ def cmd_scan(args) -> int:
         if hasattr(f, 'extra') and f.extra and 'category' in f.extra:
             category = f.extra['category']
 
+        # Get extra data including reachability info
+        extra_data = f.extra if hasattr(f, 'extra') and f.extra else {}
+
         finding_dict = {
             'fid': f.fid,
             'title': f.title,
@@ -921,7 +924,10 @@ def cmd_scan(args) -> int:
                 'snippet': getattr(f.evidence, 'snippet', None) if f.evidence else None,
             } if f.evidence else None,
             'adb_commands': f.adb_commands if hasattr(f, 'adb_commands') else [],
-            'extra': f.extra if hasattr(f, 'extra') else {},
+            'deep_links': extra_data.get('deep_links', []),
+            'attack_scenarios': extra_data.get('attack_scenarios', []),
+            'entry_points': extra_data.get('entry_points', []),
+            'extra': extra_data,
         }
         findings_data.append(finding_dict)
 
