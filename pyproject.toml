@@ -41,7 +41,7 @@ pdf = [
 ]
 
 [project.scripts]
-apkslayer = "apk_analyzer.cli:main"
+apkslayer = "apkslayer.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Sai-Jagadeesh/apk-analyzer"
@@ -50,7 +50,7 @@ Issues = "https://github.com/Sai-Jagadeesh/apk-analyzer/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["apk_analyzer*"]
+include = ["apkslayer*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.json"]
