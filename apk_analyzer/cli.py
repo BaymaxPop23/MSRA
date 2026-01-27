@@ -1173,7 +1173,6 @@ def cmd_visualize(args) -> int:
 
     html_path = os.path.join(out_dir, "visualization.html")
     renderer.render_html(html_path)
-
     print(f"[+] {Icons.CHART} Visualization saved: {html_path}")
 
     # Print summary

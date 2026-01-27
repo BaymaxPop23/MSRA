@@ -587,30 +587,150 @@ class AppStructureAnalyzer:
                 pass
 
     def _analyze_data_flows(self, structure: AppStructure) -> None:
-        """Analyze data flow through the application."""
-        for class_info in structure.classes.values():
+        """Analyze data flow through the application with detailed parameter extraction."""
+        # Risk matrix: source -> sink -> risk level
+        risk_matrix = {
+            'user_input': {'network': 'critical', 'database': 'critical', 'file': 'high', 'log': 'medium'},
+            'file': {'network': 'high', 'database': 'medium', 'file': 'low', 'log': 'medium'},
+            'network': {'database': 'high', 'file': 'high', 'log': 'medium', 'network': 'medium'},
+            'database': {'network': 'high', 'file': 'medium', 'log': 'medium', 'database': 'low'},
+        }
+
+        # Method pattern to find method context
+        method_pattern = re.compile(
+            r'(?:public|private|protected)?\s*(?:static)?\s*[\w<>\[\],\s]+\s+(\w+)\s*\(([^)]*)\)\s*(?:throws[^{]*)?\{',
+            re.MULTILINE
+        )
+
+        # Limit classes to process for performance (exclude known library packages)
+        library_prefixes = (
+            'androidx.', 'android.', 'com.google.', 'kotlin.', 'kotlinx.',
+            'okhttp3.', 'okio.', 'retrofit2.', 'com.squareup.', 'io.reactivex.',
+            'org.json.', 'org.apache.', 'com.fasterxml.', 'com.sun.', 'java.',
+            'javax.', 'sun.', 'dalvik.', 'org.intellij.', 'org.jetbrains.',
+        )
+        app_classes = [c for c in structure.classes.values()
+                       if not c.full_name.startswith(library_prefixes)][:500]
+
+        for class_info in app_classes:
             try:
                 with open(class_info.file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
 
-                # Check for data sources and sinks
+                # Quick check - skip if no sources or sinks
+                has_source = any(re.search(p, content) for patterns in self.DATA_SOURCES.values() for p in patterns)
+                has_sink = any(re.search(p, content) for patterns in self.DATA_SINKS.values() for p in patterns)
+                if not has_source or not has_sink:
+                    continue
+
+                # Find all methods in the class
+                methods = []
+                for match in method_pattern.finditer(content):
+                    methods.append({
+                        'name': match.group(1),
+                        'params': match.group(2),
+                        'start_pos': match.start(),
+                    })
+
+                # Find sources in this class
+                sources_found = []
                 for source_type, patterns in self.DATA_SOURCES.items():
                     for pattern in patterns:
-                        if re.search(pattern, content):
-                            # Found a data source, look for corresponding sinks
-                            for sink_type, sink_patterns in self.DATA_SINKS.items():
-                                for sink_pattern in sink_patterns:
-                                    if re.search(sink_pattern, content):
-                                        structure.data_flows.append(DataFlowInfo(
-                                            source=source_type,
-                                            sink=sink_type,
-                                            data_type=source_type,
-                                            path=[class_info.full_name],
-                                        ))
-                                        break
+                        match = re.search(pattern, content)
+                        if match:
+                            source_method = self._find_enclosing_method(methods, match.start())
+                            context = content[max(0, match.start()-50):match.end()+100]
+                            params = self._extract_params_from_context(context)
+                            sources_found.append({
+                                'type': source_type,
+                                'method': source_method,
+                                'params': params,
+                                'pos': match.start(),
+                            })
+                            break  # One source per type per class is enough
+
+                # Find sinks in this class
+                sinks_found = []
+                for sink_type, patterns in self.DATA_SINKS.items():
+                    for pattern in patterns:
+                        match = re.search(pattern, content)
+                        if match:
+                            sink_method = self._find_enclosing_method(methods, match.start())
+                            context = content[max(0, match.start()-20):match.end()+150]
+                            params = self._extract_params_from_context(context)
+                            sinks_found.append({
+                                'type': sink_type,
+                                'method': sink_method,
+                                'params': params,
+                                'pos': match.start(),
+                            })
+                            break  # One sink per type per class is enough
+
+                # Create flows for each source-sink pair
+                for source in sources_found:
+                    for sink in sinks_found:
+                        risk = risk_matrix.get(source['type'], {}).get(sink['type'], 'medium')
+
+                        # Extract taint chain between source and sink
+                        start_pos = min(source['pos'], sink['pos'])
+                        end_pos = max(source['pos'], sink['pos']) + 200
+                        code_segment = content[start_pos:end_pos]
+                        taint_chain = self._extract_taint_chain(code_segment)
+
+                        flow = DataFlowInfo(
+                            source=source['type'],
+                            sink=sink['type'],
+                            data_type=source['type'],
+                            path=[class_info.full_name],
+                            source_method=f"{class_info.name}.{source['method']}()" if source['method'] else class_info.name,
+                            sink_method=f"{class_info.name}.{sink['method']}()" if sink['method'] else class_info.name,
+                            parameters=source['params'] + sink['params'],
+                            taint_chain=taint_chain,
+                            is_user_controllable=(source['type'] == 'user_input'),
+                            risk_level=risk,
+                        )
+                        structure.data_flows.append(flow)
 
             except Exception:
                 pass
+
+    def _find_enclosing_method(self, methods: List[Dict], pos: int) -> str:
+        """Find the method that encloses a given position."""
+        enclosing = None
+        for method in methods:
+            if method['start_pos'] < pos:
+                if enclosing is None or method['start_pos'] > enclosing['start_pos']:
+                    enclosing = method
+        return enclosing['name'] if enclosing else ''
+
+    def _extract_params_from_context(self, context: str) -> List[str]:
+        """Extract parameter names from method call context."""
+        params = []
+        # Look for method call with parentheses
+        call_match = re.search(r'\w+\s*\(([^)]+)\)', context)
+        if call_match:
+            args = call_match.group(1)
+            # Extract variable names (simple heuristic)
+            for arg in args.split(','):
+                arg = arg.strip()
+                # Skip literals
+                if arg and not arg.startswith('"') and not arg.startswith("'") and not arg.isdigit():
+                    # Get just the variable name
+                    var_match = re.search(r'(\w+)(?:\.\w+)*$', arg)
+                    if var_match:
+                        params.append(var_match.group(1))
+        return params[:5]  # Limit to 5 params
+
+    def _extract_taint_chain(self, code_segment: str) -> List[str]:
+        """Extract variables that might carry data from source to sink."""
+        taint_chain = []
+        # Find variable assignments
+        assign_pattern = re.compile(r'(\w+)\s*=\s*[^=]')
+        for match in assign_pattern.finditer(code_segment):
+            var_name = match.group(1)
+            if var_name not in taint_chain and var_name not in ('this', 'null', 'true', 'false', 'String', 'int'):
+                taint_chain.append(var_name)
+        return taint_chain[:10]  # Limit chain length
 
     def _identify_entry_points(self, structure: AppStructure) -> None:
         """Identify application entry points."""
@@ -684,9 +804,9 @@ class AppStructureAnalyzer:
                         attack_surface.adb_commands.append(
                             f"adb shell am start -a android.intent.action.VIEW -d \"{deep_link}\""
                         )
-                    # Intent injection test
+                    # Intent injection test (use URL-encoded payload to avoid HTML issues)
                     attack_surface.adb_commands.append(
-                        f"adb shell am start -n {pkg}/{name} --es \"injection_test\" \"<script>alert(1)</script>\""
+                        f"adb shell am start -n {pkg}/{name} --es \"injection_test\" \"test_payload_123\""
                     )
 
                 elif comp.type == 'service':

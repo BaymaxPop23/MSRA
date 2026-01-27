@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -64,12 +65,13 @@ class VisualizationRenderer:
         """Render complete HTML visualization."""
         self.build_graphs()
 
-        html = self._generate_html()
+        html_content = self._generate_html()
 
         with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(html)
+            f.write(html_content)
 
         return output_path
+
 
     def _generate_html(self) -> str:
         """Generate HTML content."""
@@ -108,6 +110,8 @@ class VisualizationRenderer:
                 'Shows how data flows through the application from sources to sinks.',
                 self.graphs['data_flow'],
             ))
+            # Add detailed data flow table with parameters
+            sections.append(self._render_data_flow_details())
 
         # Call Graph section
         if 'calls' in self.graphs:
@@ -337,6 +341,81 @@ class VisualizationRenderer:
         </section>
         '''
 
+    def _render_data_flow_details(self) -> str:
+        """Render detailed data flow table with parameters for pentesting."""
+        if not self.structure.data_flows:
+            return ''
+
+        # Sort by risk level
+        risk_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
+        sorted_flows = sorted(
+            self.structure.data_flows,
+            key=lambda f: risk_order.get(f.risk_level, 2)
+        )
+
+        rows = []
+        risk_badges = {
+            'critical': '<span class="badge danger">CRITICAL</span>',
+            'high': '<span class="badge warning">HIGH</span>',
+            'medium': '<span class="badge info">MEDIUM</span>',
+            'low': '<span class="badge">LOW</span>',
+        }
+
+        for flow in sorted_flows[:30]:  # Limit to 30 flows
+            risk_badge = risk_badges.get(flow.risk_level, '<span class="badge">MEDIUM</span>')
+            user_badge = '<span class="badge danger">USER</span>' if flow.is_user_controllable else ''
+
+            # Format parameters
+            params_html = ''
+            if flow.parameters:
+                escaped_params = [html.escape(p) for p in flow.parameters[:5]]
+                params_html = '<code>' + '</code>, <code>'.join(escaped_params) + '</code>'
+            else:
+                params_html = '<span class="text-muted">-</span>'
+
+            # Format taint chain
+            taint_html = ''
+            if flow.taint_chain:
+                escaped_taint = [html.escape(t) for t in flow.taint_chain[:5]]
+                taint_html = ' → '.join(f'<code>{t}</code>' for t in escaped_taint)
+            else:
+                taint_html = '<span class="text-muted">-</span>'
+
+            rows.append(f'''
+                <tr class="filterable" data-risk="{flow.risk_level}" data-category="data-flow" data-source="{html.escape(flow.source)}">
+                    <td>{risk_badge} {user_badge}</td>
+                    <td><span class="source-tag">{html.escape(flow.source)}</span> → <span class="sink-tag">{html.escape(flow.sink)}</span></td>
+                    <td><code class="method">{html.escape(flow.source_method)}</code></td>
+                    <td><code class="method">{html.escape(flow.sink_method)}</code></td>
+                    <td class="params-cell">{params_html}</td>
+                    <td class="taint-cell">{taint_html}</td>
+                </tr>
+            ''')
+
+        return f'''
+        <section id="data-flow-details" class="section filterable-section" data-section="data-flow">
+            <h2>📊 Data Flow Details</h2>
+            <p class="description">Detailed data flow analysis showing source-to-sink paths, parameters, and taint propagation for security testing.</p>
+            <div class="table-container">
+                <table class="data-flow-table filterable-table">
+                    <thead>
+                        <tr>
+                            <th>Risk</th>
+                            <th>Flow</th>
+                            <th>Source Method</th>
+                            <th>Sink Method</th>
+                            <th>Parameters</th>
+                            <th>Taint Chain</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {''.join(rows)}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+        '''
+
     def _render_attack_surface_section(self) -> str:
         """Render attack surface section with ADB commands."""
         if not self.structure.attack_surfaces:
@@ -356,22 +435,22 @@ class VisualizationRenderer:
             }
             color = type_colors.get(surface.component_type, '')
 
-            # Deep links
+            # Deep links (escape HTML)
             deep_links_html = ''
             if surface.deep_links:
-                links = ''.join(f'<li><code>{link}</code></li>' for link in surface.deep_links[:5])
+                links = ''.join(f'<li><code>{html.escape(link)}</code></li>' for link in surface.deep_links[:5])
                 deep_links_html = f'''
                 <div class="attack-section">
                     <h5>🔗 Deep Links</h5>
                     <ul>{links}</ul>
                 </div>'''
 
-            # ADB commands
+            # ADB commands (escape HTML to prevent XSS)
             adb_html = ''
             if surface.adb_commands:
                 cmds = ''.join(f'''
                     <div class="adb-command">
-                        <code>{cmd}</code>
+                        <code>{html.escape(cmd)}</code>
                         <button class="copy-btn" onclick="copyToClipboard(this)">📋</button>
                     </div>''' for cmd in surface.adb_commands[:5])
                 adb_html = f'''
@@ -380,10 +459,10 @@ class VisualizationRenderer:
                     {cmds}
                 </div>'''
 
-            # Frida hooks
+            # Frida hooks (escape HTML)
             frida_html = ''
             if surface.frida_hooks:
-                hook = surface.frida_hooks[0] if surface.frida_hooks else ''
+                hook = html.escape(surface.frida_hooks[0]) if surface.frida_hooks else ''
                 frida_html = f'''
                 <div class="attack-section">
                     <h5>🪝 Frida Hook</h5>
@@ -393,12 +472,12 @@ class VisualizationRenderer:
             cards.append(f'''
             <div class="attack-card">
                 <div class="attack-header">
-                    <span class="badge {color}">{surface.component_type.upper()}</span>
-                    <span class="component-name">{surface.component_name.split(".")[-1]}</span>
+                    <span class="badge {color}">{html.escape(surface.component_type.upper())}</span>
+                    <span class="component-name">{html.escape(surface.component_name.split(".")[-1])}</span>
                     {'<span class="badge danger">EXPORTED</span>' if surface.exported else ''}
                 </div>
                 <div class="attack-body">
-                    <p class="full-name"><code>{surface.component_name}</code></p>
+                    <p class="full-name"><code>{html.escape(surface.component_name)}</code></p>
                     {deep_links_html}
                     {adb_html}
                     {frida_html}
@@ -430,25 +509,28 @@ class VisualizationRenderer:
             'intent': '<span class="badge info">INTENT</span>',
         }
 
+        risk_map = {'sql': 'high', 'command': 'high', 'path': 'medium', 'xss': 'medium', 'intent': 'medium'}
+
         for point in self.structure.injection_points[:20]:  # Limit to 20
-            badge = type_badges.get(point.injection_type, f'<span class="badge">{point.injection_type}</span>')
+            badge = type_badges.get(point.injection_type, f'<span class="badge">{html.escape(point.injection_type)}</span>')
+            risk = risk_map.get(point.injection_type, 'medium')
 
             rows.append(f'''
-                <tr>
+                <tr class="filterable" data-risk="{risk}" data-category="injection" data-type="{html.escape(point.injection_type)}">
                     <td>{badge}</td>
-                    <td><code>{point.class_name.split(".")[-1]}</code></td>
+                    <td><code>{html.escape(point.class_name.split(".")[-1])}</code></td>
                     <td>Line {point.line_number}</td>
-                    <td><code class="sink">{point.sink_method}</code></td>
-                    <td><code class="exploit">{point.exploit_example}</code></td>
+                    <td><code class="sink">{html.escape(point.sink_method)}</code></td>
+                    <td><code class="exploit">{html.escape(point.exploit_example)}</code></td>
                 </tr>
             ''')
 
         return f'''
-        <section id="injection-points" class="section">
+        <section id="injection-points" class="section filterable-section" data-section="injection">
             <h2>💉 Potential Injection Points</h2>
             <p class="description">Locations where user-controlled input may reach dangerous sinks.</p>
             <div class="table-container">
-                <table>
+                <table class="filterable-table">
                     <thead>
                         <tr>
                             <th>Type</th>
@@ -479,16 +561,16 @@ class VisualizationRenderer:
             display_name = name.replace('_', ' ').title()
 
             tabs.append(f'''
-                <button class="tab-btn {active}" onclick="showFridaTab('{name}')">{display_name}</button>
+                <button class="tab-btn {active}" onclick="showFridaTab('{html.escape(name)}')">{html.escape(display_name)}</button>
             ''')
 
             contents.append(f'''
-                <div id="frida-{name}" class="tab-content {active}">
+                <div id="frida-{html.escape(name)}" class="tab-content {active}">
                     <div class="script-header">
-                        <span>{display_name}</span>
-                        <button class="copy-btn" onclick="copyScript('{name}')">📋 Copy Script</button>
+                        <span>{html.escape(display_name)}</span>
+                        <button class="copy-btn" onclick="copyScript('{html.escape(name)}')">📋 Copy Script</button>
                     </div>
-                    <pre class="frida-script"><code id="script-{name}">{script}</code></pre>
+                    <pre class="frida-script"><code id="script-{html.escape(name)}">{html.escape(script)}</code></pre>
                 </div>
             ''')
 
@@ -588,6 +670,96 @@ class VisualizationRenderer:
 
         .nav a:hover {{
             background: var(--bg-secondary);
+        }}
+
+        /* Filter Bar */
+        .filter-bar {{
+            background: var(--bg-primary);
+            padding: 15px 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            align-items: center;
+        }}
+
+        .filter-group {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }}
+
+        .filter-group label {{
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            font-weight: 500;
+        }}
+
+        .filter-group select,
+        .filter-group input {{
+            padding: 8px 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            font-size: 0.9rem;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-width: 120px;
+        }}
+
+        .filter-group input {{
+            min-width: 180px;
+        }}
+
+        .filter-group select:focus,
+        .filter-group input:focus {{
+            outline: none;
+            border-color: var(--accent-color);
+            box-shadow: 0 0 0 2px rgba(13, 110, 253, 0.15);
+        }}
+
+        .filter-reset {{
+            padding: 8px 16px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            color: var(--text-primary);
+            transition: background 0.2s;
+        }}
+
+        .filter-reset:hover {{
+            background: var(--border-color);
+        }}
+
+        .filter-count {{
+            margin-left: auto;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            background: var(--bg-secondary);
+            padding: 6px 12px;
+            border-radius: 20px;
+        }}
+
+        .filterable.hidden {{
+            display: none;
+        }}
+
+        @media (max-width: 768px) {{
+            .filter-bar {{
+                flex-direction: column;
+                align-items: stretch;
+            }}
+            .filter-group {{
+                flex-direction: column;
+                align-items: stretch;
+            }}
+            .filter-count {{
+                margin-left: 0;
+                text-align: center;
+            }}
         }}
 
         .section {{
@@ -853,6 +1025,60 @@ class VisualizationRenderer:
             background: #1e1e1e;
         }}
 
+        /* Data Flow Details Styles */
+        .data-flow-table {{
+            font-size: 0.9rem;
+        }}
+
+        .data-flow-table td {{
+            vertical-align: top;
+        }}
+
+        .source-tag {{
+            background: #d4edda;
+            color: #155724;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }}
+
+        .sink-tag {{
+            background: #f8d7da;
+            color: #721c24;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }}
+
+        .method {{
+            color: #6f42c1;
+            font-size: 0.85rem;
+            word-break: break-all;
+        }}
+
+        .params-cell code {{
+            background: #e3f2fd;
+            color: #1565c0;
+            margin: 2px;
+            display: inline-block;
+        }}
+
+        .taint-cell {{
+            font-size: 0.85rem;
+        }}
+
+        .taint-cell code {{
+            background: #fff3e0;
+            color: #e65100;
+        }}
+
+        .text-muted {{
+            color: var(--text-secondary);
+            font-style: italic;
+        }}
+
         /* Frida Scripts Styles */
         .frida-container {{
             background: var(--bg-secondary);
@@ -962,11 +1188,40 @@ class VisualizationRenderer:
             <a href="#entry_points">Entry Points</a>
             <a href="#components">Components</a>
             <a href="#data_flow">Data Flow</a>
+            <a href="#data-flow-details">📊 Flow Details</a>
             <a href="#attack-surface">🎯 Attack Surface</a>
             <a href="#injection-points">💉 Injections</a>
             <a href="#frida-scripts">🪝 Frida</a>
             <a href="#component-details">Details</a>
         </nav>
+
+        <!-- Filter Bar -->
+        <div class="filter-bar">
+            <div class="filter-group">
+                <label>Risk Level:</label>
+                <select id="filter-risk" onchange="applyFilters()">
+                    <option value="all">All</option>
+                    <option value="critical">Critical</option>
+                    <option value="high">High</option>
+                    <option value="medium">Medium</option>
+                    <option value="low">Low</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>Category:</label>
+                <select id="filter-category" onchange="applyFilters()">
+                    <option value="all">All</option>
+                    <option value="data-flow">Data Flow</option>
+                    <option value="injection">Injection</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>Search:</label>
+                <input type="text" id="filter-search" placeholder="Search..." oninput="applyFilters()">
+            </div>
+            <button class="filter-reset" onclick="resetFilters()">Reset</button>
+            <span class="filter-count"><span id="visible-count">0</span> items</span>
+        </div>
 
         {sections}
 
@@ -1028,6 +1283,48 @@ class VisualizationRenderer:
             document.getElementById('frida-' + name).classList.add('active');
             event.target.classList.add('active');
         }}
+
+        // Filtering functionality
+        function applyFilters() {{
+            const riskFilter = document.getElementById('filter-risk').value;
+            const categoryFilter = document.getElementById('filter-category').value;
+            const searchFilter = document.getElementById('filter-search').value.toLowerCase();
+
+            const rows = document.querySelectorAll('.filterable');
+            let visibleCount = 0;
+
+            rows.forEach(row => {{
+                const risk = row.dataset.risk || '';
+                const category = row.dataset.category || '';
+                const text = row.textContent.toLowerCase();
+
+                const matchRisk = riskFilter === 'all' || risk === riskFilter;
+                const matchCategory = categoryFilter === 'all' || category === categoryFilter;
+                const matchSearch = !searchFilter || text.includes(searchFilter);
+
+                if (matchRisk && matchCategory && matchSearch) {{
+                    row.classList.remove('hidden');
+                    visibleCount++;
+                }} else {{
+                    row.classList.add('hidden');
+                }}
+            }});
+
+            document.getElementById('visible-count').textContent = visibleCount;
+        }}
+
+        function resetFilters() {{
+            document.getElementById('filter-risk').value = 'all';
+            document.getElementById('filter-category').value = 'all';
+            document.getElementById('filter-search').value = '';
+            applyFilters();
+        }}
+
+        // Initialize count on page load
+        document.addEventListener('DOMContentLoaded', function() {{
+            const count = document.querySelectorAll('.filterable').length;
+            document.getElementById('visible-count').textContent = count;
+        }});
     </script>
 </body>
 </html>'''
