@@ -261,16 +261,24 @@ class GenymotionController:
             return False, "No device connected"
 
         # Handle full adb commands vs shell commands
-        if command.startswith("adb "):
-            # Replace 'adb' with actual path and add device serial
-            cmd_parts = command.split()
-            cmd_parts[0] = self.adb_path
-            # Insert -s serial after adb
-            cmd_parts.insert(1, "-s")
-            cmd_parts.insert(2, self.current_device.serial)
-            cmd = cmd_parts
+        if command.startswith("adb shell "):
+            # Full adb shell command - pass the shell part as a single string
+            shell_cmd = command[10:]  # Remove "adb shell "
+            cmd = [self.adb_path, "-s", self.current_device.serial, "shell", shell_cmd]
+        elif command.startswith("adb "):
+            # Other adb command (not shell) - need to parse carefully
+            # Remove "adb " prefix and use shlex for proper parsing
+            import shlex
+            try:
+                cmd_parts = shlex.split(command[4:])  # Remove "adb "
+                cmd = [self.adb_path, "-s", self.current_device.serial] + cmd_parts
+            except ValueError:
+                # Fallback to simple split if shlex fails
+                cmd_parts = command[4:].split()
+                cmd = [self.adb_path, "-s", self.current_device.serial] + cmd_parts
         else:
-            cmd = [self.adb_path, "-s", self.current_device.serial, "shell"] + command.split()
+            # Plain shell command - pass as single string to shell
+            cmd = [self.adb_path, "-s", self.current_device.serial, "shell", command]
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)

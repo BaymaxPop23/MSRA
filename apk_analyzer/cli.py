@@ -1053,12 +1053,12 @@ def cmd_dynamic(args) -> int:
     executor.cleanup()
 
     # Generate combined HTML report if we have static findings
-    if findings:
+    if findings and apk_path:
         html_path = os.path.join(out_dir, "combined_report.html")
         metadata = {
             "title": "APK Analyzer - Combined Security Report",
             "package": package_name,
-            "apk": os.path.basename(apk_path),
+            "apk": os.path.basename(apk_path) if apk_path else "N/A",
             "scan_time": datetime.now().isoformat(),
             "dynamic_results": {
                 "confirmed": len(confirmed),

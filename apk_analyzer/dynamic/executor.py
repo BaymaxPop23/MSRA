@@ -157,10 +157,11 @@ class DynamicTestExecutor:
     def discover_attack_surface(self) -> List[Dict]:
         """Discover testable components from an installed app (no static analysis needed)."""
         findings = []
+        seen_components = set()  # Track unique components
 
         print("[*] Discovering attack surface from installed app...")
 
-        # Get package info using dumpsys
+        # Get exported components directly using dumpsys
         success, output = self.controller.execute_command(
             f"dumpsys package {self.package_name}"
         )
@@ -169,68 +170,82 @@ class DynamicTestExecutor:
             print("[!] Failed to get package info")
             return findings
 
-        # Parse exported activities
-        in_activities = False
-        in_services = False
-        in_receivers = False
-        in_providers = False
+        # Parse the package dump for exported components
+        lines = output.split('\n')
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
 
-        for line in output.split('\n'):
-            line = line.strip()
-
-            # Detect section changes
-            if 'Activity Resolver Table:' in line:
-                in_activities = True
-                in_services = in_receivers = in_providers = False
-            elif 'Service Resolver Table:' in line:
-                in_services = True
-                in_activities = in_receivers = in_providers = False
-            elif 'Receiver Resolver Table:' in line:
-                in_receivers = True
-                in_activities = in_services = in_providers = False
-            elif 'Provider Resolver Table:' in line or 'ContentProvider' in line:
-                in_providers = True
-                in_activities = in_services = in_receivers = False
-            elif 'Resolver Table:' in line:
-                in_activities = in_services = in_receivers = in_providers = False
-
-            # Extract component names
-            if self.package_name in line and '/' in line:
-                # Extract component like com.example/.MainActivity
-                match = re.search(rf'({self.package_name}/[\w.$]+)', line)
+            # Look for activity declarations
+            if f'{self.package_name}/' in line:
+                match = re.search(rf'({self.package_name}/([\w.$]+))', line)
                 if match:
-                    component = match.group(1)
-                    comp_type = 'activity' if in_activities else 'service' if in_services else 'receiver' if in_receivers else 'provider' if in_providers else 'unknown'
+                    full_component = match.group(1)
+                    component_class = match.group(2)
 
-                    # Create a finding-like dict
+                    # Skip if already seen
+                    if full_component in seen_components:
+                        i += 1
+                        continue
+                    seen_components.add(full_component)
+
+                    # Determine component type from context
+                    comp_type = 'activity'  # default
+                    context_start = max(0, i - 10)
+                    context = '\n'.join(lines[context_start:i])
+                    if 'Service Resolver' in context or 'service' in line.lower():
+                        comp_type = 'service'
+                    elif 'Receiver Resolver' in context or 'receiver' in line.lower():
+                        comp_type = 'receiver'
+                    elif 'Provider' in context or 'provider' in line.lower():
+                        comp_type = 'provider'
+
+                    # Skip library components
+                    if component_class.startswith('androidx.') or component_class.startswith('android.'):
+                        i += 1
+                        continue
+
+                    # Create ADB command based on type
+                    if comp_type == 'activity':
+                        adb_cmd = f'adb shell am start -n {full_component}'
+                    elif comp_type == 'service':
+                        adb_cmd = f'adb shell am startservice -n {full_component}'
+                    elif comp_type == 'receiver':
+                        adb_cmd = f'adb shell am broadcast -n {full_component}'
+                    else:
+                        adb_cmd = f'adb shell content query --uri content://{self.package_name}.provider/'
+
                     findings.append({
                         'fid': f'dynamic-{comp_type}-{len(findings)}',
-                        'title': f'Exported {comp_type.title()}: {component.split("/")[-1]}',
+                        'title': f'Exported {comp_type.title()}: {component_class}',
                         'severity': 'medium' if comp_type == 'activity' else 'high',
-                        'category': 'component',
+                        'category': comp_type,
                         'extra': {
-                            'entry_points': [component.split('/')[1]],
+                            'component': full_component,
+                            'component_class': component_class,
+                            'entry_points': [component_class],
                             'component_type': comp_type,
                         },
-                        'adb_commands': [
-                            f'adb shell am start -n {component}' if comp_type == 'activity' else
-                            f'adb shell am startservice -n {component}' if comp_type == 'service' else
-                            f'adb shell am broadcast -n {component}'
-                        ]
+                        'adb_commands': [adb_cmd]
                     })
+            i += 1
 
-        # Get exported content providers
+        # Also get content provider authorities
         success, output = self.controller.execute_command(
-            f"dumpsys package providers | grep -A5 '{self.package_name}'"
+            f"dumpsys package {self.package_name} | grep -i authority"
         )
         if success and output:
+            seen_authorities = set()
             for line in output.split('\n'):
-                if 'authority=' in line.lower():
-                    match = re.search(r'authority[=:]?\s*([^\s;]+)', line, re.I)
-                    if match:
-                        authority = match.group(1)
+                # Look for authority declarations like: authority=com.pkg.provider or [com.pkg.provider]
+                match = re.search(r'authority[=:\s]+\[?([a-zA-Z0-9._]+)\]?', line, re.I)
+                if match:
+                    authority = match.group(1).strip('"\'[]')
+                    # Only include app-specific providers
+                    if authority and authority not in seen_authorities and self.package_name.split('.')[0] in authority:
+                        seen_authorities.add(authority)
                         findings.append({
-                            'fid': f'dynamic-provider-{len(findings)}',
+                            'fid': f'dynamic-provider-auth-{len(findings)}',
                             'title': f'Content Provider: {authority}',
                             'severity': 'high',
                             'category': 'provider',
@@ -414,13 +429,20 @@ class DynamicTestExecutor:
         # If we got here, try to launch the component directly
         extra = finding.extra
         entry_points = extra.get('entry_points', []) if extra else []
+        component = extra.get('component', '') if extra else ''
 
-        if entry_points:
+        if not component and entry_points:
             component = entry_points[0]
-            full_component = f"{self.package_name}/{component}"
+            if not component.startswith(self.package_name):
+                component = f"{self.package_name}/{component}"
 
+        if component:
+            # Use a safe test URL (no shell special characters)
+            safe_test_url = "https://evil.com/test"
+
+            # First try to just launch the activity
             success, output = self.controller.execute_command(
-                f"am start -n {full_component} --es url '{attack_url}'"
+                f"am start -n {component}"
             )
 
             time.sleep(2)
@@ -430,10 +452,23 @@ class DynamicTestExecutor:
                 self.controller.take_screenshot(str(screenshot_path))
                 result.screenshot_path = str(screenshot_path)
 
-            if success:
-                result.test_status = 'confirmed'
-                result.confidence = 0.7
-                result.notes = f"Successfully launched {component} with URL parameter"
+            if success and 'Error' not in output:
+                # Activity launched - now try with URL parameter
+                self.controller.press_back()
+                time.sleep(0.5)
+
+                success2, output2 = self.controller.execute_command(
+                    f'am start -n {component} --es url "{safe_test_url}"'
+                )
+
+                if success2 and 'Error' not in output2:
+                    result.test_status = 'confirmed'
+                    result.confidence = 0.8
+                    result.notes = f"WebView activity {component} accepts URL parameter"
+                else:
+                    result.test_status = 'confirmed'
+                    result.confidence = 0.6
+                    result.notes = f"WebView activity {component} is exported and accessible"
             else:
                 result.test_status = 'not_vulnerable'
                 result.notes = f"Failed to launch component: {output}"
@@ -488,8 +523,16 @@ class DynamicTestExecutor:
         """Test ContentProvider vulnerabilities (SQLi, path traversal)."""
         poc_commands = finding.adb_commands or []
 
+        # If no commands, try to construct one from extra data
+        if not poc_commands:
+            extra = finding.extra
+            if extra:
+                authority = extra.get('authority', '')
+                if authority:
+                    poc_commands = [f'adb shell content query --uri content://{authority}/']
+
         for cmd in poc_commands:
-            if isinstance(cmd, str) and 'content query' in cmd:
+            if isinstance(cmd, str) and ('content query' in cmd or 'content://' in cmd):
                 # Execute the content provider query
                 success, output = self.controller.execute_command(cmd)
 
@@ -525,7 +568,18 @@ class DynamicTestExecutor:
         """Test exported component accessibility."""
         # Extract component name from finding
         extra = finding.extra
-        component = extra.get('component', '') if extra else ''
+        component = ''
+
+        if extra:
+            # Try full component path first (com.pkg/.Activity)
+            component = extra.get('component', '')
+            if not component:
+                # Try component_class
+                component_class = extra.get('component_class', '')
+                if component_class:
+                    component = f"{self.package_name}/{component_class}"
+                elif extra.get('entry_points'):
+                    component = f"{self.package_name}/{extra['entry_points'][0]}"
 
         if not component:
             # Try to extract from evidence
@@ -535,6 +589,16 @@ class DynamicTestExecutor:
                     component = evidence.get('matched_text', '')
                 elif hasattr(evidence, 'matched_text'):
                     component = evidence.matched_text or ''
+
+        # Try to get from adb_commands as fallback
+        if not component:
+            adb_cmds = finding.adb_commands or []
+            for cmd in adb_cmds:
+                if isinstance(cmd, str) and '-n ' in cmd:
+                    match = re.search(r'-n\s+(\S+)', cmd)
+                    if match:
+                        component = match.group(1)
+                        break
 
         if not component:
             result.test_status = 'inconclusive'
