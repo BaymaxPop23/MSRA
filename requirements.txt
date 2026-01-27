@@ -1,4 +1,4 @@
-# APK Analyzer - Requirements
+# APKSlayer - Requirements
 #
 # Core dependencies: None (stdlib only)
 #

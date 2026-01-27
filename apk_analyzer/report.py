@@ -1,4 +1,4 @@
-"""Clean HTML report generation for APK Analyzer."""
+"""Clean HTML report generation for APKSlayer."""
 
 import datetime as dt
 import html

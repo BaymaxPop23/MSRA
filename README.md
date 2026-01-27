@@ -1,6 +1,8 @@
-# APK Analyzer
+# APKSlayer
 
 Android APK security vulnerability scanner with pattern-based detection, deep analysis, visualization, and dynamic testing capabilities.
+
+> *Slay vulnerabilities before they slay your users.*
 
 ![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![License MIT](https://img.shields.io/badge/license-MIT-green.svg)
@@ -62,8 +64,8 @@ Android APK security vulnerability scanner with pattern-based detection, deep an
 
 ```bash
 # Clone the repository
-git clone https://github.com/Sai-Jagadeesh/apk-analyzer.git
-cd apk-analyzer
+git clone https://github.com/Sai-Jagadeesh/apkslayer.git
+cd apkslayer
 
 # Option 1: Run directly (no install needed)
 python main.py
@@ -72,7 +74,7 @@ python main.py
 pip install -e .
 
 # Then run from anywhere
-apk-analyzer
+apkslayer
 ```
 
 ### Installing jadx (required)
@@ -326,7 +328,7 @@ The enhanced mode gracefully degrades when optional dependencies aren't availabl
 ## Project Structure
 
 ```
-apk-analyzer/
+apkslayer/
 ├── main.py                # Entry point
 ├── apk_analyzer/
 │   ├── cli.py             # Interactive & command-line interface

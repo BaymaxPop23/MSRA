@@ -1,4 +1,4 @@
-"""Command-line interface for APK Analyzer."""
+"""Command-line interface for APKSlayer."""
 
 import argparse
 import json
@@ -89,7 +89,7 @@ class Icons:
 
 
 def print_banner():
-    """Print the APK Analyzer banner."""
+    """Print the APKSlayer banner."""
     # Get actual pattern count
     try:
         manager = PatternManager()
@@ -101,13 +101,13 @@ def print_banner():
     banner = f"""
 ╔══════════════════════════════════════════════════════════════╗
 ║                                                              ║
-║   {Icons.SHIELD}APK ANALYZER                                       ║
+║   ⚔️  APKSlayer                                               ║
 ║                                                              ║
-║   Android Security Vulnerability Scanner                     ║
-║   ──────────────────────────────────────                     ║
+║   Slay vulnerabilities before they slay your users           ║
+║   ──────────────────────────────────────────────             ║
 ║   {Icons.BULLET} {pattern_count}+ Security Patterns                              ║
 ║   {Icons.BULLET} Deep Analysis Engine                               ║
-║   {Icons.BULLET} Visual Reports & Graphs                            ║
+║   {Icons.BULLET} Dynamic Verification                               ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
 """
@@ -1085,7 +1085,7 @@ def cmd_scan(args) -> int:
     # Generate HTML report with embedded JSON
     html_path = os.path.join(out_dir, "report.html")
     metadata = {
-        "title": "APK Analyzer Security Report",
+        "title": "APKSlayer Security Report",
         "package": package_name,
         "apk": os.path.basename(apk_path),
         "scan_time": scan_time,
@@ -1604,7 +1604,7 @@ def cmd_dynamic(args) -> int:
     if findings and apk_path:
         html_path = os.path.join(out_dir, "combined_report.html")
         metadata = {
-            "title": "APK Analyzer - Combined Security Report",
+            "title": "APKSlayer - Combined Security Report",
             "package": package_name,
             "apk": os.path.basename(original_apk_path or apk_path) if apk_path else "N/A",
             "scan_time": datetime.now().isoformat(),
@@ -2153,7 +2153,7 @@ def main() -> int:
         return interactive_mode()
 
     parser = argparse.ArgumentParser(
-        description="APK Security Analyzer - Vulnerability Scanner with Dynamic Patterns",
+        description="APKSlayer - Slay vulnerabilities before they slay your users",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "apk-analyzer"
+name = "apkslayer"
 version = "2.0.0"
-description = "Android APK security vulnerability scanner with pattern-based detection and visualization"
+description = "Android APK security vulnerability scanner - Slay vulnerabilities before they slay your users"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.8"
@@ -41,7 +41,7 @@ pdf = [
 ]
 
 [project.scripts]
-apk-analyzer = "apk_analyzer.cli:main"
+apkslayer = "apk_analyzer.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Sai-Jagadeesh/apk-analyzer"

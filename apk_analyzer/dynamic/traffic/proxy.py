@@ -363,8 +363,8 @@ class ProxyManager:
             "log": {
                 "version": "1.2",
                 "creator": {
-                    "name": "APK Analyzer",
-                    "version": "1.0"
+                    "name": "APKSlayer",
+                    "version": "2.0"
                 },
                 "entries": entries
             }
