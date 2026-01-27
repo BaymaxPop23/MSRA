@@ -897,6 +897,36 @@ def cmd_scan(args) -> int:
     generate_html_report(findings, html_path, metadata)
     print(f"[+] {Icons.FILE} HTML report: {html_path}")
 
+    # Export findings to JSON for dynamic analysis
+    findings_json_path = os.path.join(out_dir, "findings.json")
+    findings_data = []
+    for f in findings:
+        finding_dict = {
+            'fid': f.fid,
+            'title': f.title,
+            'severity': f.severity.value if hasattr(f.severity, 'value') else str(f.severity),
+            'category': f.category.value if hasattr(f.category, 'value') else str(f.category),
+            'description': f.description,
+            'evidence': {
+                'file_path': f.evidence.file_path if f.evidence else None,
+                'line_number': f.evidence.line_number if f.evidence else None,
+                'matched_text': f.evidence.matched_text if f.evidence else None,
+            } if f.evidence else None,
+            'adb_commands': f.adb_commands if hasattr(f, 'adb_commands') else [],
+            'extra': f.extra if hasattr(f, 'extra') else {},
+        }
+        findings_data.append(finding_dict)
+
+    with open(findings_json_path, 'w') as jf:
+        json.dump({
+            'package': package_name,
+            'apk': os.path.basename(apk_path),
+            'scan_time': metadata['scan_time'],
+            'total_findings': len(findings),
+            'findings': findings_data
+        }, jf, indent=2)
+    print(f"[+] {Icons.FILE} Findings JSON: {findings_json_path}")
+
     pdf_path = os.path.join(out_dir, "report.pdf")
     pdf_rendered = render_pdf_from_html(html_path, pdf_path)
     if pdf_rendered:
@@ -1186,6 +1216,35 @@ def cmd_dynamic(args) -> int:
 
     # Run static scan first if not skipped and we have an APK
     findings = []
+    static_findings_loaded = False
+
+    # Try to load existing static findings if skipping static analysis
+    if args.skip_static:
+        findings_json_path = os.path.join(out_dir, "findings.json")
+        if os.path.exists(findings_json_path):
+            print("\n[+] Loading static analysis findings...")
+            try:
+                with open(findings_json_path, 'r') as f:
+                    findings_data = json.load(f)
+                findings = findings_data.get('findings', [])
+                print(f"[+] Loaded {len(findings)} findings from static analysis")
+
+                # Filter to testable findings
+                testable_categories = ['webview', 'intent', 'provider', 'component', 'network', 'crypto', 'storage']
+                testable_findings = [
+                    f for f in findings
+                    if any(cat in str(f.get('category', '')).lower() for cat in testable_categories)
+                    or str(f.get('severity', '')).lower() in ['critical', 'high']
+                ]
+                print(f"[+] {len(testable_findings)} findings are testable dynamically")
+                findings = testable_findings
+                static_findings_loaded = True
+            except Exception as e:
+                print(f"[!] Could not load findings: {e}")
+        else:
+            print(f"\n[+] No findings.json found at {findings_json_path}")
+            print("[+] Will discover attack surface from installed app")
+
     if apk_path and not args.skip_static:
         jadx_path = _find_jadx(args.jadx_path)
         if not jadx_path:
@@ -1212,7 +1271,8 @@ def cmd_dynamic(args) -> int:
             ]
             print(f"[+] {len(testable_findings)} findings are testable dynamically")
             findings = testable_findings
-    elif not apk_path:
+            static_findings_loaded = True
+    elif not apk_path and not static_findings_loaded:
         print("\n[+] No APK provided - testing already installed app")
         print("[+] Will discover attack surface from installed app")
 
@@ -1265,12 +1325,22 @@ def cmd_dynamic(args) -> int:
 
     # Discover attack surface if no static findings
     if not findings:
-        print("\n[+] Discovering attack surface from installed app...")
+        print("\n[+] No static findings - discovering attack surface from installed app...")
         findings = executor.discover_attack_surface()
         if not findings:
             print("[!] No testable components found. App may not be installed.")
             return 1
         print(f"[+] Found {len(findings)} testable components")
+    else:
+        # We have static findings - show what we're testing
+        print(f"\n[+] Using {len(findings)} findings from static analysis")
+        print("[+] Static findings will guide dynamic testing:")
+        categories = {}
+        for f in findings:
+            cat = str(f.get('category', 'other')).lower()
+            categories[cat] = categories.get(cat, 0) + 1
+        for cat, count in sorted(categories.items(), key=lambda x: -x[1])[:5]:
+            print(f"    • {cat}: {count} findings")
 
     # Run tests
     print("\n[+] Running dynamic tests...")
