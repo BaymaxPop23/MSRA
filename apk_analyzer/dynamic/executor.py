@@ -154,6 +154,95 @@ class DynamicTestExecutor:
         print(f"[+] Setup complete for {self.package_name}")
         return True
 
+    def discover_attack_surface(self) -> List[Dict]:
+        """Discover testable components from an installed app (no static analysis needed)."""
+        findings = []
+
+        print("[*] Discovering attack surface from installed app...")
+
+        # Get package info using dumpsys
+        success, output = self.controller.execute_command(
+            f"dumpsys package {self.package_name}"
+        )
+
+        if not success:
+            print("[!] Failed to get package info")
+            return findings
+
+        # Parse exported activities
+        in_activities = False
+        in_services = False
+        in_receivers = False
+        in_providers = False
+
+        for line in output.split('\n'):
+            line = line.strip()
+
+            # Detect section changes
+            if 'Activity Resolver Table:' in line:
+                in_activities = True
+                in_services = in_receivers = in_providers = False
+            elif 'Service Resolver Table:' in line:
+                in_services = True
+                in_activities = in_receivers = in_providers = False
+            elif 'Receiver Resolver Table:' in line:
+                in_receivers = True
+                in_activities = in_services = in_providers = False
+            elif 'Provider Resolver Table:' in line or 'ContentProvider' in line:
+                in_providers = True
+                in_activities = in_services = in_receivers = False
+            elif 'Resolver Table:' in line:
+                in_activities = in_services = in_receivers = in_providers = False
+
+            # Extract component names
+            if self.package_name in line and '/' in line:
+                # Extract component like com.example/.MainActivity
+                match = re.search(rf'({self.package_name}/[\w.$]+)', line)
+                if match:
+                    component = match.group(1)
+                    comp_type = 'activity' if in_activities else 'service' if in_services else 'receiver' if in_receivers else 'provider' if in_providers else 'unknown'
+
+                    # Create a finding-like dict
+                    findings.append({
+                        'fid': f'dynamic-{comp_type}-{len(findings)}',
+                        'title': f'Exported {comp_type.title()}: {component.split("/")[-1]}',
+                        'severity': 'medium' if comp_type == 'activity' else 'high',
+                        'category': 'component',
+                        'extra': {
+                            'entry_points': [component.split('/')[1]],
+                            'component_type': comp_type,
+                        },
+                        'adb_commands': [
+                            f'adb shell am start -n {component}' if comp_type == 'activity' else
+                            f'adb shell am startservice -n {component}' if comp_type == 'service' else
+                            f'adb shell am broadcast -n {component}'
+                        ]
+                    })
+
+        # Get exported content providers
+        success, output = self.controller.execute_command(
+            f"dumpsys package providers | grep -A5 '{self.package_name}'"
+        )
+        if success and output:
+            for line in output.split('\n'):
+                if 'authority=' in line.lower():
+                    match = re.search(r'authority[=:]?\s*([^\s;]+)', line, re.I)
+                    if match:
+                        authority = match.group(1)
+                        findings.append({
+                            'fid': f'dynamic-provider-{len(findings)}',
+                            'title': f'Content Provider: {authority}',
+                            'severity': 'high',
+                            'category': 'provider',
+                            'extra': {'authority': authority},
+                            'adb_commands': [
+                                f'adb shell content query --uri content://{authority}/',
+                            ]
+                        })
+
+        print(f"[+] Discovered {len(findings)} testable components")
+        return findings
+
     def run_tests(self, findings: Optional[List] = None, timeout: int = 300) -> List[TestResult]:
         """Run dynamic tests for all findings."""
         if not self.report or not self.package_name:

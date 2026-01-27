@@ -897,16 +897,21 @@ def cmd_dynamic(args) -> int:
             print(f"{d.serial:<25} {d.model:<20} {d.state:<10} {dtype:<15} {api:<5}")
         return 0
 
-    # APK is required for actual analysis
-    if not args.apk:
-        print("APK path is required for dynamic analysis.", file=sys.stderr)
+    # APK or package name is required
+    if not args.apk and not args.package:
+        print("APK path or --package name is required for dynamic analysis.", file=sys.stderr)
         print("Use --list-devices to see available devices.", file=sys.stderr)
+        print("\nExamples:", file=sys.stderr)
+        print("  apk-analyzer dynamic app.apk --out report", file=sys.stderr)
+        print("  apk-analyzer dynamic --package com.example.app --out report", file=sys.stderr)
         return 2
 
-    apk_path = os.path.abspath(args.apk)
-    if not os.path.exists(apk_path):
-        print(f"APK not found: {apk_path}", file=sys.stderr)
-        return 2
+    apk_path = None
+    if args.apk:
+        apk_path = os.path.abspath(args.apk)
+        if not os.path.exists(apk_path):
+            print(f"APK not found: {apk_path}", file=sys.stderr)
+            return 2
 
     out_dir = os.path.abspath(args.out)
     _ensure_dir(out_dir)
@@ -916,9 +921,9 @@ def cmd_dynamic(args) -> int:
     if not controller.connect(serial=args.device):
         return 1
 
-    # Run static scan first if not skipped
+    # Run static scan first if not skipped and we have an APK
     findings = []
-    if not args.skip_static:
+    if apk_path and not args.skip_static:
         jadx_path = _find_jadx(args.jadx_path)
         if not jadx_path:
             print("[!] jadx not found. Skipping static analysis.")
@@ -944,15 +949,15 @@ def cmd_dynamic(args) -> int:
             ]
             print(f"[+] {len(testable_findings)} findings are testable dynamically")
             findings = testable_findings
+    elif not apk_path:
+        print("\n[+] No APK provided - testing already installed app")
+        print("[+] Will discover attack surface from installed app")
 
-    # Extract package name from APK
-    print("\n[+] Extracting package name from APK...")
-    try:
-        import zipfile
-        from xml.etree import ElementTree as ET
-
-        with zipfile.ZipFile(apk_path, 'r') as apk:
-            # Try to read AndroidManifest.xml (binary format)
+    # Get package name
+    package_name = args.package
+    if not package_name and apk_path:
+        print("\n[+] Extracting package name from APK...")
+        try:
             # Use aapt if available for accurate parsing
             result = subprocess.run(
                 ["aapt", "dump", "badging", apk_path],
@@ -966,16 +971,17 @@ def cmd_dynamic(args) -> int:
                             package_name = part.split("'")[1]
                             break
                     break
-            else:
+            if not package_name:
                 print("[!] Could not extract package name. Specify with --package.")
                 return 1
-    except Exception as e:
-        if args.package:
-            package_name = args.package
-        else:
+        except Exception as e:
             print(f"[!] Could not extract package name: {e}")
             print("[!] Specify with --package.")
             return 1
+
+    if not package_name:
+        print("[!] Package name is required. Use --package.")
+        return 1
 
     print(f"[+] Package: {package_name}")
 
@@ -994,10 +1000,19 @@ def cmd_dynamic(args) -> int:
         print("[!] Setup failed")
         return 1
 
+    # Discover attack surface if no static findings
+    if not findings:
+        print("\n[+] Discovering attack surface from installed app...")
+        findings = executor.discover_attack_surface()
+        if not findings:
+            print("[!] No testable components found. App may not be installed.")
+            return 1
+        print(f"[+] Found {len(findings)} testable components")
+
     # Run tests
     print("\n[+] Running dynamic tests...")
     print("-" * 60)
-    results = executor.run_tests(timeout=args.timeout)
+    results = executor.run_tests(findings=findings, timeout=args.timeout)
 
     # Print results summary
     print("\n" + "=" * 60)
@@ -1254,6 +1269,7 @@ Examples:
     apk-analyzer dynamic --list-devices
     apk-analyzer dynamic app.apk --out dynamic_report
     apk-analyzer dynamic app.apk --device emulator-5554 --timeout 600
+    apk-analyzer dynamic --package com.example.app --out report  # Test installed app
 
   Crawl HackerOne:
     apk-analyzer crawl hackerone --max 50 --extract
