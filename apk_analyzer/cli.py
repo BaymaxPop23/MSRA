@@ -1327,6 +1327,8 @@ def cmd_dynamic(args) -> int:
 
     # Setup (install app, start monitoring)
     print("\n[+] Setting up dynamic analysis...")
+    if apk_path:
+        print(f"[+] Will install APK: {os.path.basename(apk_path)}")
     if not executor.setup():
         print("[!] Setup failed")
         return 1

@@ -137,9 +137,11 @@ class DynamicTestExecutor:
 
         # Install APK if provided
         if self.apk_path:
+            print(f"[+] Installing APK on device...")
             if not self.controller.install_apk(self.apk_path):
                 print("[!] Failed to install APK")
                 return False
+            print(f"[+] APK installed successfully")
 
         # Setup monitoring
         self.monitor = AppMonitor(self.controller, self.package_name)
