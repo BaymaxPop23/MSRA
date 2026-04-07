@@ -895,9 +895,12 @@ def _build_dashboard(scan_id: str | None, all_summaries: list, view: str | None 
               <span class="sb-dots">{dot_c}{dot_h}{dot_m}</span>
             </div>
           </a>
-          <button class="sb-del-btn" onclick="deleteScan('{sid}')" title="Delete scan">
-            <i class="fa-solid fa-xmark"></i>
-          </button>
+          <div class="sb-del-reveal">
+            <button class="sb-del-btn" onclick="deleteScan('{sid}')" title="Delete scan">
+              <i class="fa-solid fa-trash-can"></i>
+              <span>Delete</span>
+            </button>
+          </div>
         </div>'''
 
     if not sidebar_items:
@@ -1153,16 +1156,24 @@ code,pre{{font-family:'JetBrains Mono',monospace}}
 
 /* ── SCAN ITEM WITH DELETE ── */
 .sb-scan-wrap{{display:flex;align-items:stretch;border-radius:8px;margin-bottom:2px;
-               position:relative}}
-.sb-scan-wrap:hover .sb-del-btn{{opacity:1;color:var(--text2)}}
-.sb-scan-wrap .sb-scan-item{{flex:1;border-radius:8px 0 0 8px;margin-bottom:0}}
-.sb-del-btn{{
-  opacity:0.3;flex-shrink:0;width:28px;display:flex;align-items:center;
-  justify-content:center;background:transparent;border:none;border-left:0;
-  color:var(--text3);cursor:pointer;transition:all .15s;border-radius:0 8px 8px 0;
-  font-size:10px;
+               position:relative;overflow:hidden}}
+.sb-scan-wrap .sb-scan-item{{flex:1;min-width:0;border-radius:8px;margin-bottom:0;
+  transition:border-radius .22s}}
+.sb-scan-wrap:hover .sb-scan-item{{border-radius:8px 0 0 8px}}
+/* slide-to-delete reveal zone */
+.sb-del-reveal{{
+  flex-shrink:0;width:0;overflow:hidden;
+  transition:width .22s cubic-bezier(.4,0,.2,1);
+  background:#ef4444;border-radius:0 8px 8px 0;
+  display:flex;align-items:center;justify-content:center;
 }}
-.sb-del-btn:hover{{color:var(--critical);background:rgba(239,68,68,.08)}}
+.sb-scan-wrap:hover .sb-del-reveal{{width:52px}}
+.sb-del-btn{{
+  color:#fff;background:transparent;border:none;cursor:pointer;
+  display:flex;flex-direction:column;align-items:center;gap:3px;
+  padding:0 8px;font-size:11px;white-space:nowrap;
+}}
+.sb-del-btn span{{font-size:9px;font-weight:600;letter-spacing:.3px}}
 
 /* ── SIDEBAR INTEL STATS ── */
 .sb-intel-mini{{padding:4px 8px}}
