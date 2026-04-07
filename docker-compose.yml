@@ -1,0 +1,20 @@
+services:
+  msra:
+    build: .
+    container_name: msra
+    ports:
+      - "5001:5001"
+    volumes:
+      # Persist scan data, reports, and user config across restarts
+      - msra_uploads:/app/uploads
+      - msra_reports:/app/reports
+      - msra_data:/app/data/custom
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - PORT=5001
+    restart: unless-stopped
+
+volumes:
+  msra_uploads:
+  msra_reports:
+  msra_data:
