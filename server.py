@@ -615,7 +615,7 @@ def _build_dashboard(scan_id: str | None, all_summaries: list, view: str | None 
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>MSRA{" — " + current["package"] if current else ""}</title>
+<title>MSRA{" — " + (current.get("package") or current.get("apk") or "Scan") if current else ""}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -5995,7 +5995,8 @@ def upload():
         platform = "android"
 
     _db.upsert_scan(scan_id, status="queued", progress=0,
-                    message="Queued…", platform=platform)
+                    message="Queued…", platform=platform,
+                    package=f.filename, apk=f.filename)
 
     if is_ios:
         threading.Thread(target=_run_ios_scan, args=(scan_id, file_path), daemon=True).start()
