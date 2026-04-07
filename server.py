@@ -2437,14 +2437,16 @@ function populateCategoryFilter(rules) {{
 function getFilteredRules() {{
   const q   = (document.getElementById('rulesSearch')?.value  || '').toLowerCase();
   const sev = document.getElementById('filterSeverity')?.value || '';
-  const cat = document.getElementById('filterCategory')?.value || '';
-  const src = document.getElementById('filterSource')?.value   || '';
-  const sta = document.getElementById('filterStatus')?.value   || '';
+  const cat  = document.getElementById('filterCategory')?.value  || '';
+  const src  = document.getElementById('filterSource')?.value    || '';
+  const sta  = document.getElementById('filterStatus')?.value    || '';
+  const plat = document.getElementById('filterPlatform')?.value  || '';
   return _allRules.filter(r => {{
-    if (q   && !r.title.toLowerCase().includes(q) && !r.id.toLowerCase().includes(q) && !r.description.toLowerCase().includes(q)) return false;
-    if (sev && r.severity !== sev) return false;
-    if (cat && r.category !== cat) return false;
-    if (src && r.source   !== src) return false;
+    if (q    && !r.title.toLowerCase().includes(q) && !r.id.toLowerCase().includes(q) && !r.description.toLowerCase().includes(q)) return false;
+    if (sev  && r.severity !== sev) return false;
+    if (cat  && r.category !== cat) return false;
+    if (src  && r.source   !== src) return false;
+    if (plat && r.platform !== plat) return false;
     if (sta === 'enabled'  && !r.enabled) return false;
     if (sta === 'disabled' &&  r.enabled) return false;
     return true;
@@ -2483,9 +2485,18 @@ function renderRulesTable() {{
   const tbody = document.getElementById('rulesTbody');
   tbody.innerHTML = '';
   filtered.forEach(rule => {{
-    const isCustom = rule.source === 'custom';
-    const cweHtml  = (rule.cwe||[]).slice(0,2).map(c=>`<span class="cwe-mini">${{escHtml(c)}}</span>`).join(' ');
-    const detIcon  = rule.detection_type==='manifest' ? 'fa-file-code' : 'fa-code';
+    const isCustom  = rule.source === 'custom';
+    const isIos     = rule.platform === 'ios';
+    const cweHtml   = (rule.cwe||[]).slice(0,2).map(c=>`<span class="cwe-mini">${{escHtml(c)}}</span>`).join(' ');
+    const detIcon   = rule.detection_type === 'manifest'   ? 'fa-file-code'
+                    : rule.detection_type === 'plist_key'  ? 'fa-list-check'
+                    : rule.detection_type === 'entitlement'? 'fa-id-card'
+                    : rule.detection_type === 'binary_flag'? 'fa-microchip'
+                    : rule.detection_type === 'binary_string' ? 'fa-terminal'
+                    : 'fa-code';
+    const platBadge = isIos
+      ? `<span style="font-size:9px;background:rgba(148,163,184,.12);color:var(--text2);border:1px solid rgba(148,163,184,.2);padding:1px 5px;border-radius:3px;margin-right:4px"><i class="fa-brands fa-apple"></i> iOS</span>`
+      : `<span style="font-size:9px;background:rgba(34,197,94,.08);color:#4ade80;border:1px solid rgba(34,197,94,.2);padding:1px 5px;border-radius:3px;margin-right:4px"><i class="fa-brands fa-android"></i> Android</span>`;
     const row      = document.createElement('tr');
     row.className  = 'rule-row' + (_openRuleId===rule.id ? ' selected' : '');
     row.onclick    = () => openRuleDetail(rule.id);
@@ -2499,7 +2510,7 @@ function renderRulesTable() {{
       </td>
       <td><span class="sev-dot ${{escHtml(rule.severity)}}">${{escHtml(rule.severity)}}</span></td>
       <td>
-        <div class="rule-title-cell">${{escHtml(rule.title)}}</div>
+        <div class="rule-title-cell">${{platBadge}}${{escHtml(rule.title)}}</div>
         <code class="rule-id-cell">${{escHtml(rule.id)}}</code>
       </td>
       <td><span class="cat-pill" title="${{escHtml(rule.category)}}">${{escHtml(rule.category.replace(/OWASP-M\d+-/,''))}}</span></td>
@@ -2591,13 +2602,19 @@ function openRuleDetail(id) {{
   const manDiv = document.getElementById('rdpManifest');
   const patSec = document.getElementById('rdpPatternSection');
   const manSec = document.getElementById('rdpManifestSection');
+  const iosSec = document.getElementById('rdpIosSection');
+
+  const isIosDet = ['plist_key','entitlement','binary_flag'].includes(rule.detection_type);
+
   if (patDiv) {{
     const pats = rule.patterns || [];
-    patDiv.innerHTML = pats.length
-      ? pats.map(p=>`<div class="rdp-code-block">${{escHtml(p.pattern)}}</div>
-                     <div class="rdp-code-meta"><span>flags: ${{p.flags||'i'}}</span><span>files: ${{(p.file_types||[]).join(', ')}}</span></div>`).join('')
-      : '<p style="color:var(--text3);font-size:13px">—</p>';
-    if (patSec) patSec.style.display = rule.detection_type==='manifest' ? 'none' : 'block';
+    if (rule.detection_type === 'binary_string' || (!isIosDet && rule.detection_type !== 'manifest')) {{
+      patDiv.innerHTML = pats.length
+        ? pats.map(p=>`<div class="rdp-code-block">${{escHtml(p.pattern)}}</div>
+                       <div class="rdp-code-meta"><span>flags: ${{p.flags||'i'}}</span>${{p.file_types?.length ? `<span>files: ${{p.file_types.join(', ')}}</span>` : ''}}</div>`).join('')
+        : '<p style="color:var(--text3);font-size:13px">—</p>';
+    }}
+    if (patSec) patSec.style.display = (rule.detection_type==='manifest' || isIosDet) ? 'none' : 'block';
   }}
   if (manDiv) {{
     const mcs = rule.manifest_checks || [];
@@ -2605,6 +2622,22 @@ function openRuleDetail(id) {{
       ? mcs.map(mc=>`<div class="rdp-code-block">${{escHtml(mc.xpath)}}</div>`).join('')
       : '<p style="color:var(--text3);font-size:13px">—</p>';
     if (manSec) manSec.style.display = rule.detection_type==='manifest' ? 'block' : 'none';
+  }}
+  // iOS-specific detection section
+  if (iosSec) {{
+    if (isIosDet) {{
+      const det = rule.ios_detection || {{}};
+      let iosHtml = '';
+      if (det.key_path) iosHtml += `<div class="rdp-code-meta"><span style="color:var(--text2)">Key path:</span></div><div class="rdp-code-block">${{escHtml(det.key_path)}}</div>`;
+      if (det.key)      iosHtml += `<div class="rdp-code-meta"><span style="color:var(--text2)">Entitlement key:</span></div><div class="rdp-code-block">${{escHtml(det.key)}}</div>`;
+      if (det.flag)     iosHtml += `<div class="rdp-code-meta"><span style="color:var(--text2)">Binary flag:</span></div><div class="rdp-code-block">${{escHtml(det.flag)}}</div>`;
+      if (det.check)    iosHtml += `<div class="rdp-code-meta"><span style="color:var(--text2)">Condition:</span> <code>${{escHtml(det.check)}}</code></div>`;
+      if (det.value !== undefined) iosHtml += `<div class="rdp-code-meta"><span style="color:var(--text2)">Expected value:</span> <code>${{escHtml(String(det.value))}}</code></div>`;
+      iosSec.innerHTML = iosHtml || '<p style="color:var(--text3);font-size:13px">—</p>';
+      iosSec.style.display = 'block';
+    }} else {{
+      iosSec.style.display = 'none';
+    }}
   }}
   setText('rdpConfidence', rule.confidence || '—');
   setText('rdpFPRate',     rule.false_positive_rate || '—');
@@ -4773,6 +4806,11 @@ def _build_intelligence_hub() -> str:
         <option value="">All Categories</option>
       </select>
       <div class="intel-sep"></div>
+      <select class="intel-filter" id="filterPlatform" onchange="filterRules()">
+        <option value="">All Platforms</option>
+        <option value="android"><i class="fa-brands fa-android"></i> Android</option>
+        <option value="ios">iOS</option>
+      </select>
       <select class="intel-filter" id="filterSource" onchange="filterRules()">
         <option value="">All Sources</option>
         <option value="builtin">Built-in</option>
@@ -5022,6 +5060,10 @@ def _build_intelligence_hub() -> str:
         <div class="rdp-section" id="rdpManifestSection" style="display:none">
           <div class="rdp-section-title">Manifest Checks (XPath)</div>
           <div id="rdpManifest"></div>
+        </div>
+        <div class="rdp-section" id="rdpIosSection" style="display:none">
+          <div class="rdp-section-title"><i class="fa-brands fa-apple" style="margin-right:5px"></i>iOS Detection Config</div>
+          <div id="rdpIosDetection"></div>
         </div>
         <div class="rdp-section">
           <div class="rdp-section-title">Confidence &amp; Quality</div>

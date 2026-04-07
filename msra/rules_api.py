@@ -62,7 +62,8 @@ def _save_user_rules(rules: List[dict]):
 
 # ── Serialization ───────────────────────────────────────────────────────────
 
-def _pattern_to_dict(raw: dict, source: str, overrides: Dict[str, List[str]]) -> dict:
+def _pattern_to_dict(raw: dict, source: str, overrides: Dict[str, List[str]],
+                     platform: str = "android") -> dict:
     pid             = raw.get("id", "")
     default_enabled = raw.get("enabled", True)
 
@@ -78,12 +79,12 @@ def _pattern_to_dict(raw: dict, source: str, overrides: Dict[str, List[str]]) ->
     det_type  = detection.get("type", "regex")
 
     patterns_list = []
-    if det_type in ("regex", "regex-multiline", "combined", "ast"):
+    if det_type in ("regex", "regex-multiline", "combined", "ast", "binary_string"):
         for p in detection.get("patterns", []):
             patterns_list.append({
                 "pattern":    p.get("pattern", ""),
                 "flags":      p.get("flags", "i"),
-                "file_types": p.get("file_types", [".java", ".kt"]),
+                "file_types": p.get("file_types", []),
             })
 
     manifest_checks = []
@@ -96,6 +97,11 @@ def _pattern_to_dict(raw: dict, source: str, overrides: Dict[str, List[str]]) ->
                 "value":     mc.get("value", ""),
             })
 
+    # iOS-specific detection fields
+    ios_detection: dict = {}
+    if det_type in ("plist_key", "entitlement", "binary_flag"):
+        ios_detection = {k: v for k, v in detection.items() if k != "type"}
+
     return {
         "id":             pid,
         "title":          raw.get("title", ""),
@@ -107,15 +113,17 @@ def _pattern_to_dict(raw: dict, source: str, overrides: Dict[str, List[str]]) ->
         "detection_type": det_type,
         "patterns":       patterns_list,
         "manifest_checks":manifest_checks,
-        "cwe":            meta.get("cwe", []),
+        "ios_detection":  ios_detection,
+        "cwe":            raw.get("cwe", []) or meta.get("cwe", []),
         "cve":            meta.get("cve", []),
-        "references":     meta.get("references", []),
+        "references":     raw.get("references", []) or meta.get("references", []),
         "confidence":     meta.get("confidence", "medium"),
         "false_positive_rate": meta.get("false_positive_rate", ""),
         "tags":           raw.get("tags", []),
         "adb_category":   raw.get("adb_category", "general"),
         "enabled":        enabled,
         "source":         source,
+        "platform":       raw.get("platform", platform),
         "test_cases":     raw.get("test_cases", []),
     }
 
@@ -128,21 +136,27 @@ def get_all_rules() -> List[dict]:
     rules     = []
     seen      = set()
 
-    def add_from_file(path: Path, source: str):
+    def add_from_file(path: Path, source: str, platform: str = "android"):
         try:
             data = json.loads(path.read_text())
+            plat = data.get("platform", platform)
             for p in data.get("patterns", []):
                 pid = p.get("id", "")
                 if pid and pid not in seen:
                     seen.add(pid)
-                    rules.append(_pattern_to_dict(p, source, overrides))
+                    rules.append(_pattern_to_dict(p, source, overrides, plat))
         except Exception:
             pass
 
-    # Built-in
+    # Built-in Android
     builtin = DATA_DIR / "builtin" / "patterns.json"
     if builtin.exists():
-        add_from_file(builtin, "builtin")
+        add_from_file(builtin, "builtin", "android")
+
+    # Built-in iOS
+    ios_builtin = DATA_DIR / "builtin" / "ios_patterns.json"
+    if ios_builtin.exists():
+        add_from_file(ios_builtin, "builtin", "ios")
 
     # Community
     community_dir = DATA_DIR / "community"
