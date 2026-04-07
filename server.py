@@ -2323,15 +2323,30 @@ document.addEventListener('click', e => {{
 document.addEventListener('keydown', e => {{ if (e.key==='Escape') closePocModal(); }});
 
 // Export JSON
-function exportReport() {{
-  const el = document.getElementById('reportData') || document.getElementById('findingsData');
-  if (!el) {{ showToast('No report data available', 'warn'); return; }}
-  const raw  = el.textContent;
-  const blob = new Blob([raw], {{type:'application/json'}});
-  const a    = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'msra_report.json';
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+async function exportReport() {{
+  const scanId = _getScanId();
+  if (!scanId) {{
+    // Fallback: grab raw embedded JSON (no triage)
+    const el = document.getElementById('reportData') || document.getElementById('findingsData');
+    if (!el) {{ showToast('No report data available', 'warn'); return; }}
+    const blob = new Blob([el.textContent], {{type:'application/json'}});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'msra_report.json';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    return;
+  }}
+  try {{
+    const res  = await fetch(`/api/scans/${{scanId}}/findings`);
+    const data = await res.json();
+    const blob = new Blob([JSON.stringify(data, null, 2)], {{type:'application/json'}});
+    const a    = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (data.package || scanId) + '_msra.json';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  }} catch(e) {{
+    showToast('Export failed: ' + e.message, 'error');
+  }}
 }}
 
 function exportPdf(scanId) {{
@@ -6249,31 +6264,16 @@ FEED CONTENT:
 def export_pdf(scan_id: str):
     """Generate and stream a PDF report for a scan."""
     scan_dir = _scan_dir(scan_id)
-    html_path = scan_dir / "report.html"
-    if not html_path.exists():
-        return jsonify({"error": "Report not found"}), 404
+    if not scan_dir.exists() and not _db.get_scan(scan_id):
+        return jsonify({"error": "Scan not found"}), 404
 
-    # Load findings from the embedded JSON block in the report
-    try:
-        raw_html = html_path.read_text(encoding="utf-8")
-        json_match = re.search(
-            r'<script[^>]+type=["\']application/json["\'][^>]*>(.*?)</script>',
-            raw_html, re.DOTALL
-        )
-        if not json_match:
-            return jsonify({"error": "Could not extract finding data from report"}), 500
-        report_data = json.loads(json_match.group(1).replace('<\\/', '</'))
-        findings    = report_data.get("findings", [])
-        # Merge triage status from DB
-        triage_map = _db.get_triage_map(scan_id)
-        for f in findings:
-            t = triage_map.get(f.get("id") or f.get("fid"), {})
-            f["triage_status"]    = t.get("status", "New")
-            f["suppression_note"] = t.get("suppression_note", "")
-    except Exception as e:
-        return jsonify({"error": f"Failed to read report: {e}"}), 500
+    data = _load_findings_with_triage(scan_id)
+    if data is None:
+        return jsonify({"error": "Findings not available for this scan"}), 404
 
-    # Load scan metadata
+    findings = data.get("findings", [])
+
+    # Load scan metadata from DB (most up-to-date) + summary.json fallback
     meta = _db.get_scan(scan_id) or {}
     try:
         summary_path = scan_dir / "summary.json"
@@ -6296,11 +6296,12 @@ def export_pdf(scan_id: str):
                 "severity_counts": meta.get("severity_counts", {}),
             },
         )
+        pkg = meta.get("package", scan_id)
         return send_file(
             str(pdf_path),
             mimetype="application/pdf",
             as_attachment=True,
-            download_name=f"msra_{scan_id}.pdf",
+            download_name=f"{pkg}_msra.pdf",
         )
     except ImportError as e:
         return jsonify({"error": str(e)}), 503

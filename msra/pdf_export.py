@@ -70,10 +70,10 @@ def _v(obj: Any, *keys: str, default: str = "") -> str:
 
 
 def _build_html(findings: List[Dict], metadata: Dict) -> str:
-    pkg        = _html.escape(metadata.get("package", "unknown"))
-    apk        = _html.escape(metadata.get("apk", ""))
+    pkg        = _html.escape(str(metadata.get("package") or "unknown"))
+    apk        = _html.escape(str(metadata.get("apk") or ""))
     scan_id    = metadata.get("scan_id", "")
-    sev_counts = metadata.get("severity_counts", {})
+    sev_counts = metadata.get("severity_counts") or {}
     now        = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     total      = len(findings)
 
