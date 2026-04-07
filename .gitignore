@@ -37,20 +37,30 @@ env/
 .DS_Store
 Thumbs.db
 
-# APK Analyzer specific
+# MSRA runtime / output
 scan_output/
 scan_report/
 scan_report_*/
 report/
 reports/
+uploads/
 *.apk
 decompiled/
 
-# Crawled data (can be regenerated)
+# Crawled / generated data
 data/crawled/
 data/community/
+data/data/
+data/update_state.json
+
+# User config (device serials, keys)
+data/custom/
+
+# Database files
 *.db
 *.sqlite
+*.db-shm
+*.db-wal
 
 # Logs
 *.log

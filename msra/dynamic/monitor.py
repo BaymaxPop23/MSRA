@@ -117,8 +117,8 @@ class AppMonitor:
             pid = pid_result.stdout.strip()
             if pid:
                 cmd.extend(["--pid", pid])
-        except:
-            pass
+        except Exception:
+            pass  # PID not available — fall back to unfiltered logcat
 
         process = subprocess.Popen(
             cmd,

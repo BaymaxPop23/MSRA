@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "apkslayer"
+name = "msra"
 version = "2.0.0"
 description = "Android APK security vulnerability scanner - Slay vulnerabilities before they slay your users"
 readme = "README.md"
@@ -41,7 +41,7 @@ pdf = [
 ]
 
 [project.scripts]
-apkslayer = "apkslayer.cli:main"
+msra = "msra.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Sai-Jagadeesh/apk-analyzer"
@@ -50,7 +50,7 @@ Issues = "https://github.com/Sai-Jagadeesh/apk-analyzer/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["apkslayer*"]
+include = ["msra*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.json"]

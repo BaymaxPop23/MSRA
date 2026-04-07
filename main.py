@@ -1,4 +1,4 @@
-from apkslayer.cli import main
+from msra.cli import main
 
 
 if __name__ == "__main__":

@@ -23,7 +23,79 @@ from .analysis.reachability import ReachabilityAnalyzer
 # Attack vector descriptions
 from .analysis.attack_vectors import get_attack_description
 
+# Code classification + finding enrichment (reviewer-grade context)
+from .code_filter import classify_path, is_library_code, is_obfuscated_code
+from .finding_enrichment import enrich_findings, group_findings_by_class
+
 ANDROID_NS = "http://schemas.android.com/apk/res/android"
+
+# ── False-positive reduction constants ────────────────────────────────────────
+
+# System broadcasts that can only be sent by the OS (Android 3.1+).
+# A receiver that only handles these cannot be triggered by a third-party app,
+# so we skip the "exported without permission" finding for it.
+_SYSTEM_ONLY_BROADCAST_ACTIONS: frozenset = frozenset({
+    "android.intent.action.BOOT_COMPLETED",
+    "android.intent.action.LOCKED_BOOT_COMPLETED",
+    "android.net.conn.CONNECTIVITY_CHANGE",
+    "android.net.wifi.WIFI_STATE_CHANGED",
+    "android.intent.action.SCREEN_ON",
+    "android.intent.action.SCREEN_OFF",
+    "android.intent.action.BATTERY_CHANGED",
+    "android.intent.action.BATTERY_LOW",
+    "android.intent.action.BATTERY_OKAY",
+    "android.intent.action.POWER_CONNECTED",
+    "android.intent.action.POWER_DISCONNECTED",
+    "android.intent.action.TIME_TICK",
+    "android.intent.action.TIME_CHANGED",
+    "android.intent.action.TIMEZONE_CHANGED",
+    "android.intent.action.PACKAGE_ADDED",
+    "android.intent.action.PACKAGE_CHANGED",
+    "android.intent.action.PACKAGE_REMOVED",
+    "android.intent.action.PACKAGE_REPLACED",
+    "android.intent.action.MY_PACKAGE_REPLACED",
+    "android.intent.action.INPUT_METHOD_CHANGED",
+    "android.intent.action.USER_PRESENT",
+    "android.hardware.action.NEW_PICTURE",
+    "android.hardware.action.NEW_VIDEO",
+    "com.google.android.gms.auth.api.phone.SMS_RETRIEVED",
+    "com.google.firebase.messaging.MESSAGING_EVENT",
+    "com.google.firebase.iid.TOKEN_REFRESH",
+})
+
+# Standard file/share/view intent actions.  Components registered for these
+# are expected to be callable from other apps (that's the whole point).
+# We still flag them but at Medium rather than High.
+_STANDARD_SHARE_VIEW_ACTIONS: frozenset = frozenset({
+    "android.intent.action.VIEW",
+    "android.intent.action.SEND",
+    "android.intent.action.SEND_MULTIPLE",
+    "android.intent.action.SENDTO",
+    "android.intent.action.PICK",
+    "android.intent.action.GET_CONTENT",
+    "android.intent.action.OPEN_DOCUMENT",
+    "android.intent.action.CREATE_DOCUMENT",
+    "android.intent.action.CHOOSER",
+    "android.intent.action.EDIT",
+    "android.intent.action.DELETE",
+    "android.intent.action.SEARCH",
+    "android.intent.action.WEB_SEARCH",
+    "android.media.action.IMAGE_CAPTURE",
+    "android.media.action.VIDEO_CAPTURE",
+    "android.intent.action.DIAL",
+    "android.intent.action.CALL",
+    "android.intent.action.SHARE",
+    "android.intent.action.PROCESS_TEXT",
+})
+
+# Test-directory path markers — findings inside these dirs are not production.
+_TEST_PATH_MARKERS: tuple = (
+    "/test/", "\\test\\",
+    "/androidTest/", "\\androidTest\\",
+    "/androidtest/", "\\androidtest\\",
+    "/unitTest/", "\\unitTest\\",
+    "/integrationTest/", "\\integrationTest\\",
+)
 
 
 class Scanner:
@@ -37,14 +109,23 @@ class Scanner:
         decompiled_dir: str,
         adb_path: str,
         pattern_config: Optional[PatternConfig] = None,
-        deep_analysis: bool = True
+        deep_analysis: bool = True,
+        skip_library_code: bool = True,
+        use_semgrep: bool = True,
     ):
         self.decompiled_dir = decompiled_dir
         self.adb_path = adb_path
         self.package_name: Optional[str] = None
         self._pattern_manager = PatternManager(pattern_config)
         self.deep_analysis_enabled = deep_analysis
+        self.skip_library_code = skip_library_code
+        self.use_semgrep = use_semgrep
         self.manifest_data: Dict[str, Any] = {}
+        # Stats about file classification
+        self.scan_stats: Dict[str, int] = {
+            "app_files": 0, "library_files": 0, "obfuscated_files": 0,
+            "manifest_files": 0, "resource_files": 0,
+        }
 
         # Deep analyzers (initialized after manifest parsing)
         self._deep_engine: Optional[DeepAnalysisEngine] = None
@@ -91,17 +172,50 @@ class Scanner:
                 deep_findings = self._run_deep_analysis(sources_root)
                 findings.extend(deep_findings)
 
+            # Optional Semgrep pass — runs BEFORE exploitability filter so
+            # semgrep findings are also subject to reachability validation
+            if self.use_semgrep:
+                try:
+                    from .semgrep_runner import run as _semgrep_run, is_available as _sg_avail
+                    if _sg_avail():
+                        print("[*] Running Semgrep analysis…")
+                        semgrep_findings = _semgrep_run(sources_root)
+                        if semgrep_findings:
+                            print(f"[+] Semgrep found {len(semgrep_findings)} additional findings")
+                        findings.extend(semgrep_findings)
+                except Exception as e:
+                    print(f"[!] Semgrep integration warning: {e}")
+
         # Filter false positives and enrich with concrete attack paths
         if self._exploitability_validator:
             findings = filter_false_positives(findings, self._exploitability_validator)
 
-        # Deduplicate findings (same title + same file = duplicate)
+        # Deduplicate by (rule_id, file, line)
         findings = self._deduplicate_findings(findings)
+
+        # Group multiple matches in the same class into a single finding
+        findings = group_findings_by_class(findings)
 
         # Run reachability analysis to generate specific PoCs
         findings = self._enrich_with_reachability(findings)
 
+        # Add reviewer context (why_it_matters / how_to_verify / code_analysis / fp_check)
+        findings = enrich_findings(findings, self.package_name or "")
+
+        # Sort: high-confidence + high-priority first
+        findings.sort(key=self._finding_sort_key)
+
         return findings
+
+    def _finding_sort_key(self, finding: Finding) -> tuple:
+        """Sort key: severity tier → reviewer priority → confidence → title."""
+        sev_order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
+        extra = finding.extra or {}
+        sev = sev_order.get(finding.severity, 5)
+        priority = extra.get("reviewer_priority", 4) if isinstance(extra, dict) else 4
+        conf_order = {"high": 0, "medium": 1, "low": 2}
+        conf = conf_order.get(extra.get("confidence", "medium") if isinstance(extra, dict) else "medium", 1)
+        return (sev, conf, priority, finding.title or "")
 
     def _init_deep_analyzers(self, sources_root: str):
         """Initialize deep analysis engines."""
@@ -229,6 +343,10 @@ class Scanner:
             if path in processed_files:
                 continue
             processed_files.add(path)
+
+            # Skip library / obfuscated dependency code
+            if self.skip_library_code and classify_path(path) in ("library", "obfuscated"):
+                continue
 
             try:
                 # WebView deep analysis
@@ -537,14 +655,14 @@ class Scanner:
             )
 
         allow_backup = self._get_android_attr(app, "allowBackup")
-        if allow_backup == "true" or allow_backup is None:
+        if allow_backup == "true":
             findings.append(
                 Finding(
                     fid="manifest-allow-backup",
                     title="Android backup enabled",
                     severity="Medium",
                     description=(
-                        "App allows device backups (default is true). Data can be extracted via adb backup "
+                        "App explicitly sets android:allowBackup=\"true\". Data can be extracted via adb backup "
                         "and restored on another device, potentially exposing sensitive data."
                     ),
                     attack_path="Attacker with USB access runs 'adb backup' to extract databases, SharedPreferences, and files.",
@@ -577,7 +695,15 @@ class Scanner:
         return findings
 
     def _manifest_components(self, root: ET.Element, manifest_path: str) -> List[Finding]:
-        """Check for exported components without permission protection."""
+        """Check for exported components without permission protection.
+
+        Applies intent-filter classification to reduce false positives:
+        - LAUNCHER activities → Info (expected app entry point)
+        - Receivers with OS-only system broadcasts → skip (not reachable by third-party apps)
+        - Components with standard share/view intent actions → Medium
+        - Explicitly exported without any intent filter → High (most dangerous)
+        - Other exported with custom intent filters → High
+        """
         findings: List[Finding] = []
         component_tags = [
             ("activity", "Activity"),
@@ -604,25 +730,137 @@ class Scanner:
 
                 comp_name = self._get_android_attr(comp, "name") or "(unknown)"
                 evidence = self._manifest_evidence(manifest_path, comp_name)
-                attack_path = f"Any app (or ADB) can reach the exported {label} without permission."
                 adb_commands = self._adb_commands_component(tag, comp)
 
-                findings.append(
-                    Finding(
+                # Collect all intent-filter actions and categories
+                intent_filters = comp.findall("intent-filter")
+                actions: List[str] = []
+                categories: List[str] = []
+                for f in intent_filters:
+                    for a in f.findall("action"):
+                        name = self._get_android_attr(a, "name")
+                        if name:
+                            actions.append(name)
+                    for c_elem in f.findall("category"):
+                        name = self._get_android_attr(c_elem, "name")
+                        if name:
+                            categories.append(name)
+
+                # ── Classification logic ───────────────────────────────────
+                is_launcher = (
+                    "android.intent.action.MAIN" in actions
+                    and "android.intent.category.LAUNCHER" in categories
+                )
+
+                all_system_broadcasts = bool(actions) and all(
+                    a in _SYSTEM_ONLY_BROADCAST_ACTIONS for a in actions
+                )
+
+                non_system_actions = [
+                    a for a in actions if a not in _SYSTEM_ONLY_BROADCAST_ACTIONS
+                ]
+                all_standard_share_view = bool(non_system_actions) and all(
+                    a in _STANDARD_SHARE_VIEW_ACTIONS for a in non_system_actions
+                )
+
+                if is_launcher:
+                    # Expected entry point — still worth noting for completeness
+                    findings.append(Finding(
                         fid=f"manifest-exported-{tag}-{comp_name}",
-                        title=f"Exported {label} without permission",
-                        severity="High",
+                        title=f"Launcher Activity Exported (expected entry point)",
+                        severity="Info",
                         description=(
-                            f"The {label} is exported and does not require a permission. "
-                            "Exported components are a top entry point for intent injection and hijacking."
+                            f"This Activity is the main launcher entry point and is intentionally "
+                            "exported. Verify that it does not process dangerous Intent extras "
+                            "without validation (e.g., deep-link URLs, action strings)."
                         ),
-                        attack_path=attack_path,
+                        attack_path=(
+                            "Low risk as a standalone finding. Escalates if the Activity "
+                            "processes Intent extras or data URIs without input validation."
+                        ),
                         adb_commands=adb_commands,
                         evidence=evidence,
                         references=["https://developer.android.com/guide/topics/manifest/activity-element#exported"],
                         extra={"component": comp_name, "cwe": ["CWE-926"]},
-                    )
-                )
+                    ))
+
+                elif tag == "receiver" and all_system_broadcasts:
+                    # OS-protected: third-party apps cannot send these broadcasts
+                    # on Android 3.1+ (protectedBroadcast). Skip entirely.
+                    continue
+
+                elif all_standard_share_view and not is_launcher:
+                    # Intentionally accessible via share/view intents — Medium risk.
+                    # An attacker can craft a malicious intent, but this is expected
+                    # behavior; the real risk is in how extras/data are handled.
+                    findings.append(Finding(
+                        fid=f"manifest-exported-{tag}-{comp_name}",
+                        title=f"Exported {label} handles share/view intents — validate extras",
+                        severity="Medium",
+                        description=(
+                            f"The {label} registers for standard share or view intents and is "
+                            "reachable by any app. This is expected behavior, but the component "
+                            "must validate all Intent extras and data URIs before use to prevent "
+                            "intent injection attacks."
+                        ),
+                        attack_path=(
+                            f"A malicious app sends a crafted intent to `{comp_name}` with "
+                            "hostile extras (e.g., malicious URL, path traversal, XSS payload). "
+                            "If extras are not validated, this can lead to open redirect, "
+                            "arbitrary file access, or JavaScript execution in WebViews."
+                        ),
+                        adb_commands=adb_commands,
+                        evidence=evidence,
+                        references=["https://developer.android.com/guide/topics/manifest/activity-element#exported"],
+                        extra={"component": comp_name, "cwe": ["CWE-926", "CWE-20"]},
+                    ))
+
+                elif not intent_filters:
+                    # Explicitly exported=true with NO intent filter — highest risk.
+                    # The developer deliberately exposed this component; any app can
+                    # target it directly without needing to match an action/category.
+                    findings.append(Finding(
+                        fid=f"manifest-exported-{tag}-{comp_name}",
+                        title=f"Explicitly Exported {label} — no intent filter (direct attack surface)",
+                        severity="High",
+                        description=(
+                            f"The {label} has `android:exported=\"true\"` but declares no intent "
+                            "filter. It was explicitly exposed and can be started directly by any "
+                            "app using an explicit Intent — no action or category match required. "
+                            "This is the highest-risk exported component configuration."
+                        ),
+                        attack_path=(
+                            f"Any app (or ADB) can directly invoke `{comp_name}` with "
+                            "`Intent(packageName, \"{comp_name}\")` and supply arbitrary extras. "
+                            "Common exploits: privilege escalation, logic bypass, data exfiltration."
+                        ),
+                        adb_commands=adb_commands,
+                        evidence=evidence,
+                        references=["https://developer.android.com/guide/topics/manifest/activity-element#exported"],
+                        extra={"component": comp_name, "cwe": ["CWE-926"]},
+                    ))
+
+                else:
+                    # Exported with custom intent filters — standard High finding
+                    findings.append(Finding(
+                        fid=f"manifest-exported-{tag}-{comp_name}",
+                        title=f"Exported {label} without permission",
+                        severity="High",
+                        description=(
+                            f"The {label} is exported and does not require a caller permission. "
+                            "Any app can send it intents matching the registered filters. "
+                            "Verify that all Intent data and extras are validated before use."
+                        ),
+                        attack_path=(
+                            f"Any app can send a matching intent to `{comp_name}`. "
+                            "Craft the intent with malicious extras or data URI to trigger "
+                            "intent injection, privilege escalation, or data leakage."
+                        ),
+                        adb_commands=adb_commands,
+                        evidence=evidence,
+                        references=["https://developer.android.com/guide/topics/manifest/activity-element#exported"],
+                        extra={"component": comp_name, "cwe": ["CWE-926"]},
+                    ))
 
         return findings
 
@@ -668,6 +906,23 @@ class Scanner:
         }
 
         for path in iter_source_files(sources_root):
+            # Classify file & track stats
+            cat = classify_path(path)
+            self.scan_stats[f"{cat}_files"] = self.scan_stats.get(f"{cat}_files", 0) + 1
+
+            # Skip library and obfuscated dependency code by default — these
+            # produce massive numbers of false positives that belong to the
+            # library maintainer, not the app under review.
+            if self.skip_library_code and cat in ("library", "obfuscated"):
+                continue
+
+            # Skip test source directories — findings there are not production code
+            # and would be false positives (e.g. test helpers that deliberately use
+            # raw SQL or insecure patterns to exercise vulnerability detection).
+            path_norm = path.replace("\\", "/").lower()
+            if any(m.replace("\\", "/").lower() in path_norm for m in _TEST_PATH_MARKERS):
+                continue
+
             try:
                 text = read_text(path)
             except OSError:
@@ -684,6 +939,21 @@ class Scanner:
                             # Check context requirements if present
                             if regex_det.context:
                                 if not self._check_context(text, match.start(), regex_det.context):
+                                    continue
+
+                            # Skip matches on comment lines (reduces FP from doc comments)
+                            if self._is_comment_line(text, match.start()):
+                                continue
+
+                            # SQL injection FP reduction: skip if selectionArgs or
+                            # '?' placeholder is used nearby, indicating parameterized queries.
+                            if "sql" in pattern.id.lower() and self._has_selection_args_nearby(text, match.start()):
+                                continue
+
+                            # Intent/deeplink redirect FP reduction: skip if a
+                            # validation guard (whitelist, verify, isValid) is nearby.
+                            if any(k in pattern.id for k in ("intent-redirect", "deeplink", "activity-result")):
+                                if self._has_validation_guard_nearby(text, match.start()):
                                     continue
 
                             evidence = find_line_snippet(text, match.start())
@@ -716,12 +986,16 @@ class Scanner:
         return findings
 
     def _check_context(self, text: str, match_pos: int, context) -> bool:
-        """Check if context requirements are met around a match."""
-        # Get surrounding lines
+        """Check if context requirements are met around a match.
+
+        within_lines=0 means only examine the matched line itself (useful for
+        comment-exclusion rules where we only care about the current line).
+        """
         lines = text.splitlines()
         line_num = text[:match_pos].count('\n')
-        start_line = max(0, line_num - context.within_lines)
-        end_line = min(len(lines), line_num + context.within_lines + 1)
+        w = max(0, context.within_lines)
+        start_line = max(0, line_num - w)
+        end_line = min(len(lines), line_num + w + 1)
         context_text = '\n'.join(lines[start_line:end_line])
 
         # Check must_contain
@@ -735,6 +1009,51 @@ class Scanner:
                 return False
 
         return True
+
+    def _is_comment_line(self, text: str, match_pos: int) -> bool:
+        """Return True if the matched line is a Java/Kotlin comment (// or * or /*)."""
+        lines = text.splitlines()
+        line_num = text[:match_pos].count('\n')
+        if line_num >= len(lines):
+            return False
+        stripped = lines[line_num].lstrip()
+        return stripped.startswith('//') or stripped.startswith('*') or stripped.startswith('/*')
+
+    def _has_selection_args_nearby(self, text: str, match_pos: int, window: int = 15) -> bool:
+        """Return True if a parameterized query pattern is found within *window* lines.
+
+        Detects: selectionArgs usage, '?' bind placeholders, or ContentValues
+        (all indicate the developer is using safe parameterized queries).
+        """
+        lines = text.splitlines()
+        line_num = text[:match_pos].count('\n')
+        start = max(0, line_num - window)
+        end = min(len(lines), line_num + window + 1)
+        ctx = "\n".join(lines[start:end])
+        return (
+            "selectionArgs" in ctx
+            or "bindArgs" in ctx
+            or 'new String[]{"?"}' in ctx
+            or '"?"' in ctx
+        )
+
+    def _has_validation_guard_nearby(self, text: str, match_pos: int, window: int = 15) -> bool:
+        """Return True if a validation or whitelist guard appears near the match.
+
+        Used to suppress intent-redirect and deeplink findings where the
+        developer is explicitly validating the input before using it.
+        """
+        _GUARDS = (
+            "validate", "isValid", "isAllowed", "whitelist", "allowedComponents",
+            "allowedSchemes", "allowedHosts", "checkCallingPermission",
+            "enforcePermission", "getCallingPackage", "verify(", "sanitize",
+        )
+        lines = text.splitlines()
+        line_num = text[:match_pos].count('\n')
+        start = max(0, line_num - window)
+        end = min(len(lines), line_num + window + 1)
+        ctx = "\n".join(lines[start:end]).lower()
+        return any(g.lower() in ctx for g in _GUARDS)
 
     # ADB command generators
     def _adb_commands_component(self, tag: str, comp: ET.Element) -> List[str]:
@@ -833,19 +1152,21 @@ class Scanner:
         ]
 
     def _deduplicate_findings(self, findings: List[Finding]) -> List[Finding]:
-        """Remove duplicate findings (same issue in same file)."""
+        """Remove duplicate findings (same issue at same location)."""
         seen = set()
         unique = []
 
         for finding in findings:
-            # Create a key based on title + file path
             file_path = finding.evidence.file_path if finding.evidence else ''
-            key = (finding.title, file_path)
+            line = finding.evidence.line_number if finding.evidence else 0
 
-            # For deep analysis findings, also consider the line number
-            if finding.extra and finding.extra.get('deep_analysis'):
-                line = finding.evidence.line_number if finding.evidence else 0
-                key = (finding.title, file_path, line)
+            # Always include line number in the key to preserve distinct
+            # occurrences of the same vulnerability at different locations.
+            # Use the base pattern id (strip the path/offset suffix) so that
+            # two different regex sub-patterns for the same rule that fire on
+            # the same line are still collapsed.
+            fid_base = finding.fid.split(':')[0] if finding.fid else finding.title
+            key = (fid_base, file_path, line)
 
             if key not in seen:
                 seen.add(key)
