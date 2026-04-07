@@ -118,33 +118,98 @@ def _ai_verify_finding(finding_title: str, finding_desc: str, severity: str,
                         category: str, logcat: str, extra_evidence: str,
                         api_key: str) -> dict:
     """Call Claude to determine if a static finding is a true positive."""
-    prompt = f"""You are a senior Android security engineer performing dynamic verification.
+    # Build category-specific verification guidance
+    cat_lower = category.lower()
+    if "contentprovider" in cat_lower or "owasp-m4" in cat_lower or "injection" in cat_lower:
+        specific_guidance = """For SQL injection / ContentProvider findings, look for:
+- SQL error messages: "syntax error", "unrecognized token", "no such column", "ambiguous"
+- Schema data returned: sqlite_master, sqlite_sequence rows
+- Row data returned for a malformed WHERE clause
+- SQLiteException in logcat
+FALSE POSITIVE signals: "permission denied", provider not exported, exception thrown before query"""
+    elif "webview" in cat_lower or "deeplink" in cat_lower:
+        specific_guidance = """For WebView / DeepLink findings, look for:
+- JavaScript URI execution: logcat shows JS context, alert dialogs, console.log output
+- File URI loading: file:// content in WebView (file:///etc/passwd, /sdcard/)
+- External URL redirect: app navigated to attacker-controlled domain
+- addJavascriptInterface accessible from untrusted content
+FALSE POSITIVE signals: WebView disabled, deeplink rejected by intent filter, security policy blocks JS"""
+    elif "credential" in cat_lower or "owasp-m1" in cat_lower or "cryptography" in cat_lower:
+        specific_guidance = """For credential/crypto findings, look for:
+- Plaintext secrets in logcat: password=, api_key=, Bearer token, JWT (eyJ...)
+- SharedPreferences XML containing raw credentials
+- Weak cipher in use: DES, RC4, ECB mode, MD5 password hashing
+- Hardcoded key patterns: AKIA (AWS), AIza (Google), private key headers
+FALSE POSITIVE signals: test/demo credentials only, values properly encrypted at rest"""
+    elif "network" in cat_lower or "cleartext" in cat_lower or "tls" in cat_lower or "ssl" in cat_lower:
+        specific_guidance = """For network/TLS findings, look for:
+- HTTP URLs in logcat without TLS: "http://" connections to non-localhost endpoints
+- Certificate validation bypass: SSLHandshakeException suppressed, custom TrustManager
+- Sensitive data in HTTP body/URL (cleartext PII, tokens)
+- MITM evidence: unexpected certificate issuer in logcat
+FALSE POSITIVE signals: only localhost or debug HTTP traffic, proper HTTPS everywhere"""
+    elif "intent" in cat_lower or "component" in cat_lower or "broadcast" in cat_lower:
+        specific_guidance = """For Intent / exported component findings, look for:
+- Activity/service successfully started by external am start command
+- Broadcast receiver triggered externally, unexpected behavior
+- Data passed via Intent extras reaches sensitive operations
+- PendingIntent hijack: component intercepts pending intent
+FALSE POSITIVE signals: component requires permission that probe doesn't have, not actually exported"""
+    elif "storage" in cat_lower or "owasp-m9" in cat_lower:
+        specific_guidance = """For data storage findings, look for:
+- World-readable files found in /data/data/<package>
+- Sensitive data written to external storage (/sdcard/)
+- Database files accessible without root (run-as worked)
+- Backup enabled + sensitive data included in backup
+FALSE POSITIVE signals: files properly permission-restricted, encryption in use"""
+    else:
+        specific_guidance = """Look for runtime evidence that confirms the static finding:
+- Exceptions or errors triggered by probe commands
+- Sensitive data appearing in logcat
+- Unexpected behavior when interacting with the component
+FALSE POSITIVE signals: access denied, feature disabled at runtime, test environment differences"""
 
-A static analysis scan flagged this finding:
+    security_logcat = _extract_security_logcat(logcat)
+
+    prompt = f"""You are a senior Android security engineer performing runtime verification of a static analysis finding.
+
+FINDING UNDER REVIEW:
 - Title: {finding_title}
 - Severity: {severity}
 - Category: {category}
 - Description: {finding_desc}
 
-Dynamic evidence collected at runtime:
---- LOGCAT (last 300 lines) ---
-{logcat[:6000]}
+RUNTIME EVIDENCE:
+--- SECURITY-RELEVANT LOGCAT LINES ---
+{security_logcat[:4000]}
 
---- ADDITIONAL EVIDENCE ---
-{extra_evidence[:2000]}
+--- ADB PROBE OUTPUT & ADDITIONAL EVIDENCE ---
+{extra_evidence[:3000]}
 
-Based on the dynamic evidence, assess:
-1. Is this a TRUE POSITIVE (vulnerability is actually exploitable at runtime)?
-2. Is this a FALSE POSITIVE (static analysis was incorrect)?
-3. UNCERTAIN (more testing needed)?
+VERIFICATION GUIDANCE FOR THIS CATEGORY:
+{specific_guidance}
 
-Return ONLY a JSON object:
+TASK: Determine whether this finding is exploitable at runtime.
+
+Consider:
+1. Does the evidence CONFIRM the vulnerability is triggerable? (true_positive)
+2. Does the evidence show the app is PROTECTED at runtime? (false_positive)
+3. Is evidence INSUFFICIENT to conclude either way? (uncertain)
+
+Common reasons findings are false positives at runtime:
+- Android OS permissions block the attack vector
+- The code path is never reached
+- A newer Android version mitigates the issue
+- Emulator/test environment differs from production
+
+Return ONLY valid JSON:
 {{
   "verdict": "true_positive" | "false_positive" | "uncertain",
   "confidence": 0-100,
-  "reasoning": "2-3 sentence explanation referencing specific evidence",
-  "key_evidence": ["specific logcat line or indicator that supports verdict"],
-  "suggested_action": "What the analyst should do next"
+  "reasoning": "2-3 sentences citing specific evidence lines that support the verdict",
+  "key_evidence": ["exact log line or probe output snippet that is most significant"],
+  "risk_context": "one sentence on the real-world impact if this is exploitable",
+  "suggested_action": "specific next step for the analyst"
 }}"""
 
     try:
@@ -180,85 +245,193 @@ Return ONLY a JSON object:
         }
 
 
+def _extract_security_logcat(logcat: str) -> str:
+    """
+    Filter raw logcat to only lines relevant for security analysis.
+    Reduces noise; keeps exceptions, security events, and app I/O.
+    """
+    SECURITY_KEYWORDS = re.compile(
+        r'exception|error|crash|deny|denied|permission|security|ssl|tls|certificate|'
+        r'password|token|secret|credential|api.?key|jwt|bearer|auth|'
+        r'sqlite|database|cursor|content:/|query|inject|'
+        r'webview|javascript|loadurl|file://|intent|deeplink|'
+        r'http://|cleartext|network|socket|'
+        r'warning|fatal|anr|signal',
+        re.IGNORECASE,
+    )
+    lines = logcat.splitlines()
+    relevant = [ln for ln in lines if SECURITY_KEYWORDS.search(ln)]
+    # Always keep first/last 10 lines for context
+    context = lines[:10] + lines[-10:]
+    merged  = list(dict.fromkeys(relevant + context))  # deduplicate, preserve order
+    return "\n".join(merged[:300])
+
+
 def _heuristic_verdict(extra_evidence: str, logcat: str, category: str) -> dict:
     """
     Produce a heuristic verdict from ADB probe output without calling AI.
+    Uses regex-based contextual matching to minimise false positives.
     Returns same dict shape as _ai_verify_finding().
     """
-    ev = (extra_evidence + "\n" + logcat).lower()
-    key_evidence = []
-    score = 0  # positive = more likely True Positive
+    ev        = (extra_evidence + "\n" + logcat).lower()
+    log_lower = logcat.lower()
+    cat_lower = category.lower()
+    key_evidence: list = []
+    score = 0
 
-    # SQL injection indicators
-    sql_indicators = ["sqlite_master", "table", "column", "sql=", "exception in android.database"]
-    for ind in sql_indicators:
-        if ind in ev:
-            score += 25
-            key_evidence.append(f"SQL indicator detected: '{ind}'")
-            break
-
-    # Credential / sensitive data leak in logcat
-    cred_patterns = ["password", "passwd", "secret", "token", "api_key", "apikey", "auth", "credentials"]
-    for pat in cred_patterns:
-        if pat in logcat.lower():
+    # ── SQL injection: require SQL error / schema keywords in context ─────────
+    _SQL_ERRORS = [
+        r'sqlite3?exception',
+        r'unrecognized token',
+        r'syntax error.*near',
+        r'no such (column|table)\b',
+        r'ambiguous column name',
+        r'exception in android\.database',
+        r'malformed query',
+        r'near "[^"]+": syntax error',
+        r'android\.database\.sqlite\.sqlite\w*exception',
+    ]
+    _SQL_EXPOSURE = [
+        r'sqlite_master',
+        r'sqlite_sequence',
+        r'android_metadata',
+        r'select.{1,60}from.{1,30}sqlite_master',
+        r'union\s+select.{1,60}from',
+    ]
+    for pat in _SQL_ERRORS:
+        if re.search(pat, ev):
             score += 20
-            key_evidence.append(f"Sensitive keyword in logcat: '{pat}'")
+            key_evidence.append(f"SQL error pattern matched: {pat}")
+            break
+    for pat in _SQL_EXPOSURE:
+        if re.search(pat, ev):
+            score += 35
+            key_evidence.append(f"SQL schema exposure detected: {pat}")
             break
 
-    # Path traversal success indicators
-    traversal_indicators = ["root:", "bin/sh", "etc/passwd", "/data/data"]
-    for ind in traversal_indicators:
-        if ind in ev:
+    # ── Credential / token leak — require key=value context ──────────────────
+    _CRED_PATTERNS = [
+        (r'password\s*[:=]\s*\S{4,}',             "password value in logcat"),
+        (r'passwd\s*[:=]\s*\S{4,}',               "passwd value in logcat"),
+        (r'api[_-]?key\s*[:=]\s*[a-z0-9_-]{10,}', "API key in logcat"),
+        (r'bearer\s+[a-z0-9_.\-]{20,}',           "Bearer token in logcat"),
+        (r'eyj[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+', "JWT in logcat"),
+        (r'akia[0-9a-z]{16}',                     "AWS access key in logcat"),
+        (r'aiza[0-9a-z_\-]{35}',                  "Google API key in logcat"),
+        (r'-----begin\s+(?:rsa\s+)?private key',  "Private key material in logcat"),
+    ]
+    for pat, label in _CRED_PATTERNS:
+        if re.search(pat, log_lower):
             score += 30
-            key_evidence.append(f"Path traversal indicator: '{ind}'")
+            key_evidence.append(label)
+
+    # ── Path traversal success ─────────────────────────────────────────────────
+    _TRAVERSAL_HIT = [
+        (r'root:\w*:0:0',           "passwd file content (root:x:0:0)"),
+        (r'#!/bin/(sh|bash)',        "Shell script content exposed"),
+        (r'/etc/passwd',             "/etc/passwd path in output"),
+        (r'/data/data/[a-z.]+/[^/]', "Internal app data path exposed"),
+        (r'<manifest\b',             "AndroidManifest.xml content exposed"),
+    ]
+    for pat, label in _TRAVERSAL_HIT:
+        if re.search(pat, ev):
+            score += 40
+            key_evidence.append(f"Path traversal confirmed: {label}")
             break
 
-    # Error / crash indicators (may confirm vulnerability triggers)
-    crash_indicators = ["java.lang.exception", "nullpointerexception", "securityexception", "force close"]
-    for ind in crash_indicators:
-        if ind in ev:
-            score += 10
-            key_evidence.append(f"Exception indicator: '{ind}'")
-            break
-
-    # ContentProvider probe returned data
-    if "content_values" in ev or "row 0:" in ev or "no result found" not in ev and "contentprovider" in category.lower():
-        if "content://" in extra_evidence.lower():
+    # ── WebView / DeepLink exploitation ──────────────────────────────────────
+    if "webview" in cat_lower or "deeplink" in cat_lower:
+        if re.search(r'javascript:', ev) and re.search(r'(execut|load|evaluat)', ev):
+            score += 35
+            key_evidence.append("JavaScript URI executed in WebView")
+        if re.search(r'file://.*\.(xml|json|db|passwd|sqlite)', ev):
+            score += 30
+            key_evidence.append("Sensitive file URI accessed in WebView")
+        if re.search(r'addjavascriptinterface', log_lower):
             score += 15
-            key_evidence.append("ContentProvider returned data for probe query")
+            key_evidence.append("JavaScript interface exposed to WebView")
 
-    # Negative signals: probes returned errors without data
-    if "permission denied" in ev or "no such provider" in ev:
-        score -= 15
-        key_evidence.append("Access denied — protected by permission check")
+    # ── ContentProvider returned rows ────────────────────────────────────────
+    if "contentprovider" in cat_lower or "owasp-m4" in cat_lower:
+        if re.search(r'row \d+:', ev):
+            score += 25
+            key_evidence.append("ContentProvider returned data rows for probe query")
+        if re.search(r'_id\s*=\s*\d', ev):
+            score += 15
+            key_evidence.append("Database row returned (_id column visible)")
+
+    # ── Security exceptions / crashes that confirm a trigger ─────────────────
+    _CRASH_CONFIRM = [
+        r'java\.lang\.securityexception(?!.*permission denied)',
+        r'fatal exception.*main',
+        r'illegalargumentexception.*inject',
+        r'force.{1,5}clos',
+    ]
+    for pat in _CRASH_CONFIRM:
+        if re.search(pat, ev):
+            score += 12
+            key_evidence.append(f"Security-related exception triggered: {pat}")
+
+    # ── Cleartext network traffic ────────────────────────────────────────────
+    if re.search(r'http://(?!localhost|127\.0\.0\.1|10\.)', ev):
+        score += 10
+        key_evidence.append("Cleartext HTTP traffic to external host detected")
+
+    # ── Negative signals (reduce score) ──────────────────────────────────────
+    if re.search(r'permission denied', ev):
+        penalty = 25 if re.search(r'securityexception.*permission', ev) else 15
+        score -= penalty
+        key_evidence.append("Permission check blocked probe access")
+
+    if re.search(r'no such provider|unknown uri|uriparser.*error', ev):
+        score -= 20
+        key_evidence.append("Provider rejected or unknown — URI not accessible")
+
+    if re.search(r'ssl.*handshake|certificate.*pinning|pinning.*failed', ev):
+        score -= 10
+        key_evidence.append("Certificate pinning may be active")
+
+    # ── Verdict ───────────────────────────────────────────────────────────────
+    score = max(score, 0)  # floor at 0
 
     if score >= 40:
-        verdict = "true_positive"
-        confidence = min(85, 50 + score)
-        reasoning = "ADB probes produced indicators consistent with exploitability. Manual review recommended to confirm."
-    elif score >= 10:
-        verdict = "uncertain"
-        confidence = 40
-        reasoning = "Some indicators present but not conclusive. Run AI-enhanced scan or manual verification."
+        verdict    = "true_positive"
+        confidence = min(90, 55 + score)
+        reasoning  = (
+            "Runtime probes produced strong indicators consistent with exploitability. "
+            "Manual confirmation recommended before reporting to developers."
+        )
+    elif score >= 15:
+        verdict    = "uncertain"
+        confidence = min(55, 30 + score)
+        reasoning  = (
+            "Partial indicators present but evidence is not conclusive. "
+            "Run AI-Enhanced Scan or perform manual exploitation attempt."
+        )
     else:
-        verdict = "false_positive"
-        confidence = 60
-        reasoning = "No strong runtime indicators detected. May be a false positive or requires specific triggering conditions."
+        verdict    = "false_positive"
+        confidence = 65
+        reasoning  = (
+            "No strong runtime indicators detected in probe output or logcat. "
+            "Finding may be a false positive, or vulnerability requires specific "
+            "user interaction / device state not present in automated probing."
+        )
 
     if not key_evidence:
-        key_evidence = ["No distinctive runtime indicators found in probe output"]
+        key_evidence = ["No distinctive security indicators found in runtime output"]
 
     return {
-        "verdict": verdict,
-        "confidence": confidence,
-        "reasoning": reasoning,
-        "key_evidence": key_evidence,
+        "verdict":          verdict,
+        "confidence":       confidence,
+        "reasoning":        reasoning,
+        "key_evidence":     key_evidence,
+        "risk_context":     "Heuristic analysis — accuracy limited without AI or manual testing.",
         "suggested_action": (
             "Confirm with manual testing or run AI-Enhanced Scan for deeper analysis."
             if verdict != "false_positive"
-            else "Review static analysis context — likely a false positive."
+            else "Review static analysis context — likely a false positive or requires manual trigger."
         ),
-        "mode": "heuristic"
+        "mode": "heuristic",
     }
 
 
@@ -371,59 +544,160 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
         # ── 7. Run targeted ADB probes based on finding type ─────────────
         _update_job(job_id, progress=75, message="Running targeted verification probes…")
         extra_evidence = net_evidence
-        category = finding.get("category", "")
+        category       = finding.get("category", "")
+        cat_lower      = category.lower()
+
+        adb_prefix = (["-s", device_serial] if device_serial else [])
 
         # Extract real authority from finding data (adb_commands or extra)
         authority = _extract_authority(finding, package)
 
-        if package and ("ContentProvider" in category or "OWASP-M4" in category):
-            # SQL injection probe — UNION SELECT against the actual authority
-            sql_payload = "1=1) UNION SELECT name,sql,3 FROM sqlite_master--"
-            rc, out, _ = _run_adb(
-                (["-s", device_serial] if device_serial else []) + [
-                    "shell", "content", "query",
-                    "--uri", f"content://{authority}/",
-                    "--where", sql_payload,
-                ], timeout=10)
-            extra_evidence += f"\nSQL injection probe (authority={authority}):\n{out[:500]}"
+        # ── ContentProvider / SQL injection probes ─────────────────────────
+        if package and ("contentprovider" in cat_lower or "owasp-m4" in cat_lower
+                        or "injection" in cat_lower):
+            _update_job(job_id, progress=76, message="Probing ContentProvider…")
+            # Multiple SQLi payloads — different attack classes
+            sqli_payloads = [
+                ("UNION SELECT",    "1=1) UNION SELECT name,sql,3 FROM sqlite_master--"),
+                ("Error-based",     "' OR ''='"),
+                ("Boolean blind",   "1 AND 1=1"),
+                ("Schema dump",     "* FROM sqlite_master--"),
+            ]
+            for payload_name, payload in sqli_payloads:
+                rc, out, err = _run_adb(
+                    adb_prefix + [
+                        "shell", "content", "query",
+                        "--uri", f"content://{authority}/",
+                        "--where", payload,
+                    ], timeout=10)
+                combined = (out + err).strip()
+                if combined:
+                    extra_evidence += (
+                        f"\nSQLi probe [{payload_name}] (authority={authority}):\n"
+                        f"{combined[:400]}\n"
+                    )
+                    if re.search(r'sqlite_master|row \d+:|unrecognized token|syntax error', combined, re.I):
+                        extra_evidence += f"  ^^^ POTENTIAL SQLi INDICATOR\n"
 
-            # Path traversal probe — encoded path segments
-            for traversal in ["../", "%2F..%2F..%2Fetc%2Fpasswd", "../../../data/data"]:
+            # Path traversal probes
+            for traversal in [
+                "../../../etc/passwd",
+                "../../../../data/data",
+                "%2F..%2F..%2Fetc%2Fpasswd",
+                "..%2F..%2F..%2Fetc%2Fpasswd",
+            ]:
                 rc2, out2, _ = _run_adb(
-                    (["-s", device_serial] if device_serial else []) + [
+                    adb_prefix + [
                         "shell", "content", "query",
                         "--uri", f"content://{authority}/{traversal}",
                     ], timeout=8)
                 if out2.strip():
-                    extra_evidence += f"\nPath traversal probe ({traversal}):\n{out2[:300]}"
+                    extra_evidence += f"\nPath traversal [{traversal}]:\n{out2[:300]}\n"
                     break
 
-        if "WebView" in category or "DeepLink" in category or "Intent" in category:
-            # JavaScript scheme deeplink probe
-            rc, out, _ = _run_adb(
-                (["-s", device_serial] if device_serial else []) + [
-                    "shell", "am", "start", "-a", "android.intent.action.VIEW",
-                    "-d", "javascript:void(document.cookie)",
+            # Enumerate all accessible columns (no WHERE clause)
+            rc3, out3, _ = _run_adb(
+                adb_prefix + [
+                    "shell", "content", "query",
+                    "--uri", f"content://{authority}/",
                 ], timeout=10)
-            extra_evidence += f"\nDeepLink JS probe: rc={rc} out={out[:100]}"
-            # Intent with crafted extras probe
-            if package:
-                rc2, out2, _ = _run_adb(
-                    (["-s", device_serial] if device_serial else []) + [
-                        "shell", "am", "start", "-n", f"{package}/.MainActivity",
-                        "--es", "url", "javascript:void(0)",
-                        "--es", "path", "../../../etc/passwd",
-                    ], timeout=10)
-                extra_evidence += f"\nIntent extras probe: rc={rc2}"
+            if out3.strip():
+                extra_evidence += f"\nContentProvider open query:\n{out3[:600]}\n"
 
-        if "Credentials" in category or "Cryptography" in category or "OWASP-M1" in category:
-            # Check SharedPreferences for leaked credentials
+        # ── WebView / DeepLink probes ──────────────────────────────────────
+        if "webview" in cat_lower or "deeplink" in cat_lower or "intent" in cat_lower:
+            _update_job(job_id, progress=77, message="Probing WebView/DeepLink vectors…")
+            # JavaScript scheme injection
             rc, out, _ = _run_adb(
-                (["-s", device_serial] if device_serial else []) + [
-                    "shell", "run-as", package,
-                    "find", f"/data/data/{package}/shared_prefs", "-name", "*.xml",
-                ], timeout=8)
-            extra_evidence += f"\nSharedPrefs files:\n{out[:300]}"
+                adb_prefix + [
+                    "shell", "am", "start", "-a", "android.intent.action.VIEW",
+                    "-d", "javascript:document.location='http://169.254.169.254/'",
+                ], timeout=10)
+            extra_evidence += f"\nDeepLink JS injection probe: rc={rc} out={out[:150]}\n"
+
+            # File URI via deep link
+            rc2, out2, _ = _run_adb(
+                adb_prefix + [
+                    "shell", "am", "start", "-a", "android.intent.action.VIEW",
+                    "-d", "file:///etc/hosts",
+                ], timeout=10)
+            extra_evidence += f"\nDeepLink file:// probe: rc={rc2} out={out2[:100]}\n"
+
+            # Intent extras path traversal
+            if package:
+                rc3, out3, _ = _run_adb(
+                    adb_prefix + [
+                        "shell", "am", "start", "-n", f"{package}/.MainActivity",
+                        "--es", "url", "javascript:alert(document.cookie)",
+                        "--es", "path", "../../../../etc/passwd",
+                        "--es", "file", "../../../data/data",
+                    ], timeout=10)
+                extra_evidence += f"\nIntent extras injection probe: rc={rc3}\n"
+
+            # Check logcat for JS execution after probe
+            _time.sleep(3)
+            post_logcat = _get_logcat(device_serial or None, lines=50, package=package)
+            if re.search(r'javascript|webview|loadurl|evaluat', post_logcat, re.I):
+                extra_evidence += f"\nPost-probe WebView logcat:\n{post_logcat[:500]}\n"
+
+        # ── Credential / storage probes ───────────────────────────────────
+        if ("credential" in cat_lower or "cryptography" in cat_lower
+                or "owasp-m1" in cat_lower or "storage" in cat_lower
+                or "owasp-m9" in cat_lower):
+            _update_job(job_id, progress=78, message="Probing credential storage…")
+            if package:
+                # List SharedPreferences files
+                rc, out, _ = _run_adb(
+                    adb_prefix + [
+                        "shell", "run-as", package,
+                        "find", f"/data/data/{package}/shared_prefs", "-name", "*.xml",
+                    ], timeout=8)
+                extra_evidence += f"\nSharedPrefs files:\n{out[:400]}\n"
+
+                # Check for world-readable files
+                rc2, out2, _ = _run_adb(
+                    adb_prefix + [
+                        "shell", "find", f"/data/data/{package}", "-perm", "-o=r", "-type", "f",
+                    ], timeout=10)
+                if out2.strip():
+                    extra_evidence += f"\nWorld-readable files in app dir:\n{out2[:400]}\n"
+
+                # External storage check
+                rc3, out3, _ = _run_adb(
+                    adb_prefix + [
+                        "shell", "find", "/sdcard/Android/data", "-path",
+                        f"*{package}*", "-name", "*.json", "-o", "-name", "*.xml",
+                        "-o", "-name", "*.db",
+                    ], timeout=10)
+                if out3.strip():
+                    extra_evidence += f"\nExternal storage files:\n{out3[:300]}\n"
+
+        # ── Network security probe ─────────────────────────────────────────
+        if "network" in cat_lower or "cleartext" in cat_lower or "tls" in cat_lower or "ssl" in cat_lower:
+            _update_job(job_id, progress=79, message="Checking network security config…")
+            if package:
+                rc, out, _ = _run_adb(
+                    adb_prefix + [
+                        "shell", "run-as", package,
+                        "cat", f"/data/data/{package}/network_security_config.xml",
+                    ], timeout=8)
+                if out.strip():
+                    extra_evidence += f"\nNetwork security config:\n{out[:400]}\n"
+
+                # Check for cleartext traffic in logcat
+                if re.search(r'http://(?!localhost|127\.)', logcat, re.I):
+                    extra_evidence += "\n[CLEARTEXT] Unencrypted HTTP traffic detected in logcat\n"
+
+        # ── Exported component enumeration ────────────────────────────────
+        if package and ("intent" in cat_lower or "component" in cat_lower or "broadcast" in cat_lower):
+            _update_job(job_id, progress=80, message="Enumerating exported components…")
+            rc, out, _ = _run_adb(
+                adb_prefix + [
+                    "shell", "dumpsys", "package", package, "|",
+                    "grep", "-A3", "exported=true",
+                ], timeout=10)
+            if out.strip():
+                extra_evidence += f"\nExported components:\n{out[:600]}\n"
 
         # ── 8. Verdict ───────────────────────────────────────────────────
         if use_ai:
@@ -435,7 +709,7 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
                     finding_desc  = finding.get("description", ""),
                     severity      = finding.get("severity", ""),
                     category      = category,
-                    logcat        = logcat,
+                    logcat        = _extract_security_logcat(logcat),
                     extra_evidence= extra_evidence,
                     api_key       = api_key,
                 )
