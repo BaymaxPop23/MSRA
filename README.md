@@ -14,64 +14,93 @@ Android APK security analysis platform with pattern-based detection, AI-assisted
 - **AI PoC Generation** — Generate proof-of-concept Android apps for confirmed findings
 - **PDF / CSV / SARIF exports** — With triage state included
 
-## Requirements
-
-- Python 3.8+
-- `jadx` for APK decompilation ([install](https://github.com/skylot/jadx))
-- `adb` for dynamic analysis (Android SDK platform-tools)
-
-Optional for AI features:
-- `ANTHROPIC_API_KEY` environment variable (for AI-enhanced scan and PoC generation)
+---
 
 ## Installation
+
+### Option 1 — Shell script (macOS / Linux, recommended)
 
 ```bash
 git clone https://github.com/BaymaxPop23/MSRA.git
 cd MSRA
-pip install flask weasyprint
+
+# Install dependencies
+pip3 install flask weasyprint
+brew install jadx android-platform-tools   # macOS
+# sudo apt install jadx adb               # Linux
+
+# Start (opens browser automatically)
+./start.sh
+
+# Stop
+./stop.sh
 ```
 
-### Install jadx
+To enable AI features, set your Anthropic API key before starting:
 
 ```bash
-# macOS
-brew install jadx
-
-# Linux (Ubuntu/Debian)
-sudo apt install jadx
+ANTHROPIC_API_KEY=sk-ant-... ./start.sh
 ```
 
-### Install adb
+Or add it to a `.env` file (copy from `.env.example`).
+
+---
+
+### Option 2 — Make
 
 ```bash
-# macOS
-brew install android-platform-tools
-
-# Linux
-sudo apt install adb
+git clone https://github.com/BaymaxPop23/MSRA.git
+cd MSRA
+make install      # pip install + reminds you to install jadx/adb
+make start        # start dashboard, open browser
+make stop         # stop dashboard
+make restart      # restart
+make logs         # tail server logs
 ```
 
-## Quick Start
+---
 
-### Web Dashboard (recommended)
+### Option 3 — Docker (no Python setup needed)
 
 ```bash
-python server.py
+git clone https://github.com/BaymaxPop23/MSRA.git
+cd MSRA
+
+# Add your API key (optional, for AI features)
+cp .env.example .env
+# edit .env and set ANTHROPIC_API_KEY=sk-ant-...
+
+docker compose up -d
 # Open http://localhost:5001
+
+docker compose down   # stop
 ```
 
-Set your Anthropic API key for AI features:
+Scan data and reports persist in Docker volumes across restarts.
 
-```bash
-ANTHROPIC_API_KEY=sk-ant-... python server.py
-```
+---
+
+## Requirements
+
+| Dependency | Purpose | Install |
+|---|---|---|
+| Python 3.8+ | Runtime | [python.org](https://python.org) |
+| flask, weasyprint | Web server, PDF export | `pip3 install flask weasyprint` |
+| `jadx` | APK decompilation (required for scanning) | `brew install jadx` |
+| `adb` | Dynamic analysis (optional) | `brew install android-platform-tools` |
+| `ANTHROPIC_API_KEY` | AI-enhanced scan + PoC generation (optional) | [console.anthropic.com](https://console.anthropic.com) |
+
+---
+
+## Usage
 
 Upload an APK through the dashboard, then:
 - Browse findings with severity chips and risk score
-- Click a finding to open the drawer: vulnerable code, exploitation details, ADB commands
-- Run **Basic ADB Scan** (heuristic, no API key needed) or **AI-Enhanced Scan** (Claude analysis)
+- Click a finding to open the detail drawer: vulnerable code, exploitation details, ADB commands
+- Run **Basic ADB Scan** (heuristic verdict, no API key needed) or **AI-Enhanced Scan** (Claude analysis)
 - Generate PoC Android apps for confirmed findings
 - Export as PDF, CSV, SARIF, or JSON
+- Triage findings: Confirmed / False Positive / Accepted Risk / Fixed
 
 ### Dynamic Analysis
 
@@ -81,12 +110,14 @@ The dashboard auto-detects connected ADB devices (including Genymotion at `127.0
 
 **AI-Enhanced Scan** — same probes + passes all evidence to Claude for intelligent analysis and suggested actions.
 
+---
+
 ## Vulnerability Categories
 
 | Category | Description | Patterns |
-|----------|-------------|----------|
+|---|---|---|
 | **WebView** | JavaScript interface, file access, SSL errors | 18 |
-| **Intent/DeepLink** | Intent redirect, PendingIntent, broadcast hijacking | 13 |
+| **Intent / DeepLink** | Intent redirect, PendingIntent, broadcast hijacking | 13 |
 | **Component Exposure** | Exported activities, services, receivers, providers | 11 |
 | **Cryptography** | Weak algorithms, hardcoded keys, insecure random | 9 |
 | **Permissions** | Dangerous permissions, signature protection | 7 |
@@ -96,10 +127,17 @@ The dashboard auto-detects connected ADB devices (including Genymotion at `127.0
 | **Logging** | Sensitive data in logs | 3 |
 | **Credentials** | Hardcoded secrets, API keys | 2 |
 
+---
+
 ## Project Structure
 
 ```
 MSRA/
+├── start.sh               # One-command start (opens browser)
+├── stop.sh                # Stop server
+├── Makefile               # make start / stop / logs / docker
+├── Dockerfile             # Docker image
+├── docker-compose.yml     # Docker Compose with persistent volumes
 ├── server.py              # Flask web server & dashboard
 ├── main.py                # CLI entry point
 ├── msra/
@@ -107,15 +145,17 @@ MSRA/
 │   ├── report.py          # HTML report generation
 │   ├── db.py              # SQLite persistence (WAL mode)
 │   ├── rules_api.py       # Pattern management API
-│   ├── pdf_export.py      # PDF/SARIF/CSV export
+│   ├── pdf_export.py      # PDF / SARIF / CSV export
 │   ├── corellium.py       # Corellium cloud device client
 │   ├── deep_analysis/     # WebView, Intent, Provider analyzers
-│   ├── dynamic/           # ADB/Frida/mitmproxy dynamic analysis
+│   ├── dynamic/           # ADB / Frida / mitmproxy dynamic analysis
 │   └── patterns/          # Pattern loading & validation
 └── data/
     └── builtin/
         └── patterns.json  # 77+ OWASP security patterns
 ```
+
+---
 
 ## Custom Patterns
 
@@ -140,6 +180,8 @@ Add patterns to `data/custom/user_rules.json`:
   ]
 }
 ```
+
+---
 
 ## Contributing
 
