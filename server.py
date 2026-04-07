@@ -52,7 +52,7 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL      = "claude-sonnet-4-6"
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 250 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
 
 # ── Dynamic analysis job state ────────────────────────────────────────────
 import time as _time
@@ -2021,10 +2021,13 @@ async function startUploadScan() {{
   const fd = new FormData();
   fd.append('apk', _upFile);
   closeUploadPanel();
-  showProgress(5, 'Uploading APK…');
+  showProgress(5, 'Uploading…');
 
   fetch('/api/upload', {{ method: 'POST', body: fd }})
-    .then(r => r.json())
+    .then(r => {{
+      if (r.status === 413) throw new Error('File too large (max 250 MB)');
+      return r.json();
+    }})
     .then(d => {{
       if (d.error) {{ showToast(d.error, 'error'); hideProgress(); return; }}
       pollScan(d.scan_id);
@@ -5954,6 +5957,11 @@ def _run_exe_scan(scan_id: str, exe_path: Path):
     finally:
         try: exe_path.unlink(missing_ok=True)
         except Exception: pass
+
+
+@app.errorhandler(413)
+def too_large(e):
+    return jsonify({"error": "File too large. Maximum upload size is 500 MB."}), 413
 
 
 @app.route("/api/upload", methods=["POST"])
