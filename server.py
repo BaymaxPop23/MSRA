@@ -492,10 +492,15 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
         if apk_candidates:
             apk_path = str(apk_candidates[0])
             adb_args = (["-s", device_serial] if device_serial else []) + ["install", "-r", apk_path]
+            _update_job(job_id, progress=22, message=f"Installing APK on device…")
             rc, out, err = _run_adb(adb_args, timeout=90)
-            if rc != 0 and "already installed" not in (out + err).lower():
-                _update_job(job_id, message=f"APK install warning: {err[:100]}", progress=22)
+            install_combined = (out + err).lower()
+            if rc != 0 and "already installed" not in install_combined:
+                _update_job(job_id, status="error",
+                            message=f"APK install failed: {(err or out)[:200]}", progress=22)
+                return
             # Verify package is actually registered before launching
+            app_registered = False
             if package:
                 for _ in range(6):
                     _time.sleep(2)
@@ -503,14 +508,24 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
                         (["-s", device_serial] if device_serial else []) + ["shell", "pm", "path", package],
                         timeout=5)
                     if "package:" in pm_out:
+                        app_registered = True
                         break
+            if package and not app_registered:
+                _update_job(job_id, status="error",
+                            message=f"APK installed but package '{package}' not found on device — wrong architecture?",
+                            progress=22)
+                return
         elif package:
             # No APK in scan dir — verify app is already installed
             _, pm_out, _ = _run_adb(
                 (["-s", device_serial] if device_serial else []) + ["shell", "pm", "path", package],
                 timeout=5)
             if "package:" not in pm_out:
-                _update_job(job_id, message=f"Package {package} not installed and no APK found", progress=22)
+                _update_job(job_id, status="error",
+                            message=f"Package '{package}' is not installed on device and no APK was found in the scan. "
+                                    f"Install the APK on your device first, then retry.",
+                            progress=22)
+                return
 
         _update_job(job_id, progress=30, message=f"Launching {package}…")
 
@@ -5848,6 +5863,10 @@ def _run_scan(scan_id: str, apk_path: Path):
     out_dir.mkdir(exist_ok=True)
     try:
         _set_status(scan_id, status="decompiling", progress=5, message="Unpacking APK bundle…")
+        # Copy APK into scan dir so dynamic analysis can install it later
+        dest_apk = out_dir / apk_path.name
+        if not dest_apk.exists():
+            shutil.copy2(str(apk_path), str(dest_apk))
         scan_apk = _unwrap_bundle(apk_path, out_dir)
         if scan_apk != apk_path:
             _set_status(scan_id, status="decompiling", progress=10,
