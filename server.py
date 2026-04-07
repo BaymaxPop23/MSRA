@@ -498,7 +498,7 @@ _RATE_LOCK = threading.Lock()
 
 def _rate_limit(ip: str, max_per_minute: int = 10) -> bool:
     """Return True if the request is allowed, False if rate limit exceeded."""
-    now = time.time()
+    now = _time.time()
     with _RATE_LOCK:
         entry = _rate_store.get(ip)
         if entry is None or (now - entry[1]) > 60:
