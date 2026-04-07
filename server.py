@@ -490,7 +490,13 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
         _update_job(job_id, progress=20, message="Checking APK installation…")
 
         if apk_candidates:
-            apk_path = str(apk_candidates[0])
+            # ADB install breaks if the filename contains shell-special chars
+            # like parentheses or commas (e.g. apkmirror filenames).
+            # Copy to a clean temp path before installing.
+            import tempfile as _tempfile
+            _tmp_apk = Path(_tempfile.gettempdir()) / "msra_install.apk"
+            shutil.copy2(str(apk_candidates[0]), str(_tmp_apk))
+            apk_path = str(_tmp_apk)
             adb_args = (["-s", device_serial] if device_serial else []) + ["install", "-r", apk_path]
             _update_job(job_id, progress=22, message=f"Installing APK on device…")
             rc, out, err = _run_adb(adb_args, timeout=90)
