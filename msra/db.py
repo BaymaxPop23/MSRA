@@ -67,6 +67,7 @@ def init_db() -> None:
             # Additive migrations — safe to run on every startup
             for _migration in [
                 "ALTER TABLE scans ADD COLUMN risk_score REAL DEFAULT NULL",
+                "ALTER TABLE scans ADD COLUMN platform TEXT DEFAULT 'android'",
             ]:
                 try:
                     c.execute(_migration)
