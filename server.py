@@ -1154,10 +1154,10 @@ code,pre{{font-family:'JetBrains Mono',monospace}}
 /* ── SCAN ITEM WITH DELETE ── */
 .sb-scan-wrap{{display:flex;align-items:stretch;border-radius:8px;margin-bottom:2px;
                position:relative}}
-.sb-scan-wrap:hover .sb-del-btn{{opacity:1}}
+.sb-scan-wrap:hover .sb-del-btn{{opacity:1;color:var(--text2)}}
 .sb-scan-wrap .sb-scan-item{{flex:1;border-radius:8px 0 0 8px;margin-bottom:0}}
 .sb-del-btn{{
-  opacity:0;flex-shrink:0;width:28px;display:flex;align-items:center;
+  opacity:0.3;flex-shrink:0;width:28px;display:flex;align-items:center;
   justify-content:center;background:transparent;border:none;border-left:0;
   color:var(--text3);cursor:pointer;transition:all .15s;border-radius:0 8px 8px 0;
   font-size:10px;
@@ -5012,6 +5012,7 @@ def _build_home_dashboard(all_summaries: list) -> str:
           <td style="color:var(--text3);font-family:'JetBrains Mono',monospace;font-size:11px">{apk}</td>
           <td>{sev_pills or f'<span style="color:var(--text3)">{total}</span>'}</td>
           <td style="text-align:center">{rs_cell}</td>
+          <td style="text-align:center"><button onclick="event.stopPropagation();deleteScan('{sid}')" title="Delete scan" style="background:transparent;border:none;color:var(--text3);cursor:pointer;padding:4px 6px;border-radius:4px;font-size:12px;transition:color .15s" onmouseover="this.style.color='#ef4444'" onmouseout="this.style.color='var(--text3)'"><i class="fa-solid fa-trash-can"></i></button></td>
         </tr>'''
 
     if not rows_html:
@@ -5049,7 +5050,7 @@ def _build_home_dashboard(all_summaries: list) -> str:
         </button>
       </div>
       <table class="home-scan-table">
-        <thead><tr><th>Package</th><th>APK</th><th>Findings</th><th style="text-align:center">Risk</th></tr></thead>
+        <thead><tr><th>Package</th><th>APK</th><th>Findings</th><th style="text-align:center">Risk</th><th></th></tr></thead>
         <tbody>{rows_html}</tbody>
       </table>
     </div>
