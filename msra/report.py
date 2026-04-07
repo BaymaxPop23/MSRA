@@ -1,4 +1,4 @@
-"""Enterprise-grade HTML report generation for APKSlayer."""
+"""Enterprise-grade HTML report generation for MSRA."""
 
 import datetime as dt
 import html
@@ -946,7 +946,7 @@ code, pre {{ font-family: 'JetBrains Mono', monospace; }}
 <nav class="topnav">
   <div class="topnav-brand">
     <i class="fa-solid fa-shield-halved"></i>
-    APKSlayer
+    MSRA
   </div>
   <span class="topnav-pkg">{html.escape(pkg)}</span>
   <div class="topnav-spacer"></div>
@@ -1124,8 +1124,8 @@ function exportReport() {{
 }}
 
 // ── CLAUDE POC GENERATOR ──
-// Only active when served by the APKSlayer web server
-const IS_HOSTED = typeof window.__APKSLAYER_HOSTED !== 'undefined' && window.__APKSLAYER_HOSTED;
+// Only active when served by the MSRA web server
+const IS_HOSTED = typeof window.__MSRA_HOSTED !== 'undefined' && window.__MSRA_HOSTED;
 
 // Resolve API key: sidebar localStorage → server env var (no modal entry needed)
 function _resolveApiKey() {{
@@ -1135,7 +1135,7 @@ function _resolveApiKey() {{
 
 function openPocModal(idx) {{
   if (!IS_HOSTED) {{
-    alert('Claude PoC generation requires the APKSlayer web server.\\n\\nStart it with: python server.py');
+    alert('Claude PoC generation requires the MSRA web server.\\n\\nStart it with: python server.py');
     return;
   }}
   const modal = document.getElementById('pocModal');

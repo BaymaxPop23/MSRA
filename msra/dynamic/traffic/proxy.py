@@ -363,7 +363,7 @@ class ProxyManager:
             "log": {
                 "version": "1.2",
                 "creator": {
-                    "name": "APKSlayer",
+                    "name": "MSRA",
                     "version": "2.0"
                 },
                 "entries": entries

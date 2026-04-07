@@ -1,4 +1,4 @@
-"""Command-line interface for APKSlayer."""
+"""Command-line interface for MSRA."""
 
 import argparse
 import json
@@ -89,7 +89,7 @@ class Icons:
 
 
 def print_banner():
-    """Print the APKSlayer banner."""
+    """Print the MSRA banner."""
     # Get actual pattern count
     try:
         manager = PatternManager()
@@ -101,9 +101,9 @@ def print_banner():
     banner = f"""
 ╔══════════════════════════════════════════════════════════════╗
 ║                                                              ║
-║   ⚔️  APKSlayer                                               ║
+║   🛡️  MSRA — Mobile Security Review Assistant                  ║
 ║                                                              ║
-║   Slay vulnerabilities before they slay your users           ║
+║   Identify vulnerabilities before attackers do               ║
 ║   ──────────────────────────────────────────────             ║
 ║   {Icons.BULLET} {pattern_count}+ Security Patterns                              ║
 ║   {Icons.BULLET} Deep Analysis Engine                               ║
@@ -1085,7 +1085,7 @@ def cmd_scan(args) -> int:
     # Generate HTML report with embedded JSON
     html_path = os.path.join(out_dir, "report.html")
     metadata = {
-        "title": "APKSlayer Security Report",
+        "title": "MSRA Security Report",
         "package": package_name,
         "apk": os.path.basename(apk_path),
         "scan_time": scan_time,
@@ -1604,7 +1604,7 @@ def cmd_dynamic(args) -> int:
     if findings and apk_path:
         html_path = os.path.join(out_dir, "combined_report.html")
         metadata = {
-            "title": "APKSlayer - Combined Security Report",
+            "title": "MSRA - Combined Security Report",
             "package": package_name,
             "apk": os.path.basename(original_apk_path or apk_path) if apk_path else "N/A",
             "scan_time": datetime.now().isoformat(),
@@ -2153,7 +2153,7 @@ def main() -> int:
         return interactive_mode()
 
     parser = argparse.ArgumentParser(
-        description="APKSlayer - Slay vulnerabilities before they slay your users",
+        description="MSRA - Mobile Security Review Assistant",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

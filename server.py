@@ -544,7 +544,7 @@ def _build_dashboard(scan_id: str | None, all_summaries: list, view: str | None 
 
     api_configured  = bool(ANTHROPIC_API_KEY)
     hosted_inject   = (
-        f'<script>window.__APKSLAYER_HOSTED=true;'
+        f'<script>window.__MSRA_HOSTED=true;'
         f'window.__API_KEY_CONFIGURED={json.dumps(api_configured)};</script>'
     )
 
