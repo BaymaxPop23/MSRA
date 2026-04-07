@@ -502,8 +502,20 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
             rc, out, err = _run_adb(adb_args, timeout=90)
             install_combined = (out + err).lower()
             if rc != 0 and "already installed" not in install_combined:
-                _update_job(job_id, status="error",
-                            message=f"APK install failed: {(err or out)[:200]}", progress=22)
+                raw = (err or out).strip()
+                if "no_matching_abis" in install_combined or "no matching abis" in install_combined:
+                    msg = ("APK architecture mismatch — this APK is built for armeabi/x86 but your "
+                           "device/emulator runs arm64-v8a or x86_64. Download the arm64 or "
+                           "universal APK variant from APKMirror and re-scan.")
+                elif "install_failed_version_downgrade" in install_combined:
+                    msg = "Install failed: a newer version is already installed. Uninstall it first."
+                elif "install_failed_insufficient_storage" in install_combined:
+                    msg = "Install failed: not enough storage on device."
+                elif "install_failed_user_restricted" in install_combined:
+                    msg = "Install failed: unknown sources / USB install is disabled in device settings."
+                else:
+                    msg = f"APK install failed: {raw[:200]}"
+                _update_job(job_id, status="error", message=msg, progress=22)
                 return
             # Verify package is actually registered before launching
             app_registered = False
