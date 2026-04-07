@@ -1736,8 +1736,8 @@ code,pre{{font-family:'JetBrains Mono',monospace}}
 <!-- ════ UPLOAD OVERLAY ════ -->
 <div class="upload-overlay" id="uploadOverlay">
   <div class="upload-panel">
-    <div class="up-title"><i class="fa-solid fa-cloud-arrow-up"></i> Upload APK</div>
-    <div class="up-sub">Drop an Android APK to run a full security assessment</div>
+    <div class="up-title"><i class="fa-solid fa-cloud-arrow-up"></i> Upload File</div>
+    <div class="up-sub">Android APK &nbsp;·&nbsp; iOS IPA &nbsp;·&nbsp; Java JAR &nbsp;·&nbsp; Windows EXE/DLL</div>
 
     <div class="up-dropzone" id="upDrop">
       <input type="file" id="upFileInput" accept=".apk,.apkm,.xapk,.ipa,.jar,.exe,.dll" onchange="onUpFileSelected(this)">
@@ -1966,10 +1966,10 @@ async function _detectAdbDevicesForUpload() {{
     const data = await fetch('/api/dynamic/adb-devices').then(r => r.json());
     const devs = data.devices || [];
     if (devs.length === 0) {{
-      statusEl.innerHTML = '<i class="fa-solid fa-circle-xmark" style="color:var(--text3)"></i> No devices connected — APK will not be installed automatically';
+      statusEl.innerHTML = '<i class="fa-solid fa-circle-xmark" style="color:var(--text3)"></i> No devices connected — Android APKs will not be installed automatically';
       return;
     }}
-    statusEl.innerHTML = `<i class="fa-solid fa-circle-check" style="color:var(--low)"></i> ${{devs.length}} device${{devs.length>1?'s':''}} found — APK will be installed automatically after scan`;
+    statusEl.innerHTML = `<i class="fa-solid fa-circle-check" style="color:var(--low)"></i> ${{devs.length}} device${{devs.length>1?'s':''}} found — Android APKs will be installed automatically after scan`;
     devs.forEach((d, i) => {{
       const label = d.model ? `${{escHtml(d.serial)}} (${{escHtml(d.model)}})` : escHtml(d.serial);
       listEl.innerHTML += `
