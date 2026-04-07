@@ -109,6 +109,12 @@ def _pattern_to_dict(raw: dict, source: str, overrides: Dict[str, List[str]],
                     "services_entry"):
         jar_detection = {k: v for k, v in detection.items() if k != "type"}
 
+    # EXE/PE-specific detection fields
+    exe_detection: dict = {}
+    if det_type in ("pe_characteristic", "pe_imports", "pe_imports_combo",
+                    "pe_section", "pe_manifest"):
+        exe_detection = {k: v for k, v in detection.items() if k != "type"}
+
     return {
         "id":             pid,
         "title":          raw.get("title", ""),
@@ -122,6 +128,7 @@ def _pattern_to_dict(raw: dict, source: str, overrides: Dict[str, List[str]],
         "manifest_checks":manifest_checks,
         "ios_detection":  ios_detection,
         "jar_detection":  jar_detection,
+        "exe_detection":  exe_detection,
         "cwe":            raw.get("cwe", []) or meta.get("cwe", []),
         "cve":            meta.get("cve", []),
         "references":     raw.get("references", []) or meta.get("references", []),
@@ -170,6 +177,11 @@ def get_all_rules() -> List[dict]:
     jar_builtin = DATA_DIR / "builtin" / "jar_patterns.json"
     if jar_builtin.exists():
         add_from_file(jar_builtin, "builtin", "jar")
+
+    # Built-in EXE/PE
+    exe_builtin = DATA_DIR / "builtin" / "exe_patterns.json"
+    if exe_builtin.exists():
+        add_from_file(exe_builtin, "builtin", "exe")
 
     # Community
     community_dir = DATA_DIR / "community"

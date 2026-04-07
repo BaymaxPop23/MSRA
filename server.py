@@ -588,6 +588,8 @@ def _build_dashboard(scan_id: str | None, all_summaries: list, view: str | None 
             plat_icon = '<i class="fa-brands fa-apple" style="color:var(--text3);font-size:9px"></i> '
         elif platform == 'jar':
             plat_icon = '<i class="fa-brands fa-java" style="color:#f97316;font-size:9px"></i> '
+        elif platform == 'exe':
+            plat_icon = '<i class="fa-brands fa-windows" style="color:#0078d4;font-size:9px"></i> '
         else:
             plat_icon = '<i class="fa-brands fa-android" style="color:#22c55e;font-size:9px"></i> '
 
@@ -1738,9 +1740,9 @@ code,pre{{font-family:'JetBrains Mono',monospace}}
     <div class="up-sub">Drop an Android APK to run a full security assessment</div>
 
     <div class="up-dropzone" id="upDrop">
-      <input type="file" id="upFileInput" accept=".apk,.apkm,.xapk,.ipa,.jar" onchange="onUpFileSelected(this)">
+      <input type="file" id="upFileInput" accept=".apk,.apkm,.xapk,.ipa,.jar,.exe,.dll" onchange="onUpFileSelected(this)">
       <i class="fa-solid fa-file-circle-plus"></i>
-      <p>Click or drag an app or library here<br><span style="font-size:11px;color:var(--text3)"><i class="fa-brands fa-android" style="color:#22c55e"></i> .apk · .apkm · .xapk &nbsp;&nbsp;<i class="fa-brands fa-apple" style="color:var(--text2)"></i> .ipa &nbsp;&nbsp;<i class="fa-brands fa-java" style="color:#f97316"></i> .jar &nbsp;·&nbsp; max 250 MB</span></p>
+      <p>Click or drag a file here<br><span style="font-size:11px;color:var(--text3)"><i class="fa-brands fa-android" style="color:#22c55e"></i> .apk · .apkm · .xapk &nbsp;&nbsp;<i class="fa-brands fa-apple" style="color:var(--text2)"></i> .ipa &nbsp;&nbsp;<i class="fa-brands fa-java" style="color:#f97316"></i> .jar &nbsp;&nbsp;<i class="fa-brands fa-windows" style="color:#0078d4"></i> .exe · .dll &nbsp;·&nbsp; max 250 MB</span></p>
     </div>
 
     <div class="up-file-row">
@@ -2491,24 +2493,32 @@ function renderRulesTable() {{
     const isCustom  = rule.source === 'custom';
     const isIos     = rule.platform === 'ios';
     const isJar     = rule.platform === 'jar';
+    const isExe     = rule.platform === 'exe';
     const cweHtml   = (rule.cwe||[]).slice(0,2).map(c=>`<span class="cwe-mini">${{escHtml(c)}}</span>`).join(' ');
-    const detIcon   = rule.detection_type === 'manifest'        ? 'fa-file-code'
-                    : rule.detection_type === 'plist_key'       ? 'fa-list-check'
-                    : rule.detection_type === 'entitlement'     ? 'fa-id-card'
-                    : rule.detection_type === 'binary_flag'     ? 'fa-microchip'
-                    : rule.detection_type === 'binary_string'   ? 'fa-terminal'
-                    : rule.detection_type === 'manifest_attr'   ? 'fa-file-code'
-                    : rule.detection_type === 'class_exists'    ? 'fa-cube'
-                    : rule.detection_type === 'string_pattern'  ? 'fa-magnifying-glass-plus'
-                    : rule.detection_type === 'entry_pattern'   ? 'fa-folder-open'
-                    : rule.detection_type === 'library_version' ? 'fa-box-open'
+    const detIcon   = rule.detection_type === 'manifest'          ? 'fa-file-code'
+                    : rule.detection_type === 'plist_key'         ? 'fa-list-check'
+                    : rule.detection_type === 'entitlement'       ? 'fa-id-card'
+                    : rule.detection_type === 'binary_flag'       ? 'fa-microchip'
+                    : rule.detection_type === 'binary_string'     ? 'fa-terminal'
+                    : rule.detection_type === 'manifest_attr'     ? 'fa-file-code'
+                    : rule.detection_type === 'class_exists'      ? 'fa-cube'
+                    : rule.detection_type === 'string_pattern'    ? 'fa-magnifying-glass-plus'
+                    : rule.detection_type === 'entry_pattern'     ? 'fa-folder-open'
+                    : rule.detection_type === 'library_version'   ? 'fa-box-open'
                     : rule.detection_type === 'duplicate_entries' ? 'fa-copy'
-                    : rule.detection_type === 'services_entry'  ? 'fa-plug'
+                    : rule.detection_type === 'services_entry'    ? 'fa-plug'
+                    : rule.detection_type === 'pe_characteristic' ? 'fa-shield-halved'
+                    : rule.detection_type === 'pe_imports'        ? 'fa-arrow-right-arrow-left'
+                    : rule.detection_type === 'pe_imports_combo'  ? 'fa-layer-group'
+                    : rule.detection_type === 'pe_section'        ? 'fa-table-cells'
+                    : rule.detection_type === 'pe_manifest'       ? 'fa-scroll'
                     : 'fa-code';
     const platBadge = isIos
       ? `<span style="font-size:9px;background:rgba(148,163,184,.12);color:var(--text2);border:1px solid rgba(148,163,184,.2);padding:1px 5px;border-radius:3px;margin-right:4px"><i class="fa-brands fa-apple"></i> iOS</span>`
       : isJar
       ? `<span style="font-size:9px;background:rgba(249,115,22,.08);color:#fb923c;border:1px solid rgba(249,115,22,.2);padding:1px 5px;border-radius:3px;margin-right:4px"><i class="fa-brands fa-java"></i> JAR</span>`
+      : isExe
+      ? `<span style="font-size:9px;background:rgba(0,120,212,.08);color:#60a5fa;border:1px solid rgba(0,120,212,.2);padding:1px 5px;border-radius:3px;margin-right:4px"><i class="fa-brands fa-windows"></i> EXE</span>`
       : `<span style="font-size:9px;background:rgba(34,197,94,.08);color:#4ade80;border:1px solid rgba(34,197,94,.2);padding:1px 5px;border-radius:3px;margin-right:4px"><i class="fa-brands fa-android"></i> Android</span>`;
     const row      = document.createElement('tr');
     row.className  = 'rule-row' + (_openRuleId===rule.id ? ' selected' : '');
@@ -2617,10 +2627,13 @@ function openRuleDetail(id) {{
   const manSec = document.getElementById('rdpManifestSection');
   const iosSec = document.getElementById('rdpIosSection');
   const jarSec = document.getElementById('rdpJarSection');
+  const exeSec = document.getElementById('rdpExeSection');
 
   const isIosDet = ['plist_key','entitlement','binary_flag'].includes(rule.detection_type);
   const isJarDet = ['manifest_attr','class_exists','string_pattern','entry_pattern',
                     'library_version','duplicate_entries','services_entry'].includes(rule.detection_type);
+  const isExeDet = ['pe_characteristic','pe_imports','pe_imports_combo',
+                    'pe_section','pe_manifest'].includes(rule.detection_type);
 
   if (patDiv) {{
     const pats = rule.patterns || [];
@@ -2630,7 +2643,7 @@ function openRuleDetail(id) {{
                        <div class="rdp-code-meta"><span>flags: ${{p.flags||'i'}}</span>${{p.file_types?.length ? `<span>files: ${{p.file_types.join(', ')}}</span>` : ''}}</div>`).join('')
         : '<p style="color:var(--text3);font-size:13px">—</p>';
     }}
-    if (patSec) patSec.style.display = (rule.detection_type==='manifest' || isIosDet || isJarDet) ? 'none' : 'block';
+    if (patSec) patSec.style.display = (rule.detection_type==='manifest' || isIosDet || isJarDet || isExeDet) ? 'none' : 'block';
   }}
   if (manDiv) {{
     const mcs = rule.manifest_checks || [];
@@ -2672,6 +2685,26 @@ function openRuleDetail(id) {{
       jarSec.style.display = 'block';
     }} else {{
       if (jarSec) jarSec.style.display = 'none';
+    }}
+  }}
+  // EXE/PE-specific detection section
+  if (exeSec) {{
+    if (isExeDet) {{
+      const det = rule.exe_detection || {{}};
+      let exeHtml = `<div class="rdp-code-meta"><span style="color:var(--text2)">Detection type:</span> <code>${{escHtml(rule.detection_type)}}</code></div>`;
+      if (det.flag)         exeHtml += `<div class="rdp-code-meta"><span style="color:var(--text2)">Security feature:</span> <code>${{escHtml(det.flag)}}</code></div>`;
+      if (det.check)        exeHtml += `<div class="rdp-code-meta"><span style="color:var(--text2)">Check:</span> <code>${{escHtml(det.check)}}</code></div>`;
+      if (det.apis && det.apis.length) {{
+        exeHtml += `<div class="rdp-code-meta"><span style="color:var(--text2)">APIs checked (${{det.match || 'any'}}):</span></div>`;
+        exeHtml += `<div class="rdp-code-block">${{escHtml(det.apis.join(', '))}}</div>`;
+      }}
+      if (det.min_matches)  exeHtml += `<div class="rdp-code-meta"><span style="color:var(--text2)">Min matches for trigger:</span> <code>${{escHtml(String(det.min_matches))}}</code></div>`;
+      if (det.pattern)      exeHtml += `<div class="rdp-code-meta"><span style="color:var(--text2)">String pattern:</span></div><div class="rdp-code-block">${{escHtml(det.pattern)}}</div>`;
+      const exeDetEl = document.getElementById('rdpExeDetection');
+      if (exeDetEl) exeDetEl.innerHTML = exeHtml;
+      exeSec.style.display = 'block';
+    }} else {{
+      if (exeSec) exeSec.style.display = 'none';
     }}
   }}
   setText('rdpConfidence', rule.confidence || '—');
@@ -4621,6 +4654,10 @@ def _build_topbar(current: dict | None, view: str | None = None) -> str:
         plat_label = 'JAR'
         plat_icon  = 'fa-java'
         plat_color = 'color:#f97316'
+    elif platform == 'exe':
+        plat_label = 'Windows EXE'
+        plat_icon  = 'fa-windows'
+        plat_color = 'color:#0078d4'
     else:
         plat_label = 'Android'
         plat_icon  = 'fa-android'
@@ -4637,6 +4674,9 @@ def _build_topbar(current: dict | None, view: str | None = None) -> str:
     elif platform == 'jar':
         dyn_btn = (f'<span style="font-size:11px;color:var(--text3);padding:4px 8px" title="Dynamic analysis not available for JAR scans">'
                    f'<i class="fa-brands fa-java"></i> JAR Static</span>')
+    elif platform == 'exe':
+        dyn_btn = (f'<span style="font-size:11px;color:var(--text3);padding:4px 8px" title="Dynamic analysis not available for Windows PE scans">'
+                   f'<i class="fa-brands fa-windows"></i> PE Static</span>')
     else:
         dyn_btn = (f'<button class="btn btn-sm" style="border-color:rgba(251,191,36,.4);color:#fbbf24;'
                    f'background:rgba(251,191,36,.08)" onclick="openDynPanel(\'{sid}\')">'
@@ -4859,6 +4899,7 @@ def _build_intelligence_hub() -> str:
         <option value="android">Android</option>
         <option value="ios">iOS</option>
         <option value="jar">JAR (Java)</option>
+        <option value="exe">Windows PE/EXE</option>
       </select>
       <select class="intel-filter" id="filterSource" onchange="filterRules()">
         <option value="">All Sources</option>
@@ -5117,6 +5158,10 @@ def _build_intelligence_hub() -> str:
         <div class="rdp-section" id="rdpJarSection" style="display:none">
           <div class="rdp-section-title"><i class="fa-brands fa-java" style="margin-right:5px;color:#f97316"></i>JAR Detection Config</div>
           <div id="rdpJarDetection"></div>
+        </div>
+        <div class="rdp-section" id="rdpExeSection" style="display:none">
+          <div class="rdp-section-title"><i class="fa-brands fa-windows" style="margin-right:5px;color:#0078d4"></i>PE/EXE Detection Config</div>
+          <div id="rdpExeDetection"></div>
         </div>
         <div class="rdp-section">
           <div class="rdp-section-title">Confidence &amp; Quality</div>
@@ -5816,6 +5861,101 @@ def _run_jar_scan(scan_id: str, jar_path: Path):
         except Exception: pass
 
 
+def _run_exe_scan(scan_id: str, exe_path: Path):
+    """Background thread: static analysis of a Windows PE/EXE file."""
+    out_dir = _scan_dir(scan_id)
+    out_dir.mkdir(exist_ok=True)
+    try:
+        _set_status(scan_id, status="scanning", progress=10, message="Parsing PE headers…")
+        from msra.exe_scanner import scan_exe
+        _set_status(scan_id, status="scanning", progress=30, message="Analysing imports, sections, and strings…")
+        findings, meta = scan_exe(str(exe_path))
+
+        product    = meta.get("product_name") or meta.get("original_filename") or exe_path.stem
+        orig_name  = meta.get("original_filename") or exe_path.name
+        company    = meta.get("company") or ""
+        arch       = meta.get("architecture") or "x86"
+        pkg        = f"{product} ({arch})" if product else exe_path.stem
+
+        _set_status(scan_id, status="reporting", progress=75,
+                    message=f"Generating report ({len(findings)} findings)…")
+
+        from msra.report import generate_html_report as _gen_report
+
+        class _F:
+            def __init__(self, d):
+                self.__dict__.update(d)
+                self.severity = type("S", (), {"value": d.get("severity", "Info")})()
+                self.title    = d.get("title", "")
+                self.description = d.get("description", "")
+                self.category = d.get("category", "")
+                self.remediation = d.get("remediation", "")
+                ev = d.get("evidence", {})
+                self.evidence = type("E", (), {
+                    "file":    ev.get("file", ""),
+                    "snippet": ev.get("snippet", ""),
+                    "line":    ev.get("line_number", 0),
+                })()
+                self.adb_commands = d.get("adb_commands", [])
+                self.attack_path  = d.get("attack_path", "")
+                self.cwe          = d.get("cwe", [])
+                self.references   = d.get("references", [])
+                self.id           = d.get("id", 0)
+                self.fid          = d.get("fid", d.get("id", 0))
+                self._raw         = d
+
+        wrapped = [_F(f) for f in findings]
+
+        report_meta = {
+            "title":    f"{product} — Windows PE Security Assessment",
+            "package":  pkg,
+            "apk":      exe_path.name,
+            "platform": "exe",
+            "source_files": 0,
+        }
+        generate_html_report(wrapped, str(out_dir / "report.html"), report_meta)
+
+        findings_data = {
+            "package":  pkg,
+            "apk":      exe_path.name,
+            "platform": "exe",
+            "findings": findings,
+        }
+        (out_dir / "findings.json").write_text(
+            json.dumps(findings_data, indent=2), encoding="utf-8"
+        )
+
+        sev_counts: dict = {}
+        for f in findings:
+            sev = f.get("severity", "Info")
+            sev_counts[sev] = sev_counts.get(sev, 0) + 1
+
+        risk_score = round(min(
+            sev_counts.get("Critical", 0) * 10 +
+            sev_counts.get("High", 0) * 5 +
+            sev_counts.get("Medium", 0) * 2 +
+            sev_counts.get("Low", 0) * 0.5,
+            100.0,
+        ), 1)
+
+        pefile_note = "" if meta.get("has_pefile") else " (install pefile for full PE analysis)"
+        summary = {"scan_id": scan_id, "package": pkg, "apk": exe_path.name,
+                   "platform": "exe", "total_findings": len(findings),
+                   "severity_counts": sev_counts, "risk_score": risk_score}
+        (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+
+        _set_status(scan_id, status="done", progress=100,
+                    message=f"PE scan complete.{pefile_note}",
+                    package=pkg, total=len(findings), severity_counts=sev_counts,
+                    risk_score=risk_score, platform="exe")
+    except Exception as exc:
+        _set_status(scan_id, status="error", progress=0,
+                    message=str(exc), traceback=traceback.format_exc())
+    finally:
+        try: exe_path.unlink(missing_ok=True)
+        except Exception: pass
+
+
 @app.route("/api/upload", methods=["POST"])
 def upload():
     if "apk" not in request.files:
@@ -5827,10 +5967,11 @@ def upload():
     fname_lower = f.filename.lower()
     is_ios     = fname_lower.endswith(".ipa")
     is_jar     = fname_lower.endswith(".jar")
+    is_exe     = fname_lower.endswith((".exe", ".dll"))
     is_android = fname_lower.endswith((".apk", ".apkm", ".xapk"))
 
-    if not is_ios and not is_android and not is_jar:
-        return jsonify({"error": "File must be an APK/APKM/XAPK (Android), IPA (iOS), or JAR (Java)"}), 400
+    if not is_ios and not is_android and not is_jar and not is_exe:
+        return jsonify({"error": "File must be APK/APKM/XAPK (Android), IPA (iOS), JAR (Java), or EXE/DLL (Windows)"}), 400
 
     scan_id   = uuid.uuid4().hex[:12]
     file_path = UPLOAD_FOLDER / f"{scan_id}_{f.filename}"
@@ -5840,6 +5981,8 @@ def upload():
         platform = "ios"
     elif is_jar:
         platform = "jar"
+    elif is_exe:
+        platform = "exe"
     else:
         platform = "android"
 
@@ -5850,6 +5993,8 @@ def upload():
         threading.Thread(target=_run_ios_scan, args=(scan_id, file_path), daemon=True).start()
     elif is_jar:
         threading.Thread(target=_run_jar_scan, args=(scan_id, file_path), daemon=True).start()
+    elif is_exe:
+        threading.Thread(target=_run_exe_scan, args=(scan_id, file_path), daemon=True).start()
     else:
         threading.Thread(target=_run_scan, args=(scan_id, file_path), daemon=True).start()
 
