@@ -102,6 +102,13 @@ def _pattern_to_dict(raw: dict, source: str, overrides: Dict[str, List[str]],
     if det_type in ("plist_key", "entitlement", "binary_flag"):
         ios_detection = {k: v for k, v in detection.items() if k != "type"}
 
+    # JAR-specific detection fields
+    jar_detection: dict = {}
+    if det_type in ("manifest_attr", "class_exists", "string_pattern",
+                    "entry_pattern", "library_version", "duplicate_entries",
+                    "services_entry"):
+        jar_detection = {k: v for k, v in detection.items() if k != "type"}
+
     return {
         "id":             pid,
         "title":          raw.get("title", ""),
@@ -114,6 +121,7 @@ def _pattern_to_dict(raw: dict, source: str, overrides: Dict[str, List[str]],
         "patterns":       patterns_list,
         "manifest_checks":manifest_checks,
         "ios_detection":  ios_detection,
+        "jar_detection":  jar_detection,
         "cwe":            raw.get("cwe", []) or meta.get("cwe", []),
         "cve":            meta.get("cve", []),
         "references":     raw.get("references", []) or meta.get("references", []),
@@ -157,6 +165,11 @@ def get_all_rules() -> List[dict]:
     ios_builtin = DATA_DIR / "builtin" / "ios_patterns.json"
     if ios_builtin.exists():
         add_from_file(ios_builtin, "builtin", "ios")
+
+    # Built-in JAR
+    jar_builtin = DATA_DIR / "builtin" / "jar_patterns.json"
+    if jar_builtin.exists():
+        add_from_file(jar_builtin, "builtin", "jar")
 
     # Community
     community_dir = DATA_DIR / "community"

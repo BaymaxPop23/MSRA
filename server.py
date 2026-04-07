@@ -584,9 +584,12 @@ def _build_dashboard(scan_id: str | None, all_summaries: list, view: str | None 
             risk_pill = ''
 
         platform     = s.get('platform', 'android')
-        plat_icon    = ('<i class="fa-brands fa-apple" style="color:var(--text3);font-size:9px"></i> '
-                        if platform == 'ios' else
-                        '<i class="fa-brands fa-android" style="color:#22c55e;font-size:9px"></i> ')
+        if platform == 'ios':
+            plat_icon = '<i class="fa-brands fa-apple" style="color:var(--text3);font-size:9px"></i> '
+        elif platform == 'jar':
+            plat_icon = '<i class="fa-brands fa-java" style="color:#f97316;font-size:9px"></i> '
+        else:
+            plat_icon = '<i class="fa-brands fa-android" style="color:#22c55e;font-size:9px"></i> '
 
         sidebar_items += f'''
         <div class="sb-scan-wrap">
@@ -1735,9 +1738,9 @@ code,pre{{font-family:'JetBrains Mono',monospace}}
     <div class="up-sub">Drop an Android APK to run a full security assessment</div>
 
     <div class="up-dropzone" id="upDrop">
-      <input type="file" id="upFileInput" accept=".apk,.apkm,.xapk,.ipa" onchange="onUpFileSelected(this)">
+      <input type="file" id="upFileInput" accept=".apk,.apkm,.xapk,.ipa,.jar" onchange="onUpFileSelected(this)">
       <i class="fa-solid fa-file-circle-plus"></i>
-      <p>Click or drag a mobile app here<br><span style="font-size:11px;color:var(--text3)"><i class="fa-brands fa-android" style="color:#22c55e"></i> .apk · .apkm · .xapk &nbsp;&nbsp;<i class="fa-brands fa-apple" style="color:var(--text2)"></i> .ipa &nbsp;·&nbsp; max 250 MB</span></p>
+      <p>Click or drag an app or library here<br><span style="font-size:11px;color:var(--text3)"><i class="fa-brands fa-android" style="color:#22c55e"></i> .apk · .apkm · .xapk &nbsp;&nbsp;<i class="fa-brands fa-apple" style="color:var(--text2)"></i> .ipa &nbsp;&nbsp;<i class="fa-brands fa-java" style="color:#f97316"></i> .jar &nbsp;·&nbsp; max 250 MB</span></p>
     </div>
 
     <div class="up-file-row">
@@ -2487,15 +2490,25 @@ function renderRulesTable() {{
   filtered.forEach(rule => {{
     const isCustom  = rule.source === 'custom';
     const isIos     = rule.platform === 'ios';
+    const isJar     = rule.platform === 'jar';
     const cweHtml   = (rule.cwe||[]).slice(0,2).map(c=>`<span class="cwe-mini">${{escHtml(c)}}</span>`).join(' ');
-    const detIcon   = rule.detection_type === 'manifest'   ? 'fa-file-code'
-                    : rule.detection_type === 'plist_key'  ? 'fa-list-check'
-                    : rule.detection_type === 'entitlement'? 'fa-id-card'
-                    : rule.detection_type === 'binary_flag'? 'fa-microchip'
-                    : rule.detection_type === 'binary_string' ? 'fa-terminal'
+    const detIcon   = rule.detection_type === 'manifest'        ? 'fa-file-code'
+                    : rule.detection_type === 'plist_key'       ? 'fa-list-check'
+                    : rule.detection_type === 'entitlement'     ? 'fa-id-card'
+                    : rule.detection_type === 'binary_flag'     ? 'fa-microchip'
+                    : rule.detection_type === 'binary_string'   ? 'fa-terminal'
+                    : rule.detection_type === 'manifest_attr'   ? 'fa-file-code'
+                    : rule.detection_type === 'class_exists'    ? 'fa-cube'
+                    : rule.detection_type === 'string_pattern'  ? 'fa-magnifying-glass-plus'
+                    : rule.detection_type === 'entry_pattern'   ? 'fa-folder-open'
+                    : rule.detection_type === 'library_version' ? 'fa-box-open'
+                    : rule.detection_type === 'duplicate_entries' ? 'fa-copy'
+                    : rule.detection_type === 'services_entry'  ? 'fa-plug'
                     : 'fa-code';
     const platBadge = isIos
       ? `<span style="font-size:9px;background:rgba(148,163,184,.12);color:var(--text2);border:1px solid rgba(148,163,184,.2);padding:1px 5px;border-radius:3px;margin-right:4px"><i class="fa-brands fa-apple"></i> iOS</span>`
+      : isJar
+      ? `<span style="font-size:9px;background:rgba(249,115,22,.08);color:#fb923c;border:1px solid rgba(249,115,22,.2);padding:1px 5px;border-radius:3px;margin-right:4px"><i class="fa-brands fa-java"></i> JAR</span>`
       : `<span style="font-size:9px;background:rgba(34,197,94,.08);color:#4ade80;border:1px solid rgba(34,197,94,.2);padding:1px 5px;border-radius:3px;margin-right:4px"><i class="fa-brands fa-android"></i> Android</span>`;
     const row      = document.createElement('tr');
     row.className  = 'rule-row' + (_openRuleId===rule.id ? ' selected' : '');
@@ -2603,18 +2616,21 @@ function openRuleDetail(id) {{
   const patSec = document.getElementById('rdpPatternSection');
   const manSec = document.getElementById('rdpManifestSection');
   const iosSec = document.getElementById('rdpIosSection');
+  const jarSec = document.getElementById('rdpJarSection');
 
   const isIosDet = ['plist_key','entitlement','binary_flag'].includes(rule.detection_type);
+  const isJarDet = ['manifest_attr','class_exists','string_pattern','entry_pattern',
+                    'library_version','duplicate_entries','services_entry'].includes(rule.detection_type);
 
   if (patDiv) {{
     const pats = rule.patterns || [];
-    if (rule.detection_type === 'binary_string' || (!isIosDet && rule.detection_type !== 'manifest')) {{
+    if (rule.detection_type === 'binary_string' || (!isIosDet && !isJarDet && rule.detection_type !== 'manifest')) {{
       patDiv.innerHTML = pats.length
         ? pats.map(p=>`<div class="rdp-code-block">${{escHtml(p.pattern)}}</div>
                        <div class="rdp-code-meta"><span>flags: ${{p.flags||'i'}}</span>${{p.file_types?.length ? `<span>files: ${{p.file_types.join(', ')}}</span>` : ''}}</div>`).join('')
         : '<p style="color:var(--text3);font-size:13px">—</p>';
     }}
-    if (patSec) patSec.style.display = (rule.detection_type==='manifest' || isIosDet) ? 'none' : 'block';
+    if (patSec) patSec.style.display = (rule.detection_type==='manifest' || isIosDet || isJarDet) ? 'none' : 'block';
   }}
   if (manDiv) {{
     const mcs = rule.manifest_checks || [];
@@ -2637,6 +2653,25 @@ function openRuleDetail(id) {{
       iosSec.style.display = 'block';
     }} else {{
       iosSec.style.display = 'none';
+    }}
+  }}
+  // JAR-specific detection section
+  if (jarSec) {{
+    if (isJarDet) {{
+      const det = rule.jar_detection || {{}};
+      let jarHtml = `<div class="rdp-code-meta"><span style="color:var(--text2)">Detection type:</span> <code>${{escHtml(rule.detection_type)}}</code></div>`;
+      if (det.attribute)    jarHtml += `<div class="rdp-code-meta"><span style="color:var(--text2)">MANIFEST attribute:</span></div><div class="rdp-code-block">${{escHtml(det.attribute)}}</div>`;
+      if (det.check)        jarHtml += `<div class="rdp-code-meta"><span style="color:var(--text2)">Check:</span> <code>${{escHtml(det.check)}}</code></div>`;
+      if (det.value !== undefined && det.value !== '') jarHtml += `<div class="rdp-code-meta"><span style="color:var(--text2)">Value:</span> <code>${{escHtml(String(det.value))}}</code></div>`;
+      if (det.class_name)   jarHtml += `<div class="rdp-code-meta"><span style="color:var(--text2)">Class name:</span></div><div class="rdp-code-block">${{escHtml(det.class_name)}}</div>`;
+      if (det.pattern)      jarHtml += `<div class="rdp-code-meta"><span style="color:var(--text2)">Pattern:</span></div><div class="rdp-code-block">${{escHtml(det.pattern)}}</div>`;
+      if (det.name_pattern) jarHtml += `<div class="rdp-code-meta"><span style="color:var(--text2)">Library version pattern:</span></div><div class="rdp-code-block">${{escHtml(det.name_pattern)}}</div>`;
+      if (det.interface)    jarHtml += `<div class="rdp-code-meta"><span style="color:var(--text2)">SPI interface:</span></div><div class="rdp-code-block">${{escHtml(det.interface)}}</div>`;
+      const jarDetEl = document.getElementById('rdpJarDetection');
+      if (jarDetEl) jarDetEl.innerHTML = jarHtml;
+      jarSec.style.display = 'block';
+    }} else {{
+      if (jarSec) jarSec.style.display = 'none';
     }}
   }}
   setText('rdpConfidence', rule.confidence || '—');
@@ -4578,21 +4613,34 @@ def _build_topbar(current: dict | None, view: str | None = None) -> str:
         risk_badge = ''
 
     platform     = current.get('platform', 'android')
-    plat_label   = ('iOS' if platform == 'ios' else 'Android')
-    plat_icon    = ('fa-apple' if platform == 'ios' else 'fa-android')
-    plat_color   = ('color:var(--text2)' if platform == 'ios' else 'color:#22c55e')
+    if platform == 'ios':
+        plat_label = 'iOS'
+        plat_icon  = 'fa-apple'
+        plat_color = 'color:var(--text2)'
+    elif platform == 'jar':
+        plat_label = 'JAR'
+        plat_icon  = 'fa-java'
+        plat_color = 'color:#f97316'
+    else:
+        plat_label = 'Android'
+        plat_icon  = 'fa-android'
+        plat_color = 'color:#22c55e'
 
     crit = sev.get('Critical', 0)
     crit_badge = (f'<span style="background:rgba(239,68,68,.15);color:#f87171;padding:2px 8px;'
                   f'border-radius:4px;font-size:11px;font-weight:700">{crit}C</span> ') if crit else ''
 
     # Dynamic scan only meaningful for Android (needs ADB)
-    dyn_btn = (f'<button class="btn btn-sm" style="border-color:rgba(251,191,36,.4);color:#fbbf24;'
-               f'background:rgba(251,191,36,.08)" onclick="openDynPanel(\'{sid}\')">'
-               f'<i class="fa-solid fa-bolt"></i> Dynamic</button>'
-               if platform != 'ios' else
-               f'<span style="font-size:11px;color:var(--text3);padding:4px 8px" title="Dynamic analysis not available for iOS static scans">'
-               f'<i class="fa-brands fa-apple"></i> iOS Static</span>')
+    if platform == 'ios':
+        dyn_btn = (f'<span style="font-size:11px;color:var(--text3);padding:4px 8px" title="Dynamic analysis not available for iOS static scans">'
+                   f'<i class="fa-brands fa-apple"></i> iOS Static</span>')
+    elif platform == 'jar':
+        dyn_btn = (f'<span style="font-size:11px;color:var(--text3);padding:4px 8px" title="Dynamic analysis not available for JAR scans">'
+                   f'<i class="fa-brands fa-java"></i> JAR Static</span>')
+    else:
+        dyn_btn = (f'<button class="btn btn-sm" style="border-color:rgba(251,191,36,.4);color:#fbbf24;'
+                   f'background:rgba(251,191,36,.08)" onclick="openDynPanel(\'{sid}\')">'
+                   f'<i class="fa-solid fa-bolt"></i> Dynamic</button>')
 
     return f'''<div class="topbar" data-scan-id="{sid}">
       <i class="fa-brands {plat_icon}" style="{plat_color};font-size:14px" title="{plat_label}"></i>
@@ -4808,8 +4856,9 @@ def _build_intelligence_hub() -> str:
       <div class="intel-sep"></div>
       <select class="intel-filter" id="filterPlatform" onchange="filterRules()">
         <option value="">All Platforms</option>
-        <option value="android"><i class="fa-brands fa-android"></i> Android</option>
+        <option value="android">Android</option>
         <option value="ios">iOS</option>
+        <option value="jar">JAR (Java)</option>
       </select>
       <select class="intel-filter" id="filterSource" onchange="filterRules()">
         <option value="">All Sources</option>
@@ -5064,6 +5113,10 @@ def _build_intelligence_hub() -> str:
         <div class="rdp-section" id="rdpIosSection" style="display:none">
           <div class="rdp-section-title"><i class="fa-brands fa-apple" style="margin-right:5px"></i>iOS Detection Config</div>
           <div id="rdpIosDetection"></div>
+        </div>
+        <div class="rdp-section" id="rdpJarSection" style="display:none">
+          <div class="rdp-section-title"><i class="fa-brands fa-java" style="margin-right:5px;color:#f97316"></i>JAR Detection Config</div>
+          <div id="rdpJarDetection"></div>
         </div>
         <div class="rdp-section">
           <div class="rdp-section-title">Confidence &amp; Quality</div>
@@ -5672,6 +5725,97 @@ def _run_ios_scan(scan_id: str, ipa_path: Path):
         except Exception: pass
 
 
+def _run_jar_scan(scan_id: str, jar_path: Path):
+    """Background thread: static analysis of a JAR file."""
+    out_dir = _scan_dir(scan_id)
+    out_dir.mkdir(exist_ok=True)
+    try:
+        _set_status(scan_id, status="scanning", progress=10, message="Opening JAR…")
+        from msra.jar_scanner import scan_jar
+        _set_status(scan_id, status="scanning", progress=25, message="Analysing manifest and class files…")
+        findings, meta = scan_jar(str(jar_path))
+
+        main_class = meta.get("main_class") or jar_path.stem
+        impl       = meta.get("implementation") or jar_path.name
+        pkg        = main_class
+
+        _set_status(scan_id, status="reporting", progress=75,
+                    message=f"Generating report ({len(findings)} findings)…")
+
+        from msra.report import generate_html_report as _gen_report
+
+        class _F:
+            def __init__(self, d):
+                self.__dict__.update(d)
+                self.severity = type("S", (), {"value": d.get("severity", "Info")})()
+                self.title    = d.get("title", "")
+                self.description = d.get("description", "")
+                self.category = d.get("category", "")
+                self.remediation = d.get("remediation", "")
+                ev = d.get("evidence", {})
+                self.evidence = type("E", (), {
+                    "file":    ev.get("file", ""),
+                    "snippet": ev.get("snippet", ""),
+                    "line":    ev.get("line_number", 0),
+                })()
+                self.adb_commands = d.get("adb_commands", [])
+                self.attack_path  = d.get("attack_path", "")
+                self.cwe          = d.get("cwe", [])
+                self.references   = d.get("references", [])
+                self.id           = d.get("id", 0)
+                self.fid          = d.get("fid", d.get("id", 0))
+                self._raw         = d
+
+        wrapped = [_F(f) for f in findings]
+
+        report_meta = {
+            "title":    f"{impl} — JAR Security Assessment",
+            "package":  pkg,
+            "apk":      jar_path.name,
+            "platform": "jar",
+            "source_files": 0,
+        }
+        generate_html_report(wrapped, str(out_dir / "report.html"), report_meta)
+
+        findings_data = {
+            "package":  pkg,
+            "apk":      jar_path.name,
+            "platform": "jar",
+            "findings": findings,
+        }
+        (out_dir / "findings.json").write_text(
+            json.dumps(findings_data, indent=2), encoding="utf-8"
+        )
+
+        sev_counts: dict = {}
+        for f in findings:
+            sev = f.get("severity", "Info")
+            sev_counts[sev] = sev_counts.get(sev, 0) + 1
+
+        risk_score = round(min(
+            sev_counts.get("Critical", 0) * 10 +
+            sev_counts.get("High", 0) * 5 +
+            sev_counts.get("Medium", 0) * 2 +
+            sev_counts.get("Low", 0) * 0.5,
+            100.0,
+        ), 1)
+
+        summary = {"scan_id": scan_id, "package": pkg, "apk": jar_path.name,
+                   "platform": "jar", "total_findings": len(findings),
+                   "severity_counts": sev_counts, "risk_score": risk_score}
+        (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+
+        _set_status(scan_id, status="done", progress=100, message="JAR scan complete.",
+                    package=pkg, total=len(findings), severity_counts=sev_counts,
+                    risk_score=risk_score, platform="jar")
+    except Exception as exc:
+        _set_status(scan_id, status="error", progress=0,
+                    message=str(exc), traceback=traceback.format_exc())
+    finally:
+        try: jar_path.unlink(missing_ok=True)
+        except Exception: pass
+
+
 @app.route("/api/upload", methods=["POST"])
 def upload():
     if "apk" not in request.files:
@@ -5681,24 +5825,35 @@ def upload():
         return jsonify({"error": "No filename"}), 400
 
     fname_lower = f.filename.lower()
-    is_ios = fname_lower.endswith(".ipa")
+    is_ios     = fname_lower.endswith(".ipa")
+    is_jar     = fname_lower.endswith(".jar")
     is_android = fname_lower.endswith((".apk", ".apkm", ".xapk"))
 
-    if not is_ios and not is_android:
-        return jsonify({"error": "File must be an APK/APKM/XAPK (Android) or IPA (iOS)"}), 400
+    if not is_ios and not is_android and not is_jar:
+        return jsonify({"error": "File must be an APK/APKM/XAPK (Android), IPA (iOS), or JAR (Java)"}), 400
 
     scan_id   = uuid.uuid4().hex[:12]
     file_path = UPLOAD_FOLDER / f"{scan_id}_{f.filename}"
     f.save(str(file_path))
+
+    if is_ios:
+        platform = "ios"
+    elif is_jar:
+        platform = "jar"
+    else:
+        platform = "android"
+
     _db.upsert_scan(scan_id, status="queued", progress=0,
-                    message="Queued…", platform="ios" if is_ios else "android")
+                    message="Queued…", platform=platform)
 
     if is_ios:
         threading.Thread(target=_run_ios_scan, args=(scan_id, file_path), daemon=True).start()
+    elif is_jar:
+        threading.Thread(target=_run_jar_scan, args=(scan_id, file_path), daemon=True).start()
     else:
         threading.Thread(target=_run_scan, args=(scan_id, file_path), daemon=True).start()
 
-    return jsonify({"scan_id": scan_id, "platform": "ios" if is_ios else "android"})
+    return jsonify({"scan_id": scan_id, "platform": platform})
 
 
 @app.route("/api/scan/<scan_id>/status")
