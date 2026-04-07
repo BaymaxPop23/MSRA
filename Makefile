@@ -1,6 +1,6 @@
 PORT ?= 5001
 
-.PHONY: start stop restart logs install docker docker-stop help
+.PHONY: start stop restart logs install update docker docker-stop help
 
 help:
 	@echo "MSRA — Mobile Security Review Assistant"
@@ -8,6 +8,7 @@ help:
 	@echo "  make start        Start the dashboard (opens browser)"
 	@echo "  make stop         Stop the dashboard"
 	@echo "  make restart      Restart the dashboard"
+	@echo "  make update       Pull latest version and restart"
 	@echo "  make logs         Tail server logs"
 	@echo "  make install      Install Python dependencies"
 	@echo "  make docker       Start with Docker Compose"
@@ -20,6 +21,9 @@ stop:
 	@bash stop.sh
 
 restart: stop start
+
+update:
+	@bash update.sh
 
 logs:
 	@tail -f /tmp/msra_server.log
