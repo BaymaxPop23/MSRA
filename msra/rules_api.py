@@ -7,6 +7,8 @@ Enable/disable overrides are persisted to data/custom/overrides.json.
 from __future__ import annotations
 
 import json
+import re
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -17,6 +19,16 @@ USER_RULES_F = CUSTOM_DIR / "user_rules.json"
 OVERRIDES_F  = CUSTOM_DIR / "overrides.json"
 
 SEV_ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
+
+# ── In-memory rules cache ────────────────────────────────────────────────────
+_rules_cache: Optional[List[dict]] = None
+_rules_cache_ts: float = 0.0
+_CACHE_TTL: float = 60.0  # seconds
+
+
+def _invalidate_cache() -> None:
+    global _rules_cache
+    _rules_cache = None
 
 
 def _ensure_dirs():
@@ -145,8 +157,8 @@ def _pattern_to_dict(raw: dict, source: str, overrides: Dict[str, List[str]],
 
 # ── Public API ──────────────────────────────────────────────────────────────
 
-def get_all_rules() -> List[dict]:
-    """Return all rules as JSON-serializable dicts, sorted by severity."""
+def _compute_all_rules() -> List[dict]:
+    """Build the full rules list from disk (uncached)."""
     overrides = _load_overrides()
     rules     = []
     seen      = set()
@@ -200,8 +212,34 @@ def get_all_rules() -> List[dict]:
     return rules
 
 
+def get_all_rules() -> List[dict]:
+    """Return all rules as JSON-serializable dicts, sorted by severity (cached)."""
+    global _rules_cache, _rules_cache_ts
+    now = time.time()
+    if _rules_cache is not None and (now - _rules_cache_ts) < _CACHE_TTL:
+        return _rules_cache
+    _rules_cache = _compute_all_rules()
+    _rules_cache_ts = now
+    return _rules_cache
+
+
 def get_rule_by_id(rule_id: str) -> Optional[dict]:
     return next((r for r in get_all_rules() if r["id"] == rule_id), None)
+
+
+def _validate_patterns(data: dict) -> None:
+    """Raise ValueError if any regex pattern in data fails to compile."""
+    det_type = data.get("detection_type", "regex")
+    if det_type not in ("regex", "regex-multiline", "combined"):
+        return
+    for p in data.get("patterns", []):
+        pat = p.get("pattern", "")
+        if not pat:
+            continue
+        try:
+            re.compile(pat)
+        except re.error as exc:
+            raise ValueError(f"Invalid regex pattern '{pat}': {exc}") from exc
 
 
 def toggle_rule(rule_id: str) -> dict:
@@ -239,11 +277,13 @@ def toggle_rule(rule_id: str) -> dict:
     overrides["disabled"] = disabled
     overrides["enabled"]  = enabled
     _save_overrides(overrides)
+    _invalidate_cache()
     return {"id": rule_id, "enabled": new_state}
 
 
 def create_custom_rule(data: dict) -> dict:
-    """Create a new custom rule. Raises ValueError on duplicate ID."""
+    """Create a new custom rule. Raises ValueError on duplicate ID or invalid regex."""
+    _validate_patterns(data)
     rules   = _load_user_rules()
     rule_id = (data.get("id") or "").strip() or ("custom-" + uuid.uuid4().hex[:8])
 
@@ -253,11 +293,13 @@ def create_custom_rule(data: dict) -> dict:
     rule = _build_rule_dict(rule_id, data)
     rules.append(rule)
     _save_user_rules(rules)
+    _invalidate_cache()
     return _pattern_to_dict(rule, "custom", _load_overrides())
 
 
 def update_custom_rule(rule_id: str, data: dict) -> Optional[dict]:
-    """Update a custom rule. Returns None if not found."""
+    """Update a custom rule. Returns None if not found. Raises ValueError on invalid regex."""
+    _validate_patterns(data)
     rules = _load_user_rules()
     idx   = next((i for i, r in enumerate(rules) if r.get("id") == rule_id), None)
     if idx is None:
@@ -283,6 +325,7 @@ def update_custom_rule(rule_id: str, data: dict) -> Optional[dict]:
 
     rules[idx] = rule
     _save_user_rules(rules)
+    _invalidate_cache()
     return _pattern_to_dict(rule, "custom", _load_overrides())
 
 
@@ -293,6 +336,7 @@ def delete_custom_rule(rule_id: str) -> bool:
     if len(new_rules) == len(rules):
         return False
     _save_user_rules(new_rules)
+    _invalidate_cache()
     return True
 
 

@@ -491,6 +491,25 @@ def _set_status(scan_id: str, **kw):
     _db.upsert_scan(scan_id, **kw)
 
 
+# ── Simple in-memory rate limiter ────────────────────────────────────────────
+_rate_store: dict = {}  # ip -> (count, window_start)
+_RATE_LOCK = threading.Lock()
+
+
+def _rate_limit(ip: str, max_per_minute: int = 10) -> bool:
+    """Return True if the request is allowed, False if rate limit exceeded."""
+    now = time.time()
+    with _RATE_LOCK:
+        entry = _rate_store.get(ip)
+        if entry is None or (now - entry[1]) > 60:
+            _rate_store[ip] = (1, now)
+            return True
+        if entry[0] >= max_per_minute:
+            return False
+        _rate_store[ip] = (entry[0] + 1, entry[1])
+        return True
+
+
 def _load_summaries() -> list:
     return _db.list_scans()
 
@@ -1998,6 +2017,11 @@ upDrop.addEventListener('drop', e => {{
 
 function onUpFileSelected(input) {{ if (input.files[0]) setUpFile(input.files[0]); }}
 function setUpFile(f) {{
+  const MAX_BYTES = 500 * 1024 * 1024;
+  if (f.size > MAX_BYTES) {{
+    showToast('File too large — maximum upload size is 500 MB', 'error');
+    return;
+  }}
   _upFile = f;
   document.getElementById('upFileName').textContent = f.name + ' (' + (f.size/1024/1024).toFixed(1) + ' MB)';
   document.getElementById('upScanBtn').disabled = false;
@@ -5301,6 +5325,47 @@ def _auto_install_apk(scan_id: str, apk_path: Path, package: str) -> None:
         pass  # installation failure is never fatal to the scan
 
 
+def _compute_risk_score(sev_counts: dict) -> float:
+    """Compute a 0-100 risk score from severity counts."""
+    return round(min(
+        sev_counts.get("Critical", 0) * 10 +
+        sev_counts.get("High",     0) * 5  +
+        sev_counts.get("Medium",   0) * 2  +
+        sev_counts.get("Low",      0) * 0.5,
+        100.0,
+    ), 1)
+
+
+class _FindingWrapper:
+    """Lightweight adapter to make plain-dict findings compatible with report.py."""
+    __slots__ = (
+        "severity", "title", "description", "category", "remediation",
+        "evidence", "adb_commands", "attack_path", "cwe", "references",
+        "id", "fid", "_raw", "__dict__",
+    )
+
+    def __init__(self, d: dict):
+        self.__dict__.update(d)
+        self.severity    = type("S", (), {"value": d.get("severity", "Info")})()
+        self.title       = d.get("title", "")
+        self.description = d.get("description", "")
+        self.category    = d.get("category", "")
+        self.remediation = d.get("remediation", "")
+        ev               = d.get("evidence", {}) or {}
+        self.evidence    = type("E", (), {
+            "file":    ev.get("file", ev.get("file_path", "")),
+            "snippet": ev.get("snippet", ""),
+            "line":    ev.get("line_number", ev.get("line", 0)),
+        })()
+        self.adb_commands = d.get("adb_commands", [])
+        self.attack_path  = d.get("attack_path", "")
+        self.cwe          = d.get("cwe", [])
+        self.references   = d.get("references", [])
+        self.id           = d.get("id", 0)
+        self.fid          = d.get("fid", d.get("id", 0))
+        self._raw         = d
+
+
 def _run_scan(scan_id: str, apk_path: Path):
     out_dir = _scan_dir(scan_id)
     out_dir.mkdir(exist_ok=True)
@@ -5376,8 +5441,9 @@ def _run_scan(scan_id: str, apk_path: Path):
                     package=pkg, total=len(findings), severity_counts=sev_counts,
                     risk_score=risk_score)
     except Exception as exc:
-        _set_status(scan_id, status="error", progress=0,
-                    message=str(exc), traceback=traceback.format_exc())
+        _set_status(scan_id, status="error",
+                    message=f"Scan failed: {type(exc).__name__}: {exc}",
+                    traceback=traceback.format_exc())
     finally:
         try: apk_path.unlink(missing_ok=True)
         except Exception: pass
@@ -5513,23 +5579,32 @@ def api_finding_snippet(scan_id: str, finding_id: str):
     if not file_path or not line_num:
         return jsonify({"error": "no location info"}), 404
 
-    # Resolve path — try as-is, then relative to scan dir
-    p = Path(file_path)
-    if not p.exists():
-        scan_d = _scan_dir(scan_id)
+    # Resolve path — always rooted within this scan's decompiled directory
+    scan_d     = _scan_dir(scan_id)
+    decompiled = scan_d / "decompiled"
+    p          = Path(file_path)
+
+    if not p.exists() or not str(p.resolve()).startswith(str(decompiled.resolve())):
         # Strip everything up to and including "decompiled/"
         marker = "decompiled/"
-        idx = file_path.find(marker)
+        idx    = file_path.find(marker)
         if idx != -1:
-            p = scan_d / "decompiled" / file_path[idx + len(marker):]
+            p = decompiled / file_path[idx + len(marker):]
         if not p.exists():
             # Last resort: search for filename in decompiled tree
             fname = Path(file_path).name
-            decompiled = scan_d / "decompiled"
             if decompiled.exists():
                 matches = list(decompiled.rglob(fname))
                 if matches:
                     p = matches[0]
+
+    # Safety: ensure final path is still inside the scan's decompiled dir
+    try:
+        resolved = p.resolve()
+        if decompiled.exists() and not str(resolved).startswith(str(decompiled.resolve())):
+            return jsonify({"error": "access denied"}), 403
+    except Exception:
+        return jsonify({"error": "access denied"}), 403
 
     if not p.exists():
         return jsonify({"error": f"source file not found: {Path(file_path).name}"}), 404
@@ -5693,37 +5768,7 @@ def _run_ios_scan(scan_id: str, ipa_path: Path):
         _set_status(scan_id, status="reporting", progress=75,
                     message=f"Generating report ({len(findings)} findings)…")
 
-        # Build findings in the format generate_html_report expects
-        # ios_scanner returns plain dicts; wrap them lightly
-        from msra.report import generate_html_report as _gen_report
-
-        # Convert plain dicts to simple namespace so report.py attr access works
-        class _F:
-            def __init__(self, d):
-                self.__dict__.update(d)
-                # report.py accesses severity.value on some paths
-                self.severity = type("S", (), {"value": d.get("severity", "Info")})()
-                self.title    = d.get("title", "")
-                self.description = d.get("description", "")
-                self.category = d.get("category", "")
-                self.remediation = d.get("remediation", "")
-                # evidence compat
-                ev = d.get("evidence", {})
-                self.evidence = type("E", (), {
-                    "file":     ev.get("file", ""),
-                    "snippet":  ev.get("snippet", ""),
-                    "line":     ev.get("line_number", 0),
-                })()
-                self.adb_commands  = d.get("adb_commands", [])
-                self.attack_path   = d.get("attack_path", "")
-                self.cwe           = d.get("cwe", [])
-                self.references    = d.get("references", [])
-                self.id            = d.get("id", 0)
-                self.fid           = d.get("fid", d.get("id", 0))
-                self._raw          = d   # keep raw for JSON serialisation
-
-        wrapped = [_F(f) for f in findings]
-
+        wrapped     = [_FindingWrapper(f) for f in findings]
         report_meta = {
             "title":    f"{app_name} — iOS Security Assessment",
             "package":  pkg,
@@ -5733,7 +5778,6 @@ def _run_ios_scan(scan_id: str, ipa_path: Path):
         }
         generate_html_report(wrapped, str(out_dir / "report.html"), report_meta)
 
-        # Save findings.json directly from raw dicts (no jadx intermediate)
         findings_data = {
             "package":  pkg,
             "apk":      ipa_path.name,
@@ -5746,16 +5790,9 @@ def _run_ios_scan(scan_id: str, ipa_path: Path):
 
         sev_counts: dict = {}
         for f in findings:
-            sev = f.get("severity", "Info")
-            sev_counts[sev] = sev_counts.get(sev, 0) + 1
+            sev_counts[f.get("severity", "Info")] = sev_counts.get(f.get("severity", "Info"), 0) + 1
 
-        risk_score = round(min(
-            sev_counts.get("Critical", 0) * 10 +
-            sev_counts.get("High", 0) * 5 +
-            sev_counts.get("Medium", 0) * 2 +
-            sev_counts.get("Low", 0) * 0.5,
-            100.0,
-        ), 1)
+        risk_score = _compute_risk_score(sev_counts)
 
         summary = {"scan_id": scan_id, "package": pkg, "apk": ipa_path.name,
                    "platform": "ios", "total_findings": len(findings),
@@ -5766,8 +5803,9 @@ def _run_ios_scan(scan_id: str, ipa_path: Path):
                     package=pkg, total=len(findings), severity_counts=sev_counts,
                     risk_score=risk_score, platform="ios")
     except Exception as exc:
-        _set_status(scan_id, status="error", progress=0,
-                    message=str(exc), traceback=traceback.format_exc())
+        _set_status(scan_id, status="error",
+                    message=f"iOS scan failed: {type(exc).__name__}: {exc}",
+                    traceback=traceback.format_exc())
     finally:
         try: ipa_path.unlink(missing_ok=True)
         except Exception: pass
@@ -5790,32 +5828,7 @@ def _run_jar_scan(scan_id: str, jar_path: Path):
         _set_status(scan_id, status="reporting", progress=75,
                     message=f"Generating report ({len(findings)} findings)…")
 
-        from msra.report import generate_html_report as _gen_report
-
-        class _F:
-            def __init__(self, d):
-                self.__dict__.update(d)
-                self.severity = type("S", (), {"value": d.get("severity", "Info")})()
-                self.title    = d.get("title", "")
-                self.description = d.get("description", "")
-                self.category = d.get("category", "")
-                self.remediation = d.get("remediation", "")
-                ev = d.get("evidence", {})
-                self.evidence = type("E", (), {
-                    "file":    ev.get("file", ""),
-                    "snippet": ev.get("snippet", ""),
-                    "line":    ev.get("line_number", 0),
-                })()
-                self.adb_commands = d.get("adb_commands", [])
-                self.attack_path  = d.get("attack_path", "")
-                self.cwe          = d.get("cwe", [])
-                self.references   = d.get("references", [])
-                self.id           = d.get("id", 0)
-                self.fid          = d.get("fid", d.get("id", 0))
-                self._raw         = d
-
-        wrapped = [_F(f) for f in findings]
-
+        wrapped     = [_FindingWrapper(f) for f in findings]
         report_meta = {
             "title":    f"{impl} — JAR Security Assessment",
             "package":  pkg,
@@ -5837,16 +5850,9 @@ def _run_jar_scan(scan_id: str, jar_path: Path):
 
         sev_counts: dict = {}
         for f in findings:
-            sev = f.get("severity", "Info")
-            sev_counts[sev] = sev_counts.get(sev, 0) + 1
+            sev_counts[f.get("severity", "Info")] = sev_counts.get(f.get("severity", "Info"), 0) + 1
 
-        risk_score = round(min(
-            sev_counts.get("Critical", 0) * 10 +
-            sev_counts.get("High", 0) * 5 +
-            sev_counts.get("Medium", 0) * 2 +
-            sev_counts.get("Low", 0) * 0.5,
-            100.0,
-        ), 1)
+        risk_score = _compute_risk_score(sev_counts)
 
         summary = {"scan_id": scan_id, "package": pkg, "apk": jar_path.name,
                    "platform": "jar", "total_findings": len(findings),
@@ -5857,8 +5863,9 @@ def _run_jar_scan(scan_id: str, jar_path: Path):
                     package=pkg, total=len(findings), severity_counts=sev_counts,
                     risk_score=risk_score, platform="jar")
     except Exception as exc:
-        _set_status(scan_id, status="error", progress=0,
-                    message=str(exc), traceback=traceback.format_exc())
+        _set_status(scan_id, status="error",
+                    message=f"JAR scan failed: {type(exc).__name__}: {exc}",
+                    traceback=traceback.format_exc())
     finally:
         try: jar_path.unlink(missing_ok=True)
         except Exception: pass
@@ -5883,32 +5890,7 @@ def _run_exe_scan(scan_id: str, exe_path: Path):
         _set_status(scan_id, status="reporting", progress=75,
                     message=f"Generating report ({len(findings)} findings)…")
 
-        from msra.report import generate_html_report as _gen_report
-
-        class _F:
-            def __init__(self, d):
-                self.__dict__.update(d)
-                self.severity = type("S", (), {"value": d.get("severity", "Info")})()
-                self.title    = d.get("title", "")
-                self.description = d.get("description", "")
-                self.category = d.get("category", "")
-                self.remediation = d.get("remediation", "")
-                ev = d.get("evidence", {})
-                self.evidence = type("E", (), {
-                    "file":    ev.get("file", ""),
-                    "snippet": ev.get("snippet", ""),
-                    "line":    ev.get("line_number", 0),
-                })()
-                self.adb_commands = d.get("adb_commands", [])
-                self.attack_path  = d.get("attack_path", "")
-                self.cwe          = d.get("cwe", [])
-                self.references   = d.get("references", [])
-                self.id           = d.get("id", 0)
-                self.fid          = d.get("fid", d.get("id", 0))
-                self._raw         = d
-
-        wrapped = [_F(f) for f in findings]
-
+        wrapped     = [_FindingWrapper(f) for f in findings]
         report_meta = {
             "title":    f"{product} — Windows PE Security Assessment",
             "package":  pkg,
@@ -5930,16 +5912,9 @@ def _run_exe_scan(scan_id: str, exe_path: Path):
 
         sev_counts: dict = {}
         for f in findings:
-            sev = f.get("severity", "Info")
-            sev_counts[sev] = sev_counts.get(sev, 0) + 1
+            sev_counts[f.get("severity", "Info")] = sev_counts.get(f.get("severity", "Info"), 0) + 1
 
-        risk_score = round(min(
-            sev_counts.get("Critical", 0) * 10 +
-            sev_counts.get("High", 0) * 5 +
-            sev_counts.get("Medium", 0) * 2 +
-            sev_counts.get("Low", 0) * 0.5,
-            100.0,
-        ), 1)
+        risk_score = _compute_risk_score(sev_counts)
 
         pefile_note = "" if meta.get("has_pefile") else " (install pefile for full PE analysis)"
         summary = {"scan_id": scan_id, "package": pkg, "apk": exe_path.name,
@@ -5952,8 +5927,9 @@ def _run_exe_scan(scan_id: str, exe_path: Path):
                     package=pkg, total=len(findings), severity_counts=sev_counts,
                     risk_score=risk_score, platform="exe")
     except Exception as exc:
-        _set_status(scan_id, status="error", progress=0,
-                    message=str(exc), traceback=traceback.format_exc())
+        _set_status(scan_id, status="error",
+                    message=f"PE scan failed: {type(exc).__name__}: {exc}",
+                    traceback=traceback.format_exc())
     finally:
         try: exe_path.unlink(missing_ok=True)
         except Exception: pass
@@ -5966,6 +5942,8 @@ def too_large(e):
 
 @app.route("/api/upload", methods=["POST"])
 def upload():
+    if not _rate_limit(request.remote_addr or "unknown", max_per_minute=20):
+        return jsonify({"error": "Too many uploads — please wait a minute"}), 429
     if "apk" not in request.files:
         return jsonify({"error": "No file"}), 400
     f = request.files["apk"]
@@ -6177,17 +6155,29 @@ def _parse_poc_files(raw: str) -> list:
 
 @app.route("/api/download-poc/<scan_id>", methods=["POST"])
 def download_poc(scan_id: str):
+    if not _rate_limit(request.remote_addr or "unknown", max_per_minute=30):
+        return jsonify({"error": "Too many requests — please wait a minute"}), 429
     data  = request.get_json(force=True, silent=True) or {}
     files = data.get("files", [])
     if not files:
         return jsonify({"error": "No files"}), 400
     buf = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
-    with zipfile.ZipFile(buf.name, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in files:
-            zf.writestr(f["name"], f["content"])
-    return send_file(buf.name, as_attachment=True,
-                     download_name=f"poc_{scan_id}.zip",
-                     mimetype="application/zip")
+    buf_path = buf.name
+    buf.close()
+    try:
+        with zipfile.ZipFile(buf_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in files:
+                zf.writestr(f["name"], f["content"])
+        response = send_file(buf_path, as_attachment=True,
+                             download_name=f"poc_{scan_id}.zip",
+                             mimetype="application/zip")
+    finally:
+        try:
+            import os
+            os.unlink(buf_path)
+        except Exception:
+            pass
+    return response
 
 
 # ── Rules API ────────────────────────────────────────────────────────────

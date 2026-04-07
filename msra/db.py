@@ -12,6 +12,19 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# Whitelists guard against SQL injection via column-name interpolation
+_SCAN_COLS: frozenset = frozenset({
+    "status", "progress", "message", "package", "apk",
+    "total_findings", "severity_json", "traceback",
+    "created_at", "updated_at", "risk_score", "platform",
+})
+
+_JOB_COLS: frozenset = frozenset({
+    "scan_id", "finding_index", "finding_title",
+    "status", "progress", "message", "logcat", "evidence",
+    "verdict_json", "created_at", "updated_at",
+})
+
 DB_PATH = Path(__file__).parent.parent / "msra.db"
 _lock   = threading.Lock()
 
@@ -125,7 +138,7 @@ def upsert_scan(scan_id: str, **kwargs: Any) -> None:
     if "total" in fields:
         fields["total_findings"] = fields.pop("total")
 
-    cols   = list(fields.keys())
+    cols   = [c for c in fields.keys() if c in _SCAN_COLS]
     vals   = [fields[c] for c in cols]
 
     with _lock:
@@ -150,10 +163,11 @@ def get_scan(scan_id: str) -> Optional[Dict]:
     return _scan_row(row) if row else None
 
 
-def list_scans() -> List[Dict]:
+def list_scans(limit: int = 500, offset: int = 0) -> List[Dict]:
     with _conn() as c:
         rows = c.execute(
-            "SELECT * FROM scans ORDER BY updated_at DESC"
+            "SELECT * FROM scans ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
         ).fetchall()
     return [_scan_row(r) for r in rows]
 
@@ -185,7 +199,7 @@ def upsert_job(job_id: str, **kwargs: Any) -> None:
     elif "verdict" in fields:
         fields["verdict_json"] = fields.pop("verdict")
 
-    cols = list(fields.keys())
+    cols = [c for c in fields.keys() if c in _JOB_COLS]
     vals = [fields[c] for c in cols]
 
     with _lock:

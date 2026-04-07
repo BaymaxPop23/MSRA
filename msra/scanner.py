@@ -580,10 +580,11 @@ class Scanner:
         """Parse a component element into a dictionary."""
         name = self._get_android_attr(comp, 'name') or ''
         # Resolve relative names
+        pkg = self.package_name or ""
         if name.startswith('.'):
-            name = f"{self.package_name}{name}"
+            name = f"{pkg}{name}"
         elif '.' not in name and name:
-            name = f"{self.package_name}.{name}"
+            name = f"{pkg}.{name}" if pkg else name
 
         exported = self._get_android_attr(comp, 'exported')
         has_intent_filter = comp.find('intent-filter') is not None

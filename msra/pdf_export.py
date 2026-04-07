@@ -349,7 +349,7 @@ def _build_findings(findings: List[Dict]) -> str:
 
         meta_parts = []
         if filepath:
-            meta_parts.append(f"<strong>File:</strong> {filepath}" + (f":{lineno}" if lineno else ""))
+            meta_parts.append(f"<strong>File:</strong> {filepath}" + (f":{_html.escape(str(lineno))}" if lineno else ""))
         if isinstance(extra, dict) and extra.get("category"):
             meta_parts.append(f"<strong>Category:</strong> {_html.escape(str(extra['category']))}")
 
