@@ -1945,14 +1945,169 @@ code,pre{{font-family:'JetBrains Mono',monospace}}
   to{{opacity:1;transform:translateY(0)}}
 }}
 
+/* ══ HAMBURGER BUTTON ══ */
+.hamburger{{
+  display:none;align-items:center;justify-content:center;
+  width:34px;height:34px;border-radius:var(--radius-sm);
+  border:1px solid var(--border);background:transparent;
+  color:var(--text2);cursor:pointer;flex-shrink:0;
+  transition:all .15s;padding:0;
+}}
+.hamburger:hover{{color:var(--text);border-color:var(--accent);background:var(--bg2)}}
+
+/* ══ SIDEBAR OVERLAY (mobile backdrop) ══ */
+.sidebar-overlay{{
+  display:none;position:fixed;inset:0;z-index:99;
+  background:rgba(0,0,0,.55);backdrop-filter:blur(3px);
+}}
+.sidebar-overlay.open{{display:block}}
+
+/* ══ RESPONSIVE ══ */
+
+/* ── Tablet (≤1024px): sidebar narrows ── */
+@media (max-width:1024px){{
+  :root{{--sidebar:220px}}
+  .topbar{{padding:0 20px}}
+  .sb-brand{{font-size:13px;gap:7px}}
+  .findings-list{{padding:16px 20px}}
+  .findings-filter-bar{{padding:8px 20px}}
+  .content .main{{padding:24px 20px 60px}}
+}}
+
+/* ── Tablet portrait / large phone (≤768px): sidebar hides, hamburger appears ── */
+@media (max-width:768px){{
+  .hamburger{{display:inline-flex}}
+
+  /* Sidebar slides off-screen; .open class brings it back */
+  .sidebar{{
+    position:fixed!important;top:0;left:0;bottom:0;
+    width:260px!important;
+    transform:translateX(-100%);
+    transition:transform .28s cubic-bezier(.4,0,.2,1);
+    z-index:200;
+    box-shadow:8px 0 32px rgba(0,0,0,.5);
+  }}
+  .sidebar.open{{transform:translateX(0)}}
+
+  /* Content spans full width */
+  .content{{width:100%;min-width:0}}
+
+  /* Topbar */
+  .topbar{{padding:0 14px;gap:8px}}
+  .topbar-pkg{{
+    max-width:130px;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap;
+  }}
+  /* Hide verbose meta labels on small screens */
+  .topbar-meta>span:first-child{{display:none}}
+
+  /* Detail drawer — full width, slides up from bottom */
+  .finding-drawer{{
+    width:100%!important;
+    right:auto!important;left:0!important;
+    top:auto!important;bottom:-100vh;
+    height:88vh;
+    border-left:none!important;
+    border-top:1px solid var(--border)!important;
+    border-radius:16px 16px 0 0;
+    box-shadow:0 -8px 40px rgba(0,0,0,.5);
+    transition:bottom .28s cubic-bezier(.4,0,.2,1)!important;
+  }}
+  .finding-drawer.open{{bottom:0!important;right:auto!important}}
+  /* Drawer drag handle */
+  .finding-drawer::before{{
+    content:'';display:block;width:40px;height:4px;
+    background:var(--border);border-radius:2px;
+    margin:10px auto 0;flex-shrink:0;
+  }}
+
+  /* Upload panel */
+  .upload-panel{{
+    margin:12px!important;
+    width:calc(100vw - 24px)!important;
+    max-width:100%!important;
+    padding:24px!important;
+  }}
+
+  /* Modals */
+  .rule-detail-modal,.rule-form-modal,.dyn-modal{{
+    max-width:calc(100vw - 24px)!important;
+    max-height:90vh!important;
+    margin:12px!important;
+  }}
+
+  /* Findings */
+  .findings-list{{padding:10px 14px}}
+  .findings-filter-bar{{padding:8px 14px;flex-wrap:wrap;height:auto}}
+  .f-chips{{flex-wrap:wrap}}
+  .fr-cat,.fr-loc{{display:none}}
+  .fr-title{{font-size:13px}}
+
+  /* Intelligence hub */
+  .rules-table th:nth-child(5),.rules-table td:nth-child(5){{display:none}}
+  .intel-stats-strip{{flex-wrap:wrap}}
+}}
+
+/* ── Phone (≤480px) ── */
+@media (max-width:480px){{
+  .topbar{{padding:0 10px;height:48px;gap:6px}}
+  .topbar-pkg{{display:none}}
+  .topbar-meta{{gap:6px}}
+  .topbar-meta>span{{display:none}}
+
+  /* Filter bar stacks vertically */
+  .findings-filter-bar{{
+    flex-direction:column;align-items:stretch;
+    gap:6px;padding:8px 10px;
+  }}
+  .f-chips{{gap:4px}}
+  .f-chips .sev-chip{{padding:3px 8px;font-size:10px}}
+  .f-search-wrap{{min-width:0}}
+  .f-select{{width:100%}}
+
+  /* Findings list */
+  .findings-list{{padding:8px 10px}}
+  .finding-row{{padding:10px 12px;border-radius:var(--radius-sm)}}
+  .fr-top{{gap:6px}}
+  .fr-sev{{width:52px;font-size:10px}}
+  .fr-title{{font-size:12px}}
+  .fr-desc{{font-size:12px}}
+
+  /* Drawer */
+  .finding-drawer{{height:92vh}}
+  .drawer-body{{padding:12px 14px}}
+  .drawer-head{{padding:12px 14px}}
+
+  /* Upload */
+  .up-dropzone{{padding:20px 14px}}
+  .up-title{{font-size:15px}}
+  .up-sub{{font-size:12px}}
+  .up-actions{{flex-direction:column-reverse}}
+  .up-actions .btn{{width:100%;justify-content:center}}
+
+  /* Home KPI cards */
+  .home-kpi-card{{min-width:calc(50% - 8px)}}
+
+  /* Content tabs smaller */
+  .content-tab{{font-size:12px;padding:0 10px}}
+
+  /* Intelligence hub table */
+  .rules-table{{font-size:12px}}
+  .rules-table th:nth-child(4),.rules-table td:nth-child(4),
+  .rules-table th:nth-child(6),.rules-table td:nth-child(6){{display:none}}
+}}
+
 </style>
 </head>
 <body>
 
 <div class="dashboard">
 
+  <!-- Mobile sidebar backdrop -->
+  <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
+
   <!-- ════ SIDEBAR ════ -->
-  <aside class="sidebar">
+  <aside class="sidebar" id="mainSidebar">
     <div class="sb-head">
       <div class="sb-brand">
         <i class="fa-solid fa-shield-halved"></i> MSRA
@@ -2240,6 +2395,33 @@ code,pre{{font-family:'JetBrains Mono',monospace}}
 {report_scripts}
 
 <script>
+// ── RESPONSIVE SIDEBAR TOGGLE ───────────────────────────────
+function toggleSidebar() {{
+  const sb  = document.getElementById('mainSidebar');
+  const ov  = document.getElementById('sidebarOverlay');
+  const open = sb && sb.classList.toggle('open');
+  if (ov) ov.classList.toggle('open', open);
+}}
+function closeSidebar() {{
+  const sb = document.getElementById('mainSidebar');
+  const ov = document.getElementById('sidebarOverlay');
+  if (sb) sb.classList.remove('open');
+  if (ov) ov.classList.remove('open');
+}}
+// Close sidebar on navigation (links inside sidebar)
+document.addEventListener('click', e => {{
+  if (window.innerWidth <= 768 && e.target.closest('.sb-nav-btn, .scan-item')) {{
+    setTimeout(closeSidebar, 120);
+  }}
+}});
+// Close sidebar + drawer on Escape
+document.addEventListener('keydown', e => {{
+  if (e.key === 'Escape') {{
+    closeSidebar();
+    closeDrawer();
+  }}
+}});
+
 // ── UPLOAD PANEL ────────────────────────────────────────────
 let _upFile = null;
 
@@ -4901,11 +5083,14 @@ def _build_home_dashboard(all_summaries: list) -> str:
 
 
 def _build_topbar(current: dict | None, view: str | None = None) -> str:
+    _hbg = '<button class="hamburger" onclick="toggleSidebar()" aria-label="Menu"><i class="fa-solid fa-bars"></i></button>'
+
     if view == 'intelligence':
-        return '''<div class="topbar">
+        return f'''<div class="topbar">
+          {_hbg}
           <i class="fa-solid fa-brain" style="color:var(--accent);font-size:15px"></i>
           <span style="font-size:14px;font-weight:600;color:var(--text)">Intelligence Hub</span>
-          <span style="font-size:12px;color:var(--text3);margin-left:4px">· Detection rules &amp; patterns</span>
+          <span class="topbar-sub-label" style="font-size:12px;color:var(--text3);margin-left:4px">· Detection rules &amp; patterns</span>
           <div class="topbar-spacer"></div>
           <button class="btn btn-sm" onclick="importRulesClick()">
             <i class="fa-solid fa-file-import"></i> Import
@@ -4916,7 +5101,8 @@ def _build_topbar(current: dict | None, view: str | None = None) -> str:
         </div>'''
 
     if not current:
-        return '''<div class="topbar">
+        return f'''<div class="topbar">
+          {_hbg}
           <i class="fa-solid fa-shield-halved" style="color:var(--accent);font-size:16px"></i>
           <span style="font-size:13px;color:var(--text2)">Select or upload a scan</span>
           <div class="topbar-spacer"></div>
@@ -4984,6 +5170,7 @@ def _build_topbar(current: dict | None, view: str | None = None) -> str:
                    f'<i class="fa-solid fa-bolt"></i> Dynamic</button>')
 
     return f'''<div class="topbar" data-scan-id="{sid}">
+      {_hbg}
       <i class="fa-brands {plat_icon}" style="{plat_color};font-size:14px" title="{plat_label}"></i>
       <span class="topbar-pkg">{pkg}</span>
       {crit_badge}
