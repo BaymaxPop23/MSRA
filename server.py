@@ -5620,7 +5620,8 @@ class _FindingWrapper:
 
     def __init__(self, d: dict):
         self.__dict__.update(d)
-        self.severity    = type("S", (), {"value": d.get("severity", "Info")})()
+        sev_str          = d.get("severity", "Info")
+        self.severity    = sev_str          # plain string — report.py calls .lower() on it
         self.title       = d.get("title", "")
         self.description = d.get("description", "")
         self.category    = d.get("category", "")
