@@ -497,9 +497,20 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
             _tmp_apk = Path(_tempfile.gettempdir()) / "msra_install.apk"
             shutil.copy2(str(apk_candidates[0]), str(_tmp_apk))
             apk_path = str(_tmp_apk)
-            adb_args = (["-s", device_serial] if device_serial else []) + ["install", "-r", apk_path]
-            _update_job(job_id, progress=22, message=f"Installing APK on device…")
-            rc, out, err = _run_adb(adb_args, timeout=90)
+            _serial_args = ["-s", device_serial] if device_serial else []
+            # Disable Play Protect / package verifier so ADB installs aren't blocked
+            _run_adb(_serial_args + ["shell", "settings", "put", "global",
+                                     "verifier_verify_adb_installs", "0"], timeout=5)
+            _run_adb(_serial_args + ["shell", "settings", "put", "global",
+                                     "package_verifier_enable", "0"], timeout=5)
+            adb_args = _serial_args + ["install", "-r", "-t", apk_path]
+            _update_job(job_id, progress=22, message="Installing APK on device…")
+            rc, out, err = _run_adb(adb_args, timeout=120)
+            # Re-enable verifier after install attempt
+            _run_adb(_serial_args + ["shell", "settings", "put", "global",
+                                     "verifier_verify_adb_installs", "1"], timeout=5)
+            _run_adb(_serial_args + ["shell", "settings", "put", "global",
+                                     "package_verifier_enable", "1"], timeout=5)
             install_combined = (out + err).lower()
             if rc != 0 and "already installed" not in install_combined:
                 raw = (err or out).strip()
@@ -513,6 +524,9 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
                     msg = "Install failed: not enough storage on device."
                 elif "install_failed_user_restricted" in install_combined:
                     msg = "Install failed: unknown sources / USB install is disabled in device settings."
+                elif "verification_failure" in install_combined or "install_failed_verification" in install_combined:
+                    msg = ("Install blocked by Play Protect even after disabling verifier. "
+                           "On device: Play Store → Profile → Play Protect → disable 'Scan apps with Play Protect'.")
                 else:
                     msg = f"APK install failed: {raw[:200]}"
                 _update_job(job_id, status="error", message=msg, progress=22)
