@@ -347,18 +347,23 @@ class FridaManager:
         return self.load_script("ssl_bypass", code)
 
     def bypass_root_detection(self) -> bool:
-        """Enable root detection bypass.
-
-        Loads a script that hooks common root detection methods.
-        """
+        """Enable root detection bypass."""
         script_path = Path(__file__).parent / "hooks" / "root_bypass.js"
         if script_path.exists():
             with open(script_path, 'r') as f:
                 code = f.read()
         else:
             code = self._get_root_bypass_script()
-
         return self.load_script("root_bypass", code)
+
+    def bypass_emulator_detection(self) -> bool:
+        """Enable emulator/environment detection bypass."""
+        script_path = Path(__file__).parent / "hooks" / "emulator_bypass.js"
+        if script_path.exists():
+            with open(script_path, 'r') as f:
+                code = f.read()
+            return self.load_script("emulator_bypass", code)
+        return False
 
     def enable_api_monitoring(self) -> bool:
         """Enable sensitive API monitoring.

@@ -3,6 +3,8 @@
 import time
 import logging
 import hashlib
+import queue
+import subprocess
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Set, Tuple, Any, Callable
@@ -54,6 +56,93 @@ class ExplorationResult:
     navigation_graph: Dict[str, List[str]] = field(default_factory=dict)
     screenshots: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
+    coverage_report: Optional[Dict[str, Any]] = None
+    authenticated: bool = False
+
+
+# ------------------------------------------------------------------ #
+# Enhancement D: CoverageTracker                                      #
+# ------------------------------------------------------------------ #
+
+class CoverageTracker:
+    """Track coverage metrics during BFS exploration.
+
+    Records:
+    - Activities visited (from dumpsys activity)
+    - Unique screen signatures
+    - Unique network endpoints triggered via Frida event queue
+    """
+
+    def __init__(self):
+        self._activities: Set[str] = set()
+        self._screen_signatures: Set[str] = set()
+        self._network_endpoints: Set[str] = set()
+        self._start_time: float = time.time()
+
+    # ------ recording methods ------ #
+
+    def record_activity(self, activity: str) -> None:
+        """Record an activity name as visited."""
+        if activity:
+            self._activities.add(activity)
+
+    def record_screen(self, signature: str) -> bool:
+        """Record a screen signature.  Returns True if it is new."""
+        if signature in self._screen_signatures:
+            return False
+        self._screen_signatures.add(signature)
+        return True
+
+    def record_endpoint(self, url: str) -> bool:
+        """Record a network endpoint.  Returns True if it is new."""
+        # Normalise: strip query params for deduplication
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            endpoint = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        except Exception:
+            endpoint = url
+
+        if endpoint in self._network_endpoints:
+            return False
+        self._network_endpoints.add(endpoint)
+        return True
+
+    def drain_event_queue(self, event_queue: "queue.Queue") -> List[str]:
+        """Pull all pending network events from the shared Frida queue.
+
+        Returns the list of URLs drained.
+        """
+        drained: List[str] = []
+        while True:
+            try:
+                url = event_queue.get_nowait()
+                self._network_endpoints.add(url)
+                drained.append(url)
+            except Exception:
+                break
+        return drained
+
+    # ------ reporting ------ #
+
+    def get_report(self) -> Dict[str, Any]:
+        """Return a coverage summary dictionary."""
+        elapsed = time.time() - self._start_time
+        return {
+            "elapsed_seconds": round(elapsed, 1),
+            "activities_visited": sorted(self._activities),
+            "unique_screen_count": len(self._screen_signatures),
+            "unique_network_endpoints": sorted(self._network_endpoints),
+            "network_endpoint_count": len(self._network_endpoints),
+        }
+
+    @property
+    def activities(self) -> Set[str]:
+        return set(self._activities)
+
+    @property
+    def endpoints(self) -> Set[str]:
+        return set(self._network_endpoints)
 
 
 class AppNavigator:
@@ -78,13 +167,21 @@ class AppNavigator:
         {"resourceId": "android:id/button1"},  # Positive button
     ]
 
-    def __init__(self, device: DeviceInterface, package: str):
+    def __init__(self, device: DeviceInterface, package: str,
+                 network_event_queue: Optional["queue.Queue"] = None,
+                 device_serial: Optional[str] = None):
         self._device = device
         self._package = package
         self._finder = ElementFinder(device)
         self._visited_screens: Set[ScreenSignature] = set()
         self._navigation_history: List[NavigationAction] = []
         self._screen_graph: Dict[ScreenSignature, List[Tuple[NavigationAction, ScreenSignature]]] = {}
+        # Enhancement A: shared queue that Frida hooks write new URLs into
+        self._network_event_queue: "queue.Queue" = network_event_queue or queue.Queue()
+        # Enhancement A: priority queue: (priority, depth, path) where lower priority = process first
+        self._priority_queue: List[Tuple[int, int, list]] = []
+        self._coverage = CoverageTracker()
+        self._device_serial = device_serial  # used for back-stack ADB calls
 
     def _get_screen_signature(self, state: ScreenState) -> ScreenSignature:
         """Generate unique signature for current screen."""
@@ -111,6 +208,80 @@ class AppNavigator:
         """Check if we're still in the target app."""
         package, _ = self._device.get_current_activity()
         return package == self._package
+
+    # ------------------------------------------------------------------ #
+    # Enhancement A: network-trigger detection                            #
+    # ------------------------------------------------------------------ #
+
+    def _drain_network_events(self) -> List[str]:
+        """Pull any pending URL events written by Frida hooks into the queue."""
+        return self._coverage.drain_event_queue(self._network_event_queue)
+
+    def _network_triggered(self) -> bool:
+        """Return True if a new network endpoint was observed since last call."""
+        new_urls = self._drain_network_events()
+        return len(new_urls) > 0
+
+    # ------------------------------------------------------------------ #
+    # Enhancement B: back-stack safety helpers                            #
+    # ------------------------------------------------------------------ #
+
+    def _get_resumed_activity_adb(self) -> str:
+        """Query the resumed activity via ADB dumpsys."""
+        try:
+            cmd = ["adb"]
+            if self._device_serial:
+                cmd += ["-s", self._device_serial]
+            cmd += ["shell", "dumpsys", "activity", "activities"]
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=5
+            )
+            for line in result.stdout.splitlines():
+                if "mResumedActivity" in line or "ResumedActivity" in line:
+                    return line.strip()
+        except Exception as e:
+            logger.debug("_get_resumed_activity_adb failed: %s", e)
+        return ""
+
+    def _safe_click(self, elem: Element) -> bool:
+        """Click element; press Back if we leave the target package.
+
+        Returns:
+            True if the click succeeded and we stayed in the target app.
+        """
+        activity_before = self._get_resumed_activity_adb()
+
+        clicked = self._device.click(elem)
+        time.sleep(0.4)
+
+        if not self.is_in_target_app():
+            logger.debug("_safe_click: left target package – pressing Back")
+            self._device.press_back()
+            time.sleep(0.5)
+            return False
+
+        # Also detect if we navigated to a different *package* activity
+        activity_after = self._get_resumed_activity_adb()
+        if activity_after and activity_before:
+            # Extract package from the line (e.g. "… u0 com.foo/.MainActivity …")
+            def _extract_pkg(line: str) -> str:
+                import re
+                m = re.search(r'\s([\w.]+)/\.?\w+', line)
+                return m.group(1) if m else ""
+
+            pkg_before = _extract_pkg(activity_before)
+            pkg_after = _extract_pkg(activity_after)
+            if pkg_before and pkg_after and pkg_before != pkg_after:
+                if pkg_after != self._package:
+                    logger.debug(
+                        "_safe_click: activity changed from %s to external %s – pressing Back",
+                        pkg_before, pkg_after,
+                    )
+                    self._device.press_back()
+                    time.sleep(0.5)
+                    return False
+
+        return clicked
 
     def navigate_back(self) -> bool:
         """Press back and check if still in app."""
@@ -183,26 +354,65 @@ class AppNavigator:
 
     def explore(self, max_depth: int = 5, max_screens: int = 50,
                 screenshot_dir: Optional[str] = None,
-                on_screen: Optional[Callable[[ScreenState], None]] = None) -> ExplorationResult:
-        """Explore app screens using BFS.
+                on_screen: Optional[Callable[[ScreenState], None]] = None,
+                form_filler: Optional[Any] = None,
+                login_credentials: Optional[List[Dict[str, str]]] = None,
+                prioritize_network: bool = True) -> ExplorationResult:
+        """Explore app screens using BFS with login-first strategy and coverage tracking.
+
+        Enhancement C: Attempts login before BFS begins.
+        Enhancement A: Screens that trigger new network requests get priority.
+        Enhancement B: Uses _safe_click to guard back-stack against external navigation.
+        Enhancement D: Records coverage via CoverageTracker, attaches report to result.
 
         Args:
             max_depth: Maximum exploration depth.
             max_screens: Maximum screens to visit.
             screenshot_dir: Directory for screenshots (optional).
             on_screen: Callback for each screen visited.
+            form_filler: FormFiller instance for login-before-BFS.  When None
+                         a default FormFiller is created automatically.
+            login_credentials: Credential list forwarded to FormFiller.attempt_login().
+            prioritize_network: Whether to prioritise screens that trigger API calls.
 
         Returns:
-            ExplorationResult with discovered screens and elements.
+            ExplorationResult with discovered screens, elements, and coverage report.
         """
+        from .form_filler import FormFiller  # lazy import to avoid circular deps
+
         result = ExplorationResult()
-        queue = deque([(0, self._navigation_history.copy())])  # (depth, path)
+        self._coverage = CoverageTracker()
+
+        # ---- Enhancement C: login before BFS ---- #
+        if form_filler is None:
+            form_filler = FormFiller(self._device)
+
+        logger.info("explore: attempting login before BFS")
+        try:
+            logged_in = form_filler.attempt_login(login_credentials)
+            if logged_in:
+                result.authenticated = True
+                logger.info("explore: authenticated – starting BFS as logged-in user")
+                if screenshot_dir:
+                    auth_path = f"{screenshot_dir}/authenticated_start.png"
+                    self._device.take_screenshot(auth_path)
+                    result.screenshots.append(auth_path)
+        except Exception as e:
+            logger.debug("explore: attempt_login raised %s", e)
+
+        # ---- BFS initialisation ---- #
+        # bfs_queue holds (depth, path, is_network_priority)
+        bfs_queue: deque = deque([(0, self._navigation_history.copy(), False)])
         initial_state = self.get_current_screen()
         initial_sig = self._get_screen_signature(initial_state)
         self._visited_screens.add(initial_sig)
+        sig_str = f"{initial_sig.activity}:{initial_sig.element_hash}"
+        self._coverage.record_screen(sig_str)
+        if initial_sig.activity:
+            self._coverage.record_activity(initial_sig.activity)
 
-        while queue and result.unique_screens < max_screens:
-            depth, path = queue.popleft()
+        while bfs_queue and result.unique_screens < max_screens:
+            depth, path, _priority = bfs_queue.popleft()
 
             if depth > max_depth:
                 continue
@@ -218,10 +428,16 @@ class AppNavigator:
             state = self.get_current_screen()
             signature = self._get_screen_signature(state)
 
-            # Record visit
+            # Record visit + coverage
             result.screens_visited += 1
-            if state.activity and state.activity not in result.activities_discovered:
-                result.activities_discovered.append(state.activity)
+            if state.activity:
+                if state.activity not in result.activities_discovered:
+                    result.activities_discovered.append(state.activity)
+                self._coverage.record_activity(state.activity)
+
+            # Drain any network events that occurred during replay
+            if prioritize_network:
+                self._drain_network_events()
 
             # Count elements
             clickables = state.clickables
@@ -248,7 +464,7 @@ class AppNavigator:
             # Try to dismiss any dialogs
             self.dismiss_dialog()
 
-            # Explore clickable elements
+            # Explore clickable elements – use _safe_click (Enhancement B)
             for elem in clickables[:10]:  # Limit per screen
                 if not self.is_in_target_app():
                     self.navigate_home()
@@ -261,8 +477,9 @@ class AppNavigator:
                     y=elem.bounds.center[1] if elem.bounds else None
                 )
 
-                # Execute action
-                self._execute_action(action)
+                # Enhancement B: safe click with back-stack guard
+                network_before = len(self._coverage.endpoints)
+                self._safe_click(elem)
                 time.sleep(0.5)
 
                 # Check new screen
@@ -270,19 +487,34 @@ class AppNavigator:
                     new_state = self.get_current_screen()
                     new_sig = self._get_screen_signature(new_state)
 
+                    # Enhancement A: detect if network request was triggered
+                    triggered_network = False
+                    if prioritize_network:
+                        self._drain_network_events()
+                        triggered_network = len(self._coverage.endpoints) > network_before
+
                     if new_sig not in self._visited_screens:
                         self._visited_screens.add(new_sig)
+                        new_sig_str = f"{new_sig.activity}:{new_sig.element_hash}"
+                        self._coverage.record_screen(new_sig_str)
                         result.unique_screens += 1
 
-                        # Record navigation
+                        # Record navigation graph
                         if signature.activity not in result.navigation_graph:
                             result.navigation_graph[signature.activity] = []
                         if new_sig.activity not in result.navigation_graph[signature.activity]:
                             result.navigation_graph[signature.activity].append(new_sig.activity)
 
-                        # Add to queue for further exploration
+                        # Enhancement A: network-triggered screens go to front of queue
                         new_path = path + [action]
-                        queue.append((depth + 1, new_path))
+                        if triggered_network and prioritize_network:
+                            logger.debug(
+                                "explore: network triggered on %s – prioritising screen",
+                                new_sig.activity,
+                            )
+                            bfs_queue.appendleft((depth + 1, new_path, True))
+                        else:
+                            bfs_queue.append((depth + 1, new_path, False))
 
                     # Go back
                     self.navigate_back()
@@ -294,9 +526,13 @@ class AppNavigator:
             self._device.scroll("down", 0.5)
             time.sleep(0.3)
 
-        logger.info(f"Exploration complete: {result.unique_screens} unique screens, "
-                   f"{result.screens_visited} total visits")
+        logger.info(
+            "Exploration complete: %d unique screens, %d total visits, authenticated=%s",
+            result.unique_screens, result.screens_visited, result.authenticated,
+        )
 
+        # Enhancement D: attach coverage report
+        result.coverage_report = self._coverage.get_report()
         return result
 
     def _execute_action(self, action: NavigationAction) -> bool:

