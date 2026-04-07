@@ -5902,7 +5902,22 @@ def _run_scan(scan_id: str, apk_path: Path):
         _set_status(scan_id, status="scanning", progress=40, message="Scanning decompiled sources…")
         use_sg   = os.environ.get("MSRA_NO_SEMGREP") != "1"
         scanner  = Scanner(str(decompiled), adb_path=None, use_semgrep=use_sg)
+
+        # Heartbeat: increment progress 40→78 while scanner.scan() runs so the
+        # UI doesn't appear frozen on large APKs.
+        _scan_done_evt = threading.Event()
+        def _scan_heartbeat():
+            p = 40
+            while not _scan_done_evt.wait(timeout=10):
+                if p < 78:
+                    p = min(p + 3, 78)
+                    _set_status(scan_id, status="scanning", progress=p,
+                                message="Scanning decompiled sources…")
+        _hb = threading.Thread(target=_scan_heartbeat, daemon=True)
+        _hb.start()
+
         findings = scanner.scan()
+        _scan_done_evt.set()
         pkg      = scanner.package_name or "unknown"
 
         _set_status(scan_id, status="reporting", progress=80,
