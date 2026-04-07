@@ -583,10 +583,15 @@ def _build_dashboard(scan_id: str | None, all_summaries: list, view: str | None 
         else:
             risk_pill = ''
 
+        platform     = s.get('platform', 'android')
+        plat_icon    = ('<i class="fa-brands fa-apple" style="color:var(--text3);font-size:9px"></i> '
+                        if platform == 'ios' else
+                        '<i class="fa-brands fa-android" style="color:#22c55e;font-size:9px"></i> ')
+
         sidebar_items += f'''
         <div class="sb-scan-wrap">
           <a href="/scans/{sid}" class="sb-scan-item {active}">
-            <div class="sb-pkg" style="display:flex;align-items:center;gap:4px">{pkg}{risk_pill}</div>
+            <div class="sb-pkg" style="display:flex;align-items:center;gap:4px">{plat_icon}{pkg}{risk_pill}</div>
             <div class="sb-meta">
               <span class="sb-apk">{apk}</span>
               <span class="sb-dots">{dot_c}{dot_h}{dot_m}</span>
@@ -1730,9 +1735,9 @@ code,pre{{font-family:'JetBrains Mono',monospace}}
     <div class="up-sub">Drop an Android APK to run a full security assessment</div>
 
     <div class="up-dropzone" id="upDrop">
-      <input type="file" id="upFileInput" accept=".apk,.apkm,.xapk" onchange="onUpFileSelected(this)">
+      <input type="file" id="upFileInput" accept=".apk,.apkm,.xapk,.ipa" onchange="onUpFileSelected(this)">
       <i class="fa-solid fa-file-circle-plus"></i>
-      <p>Click or drag an APK here<br><span style="font-size:11px;color:var(--text3)">.apk · .apkm · .xapk &nbsp;·&nbsp; max 250 MB</span></p>
+      <p>Click or drag a mobile app here<br><span style="font-size:11px;color:var(--text3)"><i class="fa-brands fa-android" style="color:#22c55e"></i> .apk · .apkm · .xapk &nbsp;&nbsp;<i class="fa-brands fa-apple" style="color:var(--text2)"></i> .ipa &nbsp;·&nbsp; max 250 MB</span></p>
     </div>
 
     <div class="up-file-row">
@@ -4539,11 +4544,25 @@ def _build_topbar(current: dict | None, view: str | None = None) -> str:
     else:
         risk_badge = ''
 
+    platform     = current.get('platform', 'android')
+    plat_label   = ('iOS' if platform == 'ios' else 'Android')
+    plat_icon    = ('fa-apple' if platform == 'ios' else 'fa-android')
+    plat_color   = ('color:var(--text2)' if platform == 'ios' else 'color:#22c55e')
+
     crit = sev.get('Critical', 0)
     crit_badge = (f'<span style="background:rgba(239,68,68,.15);color:#f87171;padding:2px 8px;'
                   f'border-radius:4px;font-size:11px;font-weight:700">{crit}C</span> ') if crit else ''
 
+    # Dynamic scan only meaningful for Android (needs ADB)
+    dyn_btn = (f'<button class="btn btn-sm" style="border-color:rgba(251,191,36,.4);color:#fbbf24;'
+               f'background:rgba(251,191,36,.08)" onclick="openDynPanel(\'{sid}\')">'
+               f'<i class="fa-solid fa-bolt"></i> Dynamic</button>'
+               if platform != 'ios' else
+               f'<span style="font-size:11px;color:var(--text3);padding:4px 8px" title="Dynamic analysis not available for iOS static scans">'
+               f'<i class="fa-brands fa-apple"></i> iOS Static</span>')
+
     return f'''<div class="topbar" data-scan-id="{sid}">
+      <i class="fa-brands {plat_icon}" style="{plat_color};font-size:14px" title="{plat_label}"></i>
       <span class="topbar-pkg">{pkg}</span>
       {crit_badge}
       {risk_badge}
@@ -4551,9 +4570,7 @@ def _build_topbar(current: dict | None, view: str | None = None) -> str:
       <div class="topbar-meta">
         <span><i class="fa-regular fa-file-code"></i> {apk}</span>
         <span><i class="fa-solid fa-bullseye"></i> {total} findings</span>
-        <button class="btn btn-sm" style="border-color:rgba(251,191,36,.4);color:#fbbf24;background:rgba(251,191,36,.08)" onclick="openDynPanel('{sid}')">
-          <i class="fa-solid fa-bolt"></i> Dynamic
-        </button>
+        {dyn_btn}
         <div class="export-dropdown" style="position:relative;display:inline-flex">
           <button class="btn btn-sm export-drop-btn" onclick="toggleExportMenu()" style="gap:5px">
             <i class="fa-solid fa-download"></i> Export
@@ -5516,19 +5533,130 @@ def api_export_csv(scan_id: str):
     )
 
 
+def _run_ios_scan(scan_id: str, ipa_path: Path):
+    """Background thread: static analysis of an IPA file."""
+    out_dir = _scan_dir(scan_id)
+    out_dir.mkdir(exist_ok=True)
+    try:
+        _set_status(scan_id, status="scanning", progress=10, message="Extracting IPA…")
+        from msra.ios_scanner import scan_ipa
+        _set_status(scan_id, status="scanning", progress=25, message="Analysing Info.plist and entitlements…")
+        findings, meta = scan_ipa(str(ipa_path))
+
+        bundle_id = meta.get("bundle_id", "unknown")
+        app_name  = meta.get("app_name", bundle_id)
+        pkg       = bundle_id
+
+        _set_status(scan_id, status="reporting", progress=75,
+                    message=f"Generating report ({len(findings)} findings)…")
+
+        # Build findings in the format generate_html_report expects
+        # ios_scanner returns plain dicts; wrap them lightly
+        from msra.report import generate_html_report as _gen_report
+
+        # Convert plain dicts to simple namespace so report.py attr access works
+        class _F:
+            def __init__(self, d):
+                self.__dict__.update(d)
+                # report.py accesses severity.value on some paths
+                self.severity = type("S", (), {"value": d.get("severity", "Info")})()
+                self.title    = d.get("title", "")
+                self.description = d.get("description", "")
+                self.category = d.get("category", "")
+                self.remediation = d.get("remediation", "")
+                # evidence compat
+                ev = d.get("evidence", {})
+                self.evidence = type("E", (), {
+                    "file":     ev.get("file", ""),
+                    "snippet":  ev.get("snippet", ""),
+                    "line":     ev.get("line_number", 0),
+                })()
+                self.adb_commands  = d.get("adb_commands", [])
+                self.attack_path   = d.get("attack_path", "")
+                self.cwe           = d.get("cwe", [])
+                self.references    = d.get("references", [])
+                self.id            = d.get("id", 0)
+                self.fid           = d.get("fid", d.get("id", 0))
+                self._raw          = d   # keep raw for JSON serialisation
+
+        wrapped = [_F(f) for f in findings]
+
+        report_meta = {
+            "title":    f"{app_name} — iOS Security Assessment",
+            "package":  pkg,
+            "apk":      ipa_path.name,
+            "platform": "ios",
+            "source_files": 0,
+        }
+        generate_html_report(wrapped, str(out_dir / "report.html"), report_meta)
+
+        # Save findings.json directly from raw dicts (no jadx intermediate)
+        findings_data = {
+            "package":  pkg,
+            "apk":      ipa_path.name,
+            "platform": "ios",
+            "findings": findings,
+        }
+        (out_dir / "findings.json").write_text(
+            json.dumps(findings_data, indent=2), encoding="utf-8"
+        )
+
+        sev_counts: dict = {}
+        for f in findings:
+            sev = f.get("severity", "Info")
+            sev_counts[sev] = sev_counts.get(sev, 0) + 1
+
+        risk_score = round(min(
+            sev_counts.get("Critical", 0) * 10 +
+            sev_counts.get("High", 0) * 5 +
+            sev_counts.get("Medium", 0) * 2 +
+            sev_counts.get("Low", 0) * 0.5,
+            100.0,
+        ), 1)
+
+        summary = {"scan_id": scan_id, "package": pkg, "apk": ipa_path.name,
+                   "platform": "ios", "total_findings": len(findings),
+                   "severity_counts": sev_counts, "risk_score": risk_score}
+        (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+
+        _set_status(scan_id, status="done", progress=100, message="iOS scan complete.",
+                    package=pkg, total=len(findings), severity_counts=sev_counts,
+                    risk_score=risk_score, platform="ios")
+    except Exception as exc:
+        _set_status(scan_id, status="error", progress=0,
+                    message=str(exc), traceback=traceback.format_exc())
+    finally:
+        try: ipa_path.unlink(missing_ok=True)
+        except Exception: pass
+
+
 @app.route("/api/upload", methods=["POST"])
 def upload():
     if "apk" not in request.files:
         return jsonify({"error": "No file"}), 400
     f = request.files["apk"]
-    if not f.filename or not f.filename.lower().endswith((".apk", ".apkm", ".xapk")):
-        return jsonify({"error": "File must be an APK"}), 400
-    scan_id  = uuid.uuid4().hex[:12]
-    apk_path = UPLOAD_FOLDER / f"{scan_id}_{f.filename}"
-    f.save(str(apk_path))
-    _db.upsert_scan(scan_id, status="queued", progress=0, message="Queued…")
-    threading.Thread(target=_run_scan, args=(scan_id, apk_path), daemon=True).start()
-    return jsonify({"scan_id": scan_id})
+    if not f.filename:
+        return jsonify({"error": "No filename"}), 400
+
+    fname_lower = f.filename.lower()
+    is_ios = fname_lower.endswith(".ipa")
+    is_android = fname_lower.endswith((".apk", ".apkm", ".xapk"))
+
+    if not is_ios and not is_android:
+        return jsonify({"error": "File must be an APK/APKM/XAPK (Android) or IPA (iOS)"}), 400
+
+    scan_id   = uuid.uuid4().hex[:12]
+    file_path = UPLOAD_FOLDER / f"{scan_id}_{f.filename}"
+    f.save(str(file_path))
+    _db.upsert_scan(scan_id, status="queued", progress=0,
+                    message="Queued…", platform="ios" if is_ios else "android")
+
+    if is_ios:
+        threading.Thread(target=_run_ios_scan, args=(scan_id, file_path), daemon=True).start()
+    else:
+        threading.Thread(target=_run_scan, args=(scan_id, file_path), daemon=True).start()
+
+    return jsonify({"scan_id": scan_id, "platform": "ios" if is_ios else "android"})
 
 
 @app.route("/api/scan/<scan_id>/status")
