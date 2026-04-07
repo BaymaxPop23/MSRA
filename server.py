@@ -947,6 +947,10 @@ code,pre{{font-family:'JetBrains Mono',monospace}}
   background:var(--bg2);border-right:1px solid var(--border);
   display:flex;flex-direction:column;overflow:hidden;
   position:relative;z-index:10;
+  transition:width .25s cubic-bezier(.4,0,.2,1);
+}}
+.sidebar.collapsed{{
+  width:0!important;min-width:0!important;border-right:none;
 }}
 .sb-head{{
   padding:16px 16px 12px;border-bottom:1px solid var(--border);flex-shrink:0;
@@ -1947,7 +1951,7 @@ code,pre{{font-family:'JetBrains Mono',monospace}}
 
 /* ══ HAMBURGER BUTTON ══ */
 .hamburger{{
-  display:none;align-items:center;justify-content:center;
+  display:inline-flex;align-items:center;justify-content:center;
   width:34px;height:34px;border-radius:var(--radius-sm);
   border:1px solid var(--border);background:transparent;
   color:var(--text2);cursor:pointer;flex-shrink:0;
@@ -1974,9 +1978,8 @@ code,pre{{font-family:'JetBrains Mono',monospace}}
   .content .main{{padding:24px 20px 60px}}
 }}
 
-/* ── Tablet portrait / large phone (≤768px): sidebar hides, hamburger appears ── */
+/* ── Tablet portrait / large phone (≤768px): sidebar hides, hamburger toggles overlay ── */
 @media (max-width:768px){{
-  .hamburger{{display:inline-flex}}
 
   /* Sidebar slides off-screen; .open class brings it back */
   .sidebar{{
@@ -5918,11 +5921,6 @@ def index():
     summaries = _load_summaries()
     scan_id   = request.args.get("scan")
     view      = request.args.get("view")
-
-    # Redirect to clean scan URL so the URL is always bookmarkable and
-    # the JS can reliably extract the scan ID from window.location.pathname
-    if not scan_id and not view and summaries:
-        return redirect(f"/scans/{summaries[0]['scan_id']}", code=302)
 
     return Response(_build_dashboard(scan_id, summaries, view=view), mimetype="text/html")
 
