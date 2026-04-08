@@ -4197,12 +4197,16 @@ async function runBlogSync() {{
     log.textContent = data.log || '';
 
     const added        = data.added   || 0;
+    const updated_c    = data.updated || 0;
     const found        = data.found   || 0;
     const sources      = data.sources || 0;
     const totalCrawled = data.total_crawled || 0;
 
-    if (added > 0) {{
-      status.innerHTML = `<span style="color:#34d399"><i class="fa-solid fa-circle-check"></i> ${{added}} new rule${{added!==1?'s':''}} added from ${{found}} patterns</span>`;
+    if (added > 0 || updated_c > 0) {{
+      const parts = [];
+      if (added > 0)     parts.push(`${{added}} new rule${{added!==1?'s':''}} added`);
+      if (updated_c > 0) parts.push(`${{updated_c}} rule${{updated_c!==1?'s':''}} updated`);
+      status.innerHTML = `<span style="color:#34d399"><i class="fa-solid fa-circle-check"></i> ${{parts.join(', ')}} from ${{found}} patterns</span>`;
     }} else if (totalCrawled > 0) {{
       status.innerHTML = `<span style="color:var(--text3)"><i class="fa-solid fa-circle-check" style="color:#34d399"></i> Up to date — ${{totalCrawled}} crawled rule${{totalCrawled!==1?'s':''}} already in your library (<a href="#" onclick="switchIntelTab('rules');quickFilter('crawled');return false" style="color:var(--accent)">view</a>)</span>`;
     }} else {{
@@ -7455,21 +7459,17 @@ def api_intel_sources_sync():
         added = 0
         imported_titles: list = []
 
-        all_existing   = rules_api.get_all_rules()
-        existing_ids   = {r.get("id") for r in all_existing}
-        existing_titles = {r.get("title", "").strip().lower() for r in all_existing}
+        all_existing    = rules_api.get_all_rules()
+        existing_ids    = {r.get("id") for r in all_existing}
+        # Map title (lowercase) → existing rule dict for update checks
+        existing_by_title = {r.get("title", "").strip().lower(): r for r in all_existing}
+        updated = 0
 
         for pf in sorted(crawled_root.rglob("*.json")) if crawled_root.exists() else []:
             try:
                 p = json.loads(pf.read_text())
                 rule_id = p.get("id") or p.get("rule_id") or f"crawled-{pf.stem}"
                 title   = p.get("title") or p.get("name") or rule_id
-
-                # Skip if already imported (by ID or by title to prevent content duplicates)
-                if rule_id in existing_ids:
-                    continue
-                if title.strip().lower() in existing_titles:
-                    continue
 
                 # Crawled files store patterns under "detection"."patterns"
                 # Fall back to top-level "patterns" or "detections" for other formats.
@@ -7492,7 +7492,7 @@ def api_intel_sources_sync():
                     continue
 
                 meta = p.get("metadata", {})
-                rule = {
+                rule_data = {
                     "id":           rule_id,
                     "title":        title,
                     "severity":     p.get("severity", "Medium"),
@@ -7507,10 +7507,37 @@ def api_intel_sources_sync():
                     "tags":         list({*p.get("tags", []), "crawled"}),
                     "confidence":   meta.get("confidence", "medium"),
                 }
-                rules_api.create_custom_rule(rule)
+
+                title_key = title.strip().lower()
+
+                if rule_id in existing_ids:
+                    # Exact ID match — check if patterns changed and update if so
+                    existing = next((r for r in all_existing if r.get("id") == rule_id), None)
+                    if existing and existing.get("source") == "custom":
+                        old_pats = {p2.get("pattern", "") for p2 in existing.get("patterns", [])}
+                        new_pats = {p2.get("pattern", "") for p2 in patterns}
+                        if old_pats != new_pats:
+                            rules_api.update_custom_rule(rule_id, rule_data)
+                            updated += 1
+                    continue
+
+                if title_key in existing_by_title:
+                    # Same title, different ID — update patterns if rule is custom/crawled
+                    existing = existing_by_title[title_key]
+                    if existing.get("source") == "custom":
+                        old_pats = {p2.get("pattern", "") for p2 in existing.get("patterns", [])}
+                        new_pats = {p2.get("pattern", "") for p2 in patterns}
+                        if old_pats != new_pats:
+                            rules_api.update_custom_rule(existing["id"], rule_data)
+                            updated += 1
+                    # Either updated or it's a builtin with same title — don't create duplicate
+                    continue
+
+                # New rule — create it
+                rules_api.create_custom_rule(rule_data)
                 added += 1
                 existing_ids.add(rule_id)
-                existing_titles.add(title.strip().lower())
+                existing_by_title[title_key] = rule_data
                 imported_titles.append(title)
             except Exception:
                 pass
@@ -7541,6 +7568,7 @@ def api_intel_sources_sync():
             "sources":        len(result.source_stats),
             "found":          result.patterns_found,
             "added":          added,
+            "updated":        updated,
             "total_crawled":  total_crawled,
             "log":            "\n".join(log_lines),
             "source_details": source_details,
