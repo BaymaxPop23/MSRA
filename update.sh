@@ -30,13 +30,13 @@ BEHIND=$(git rev-list HEAD..origin/main --count 2>/dev/null || echo "0")
 if [ "$BEHIND" -eq 0 ]; then
   echo "Already up to date."
   echo ""
-  read -rp "Restart server anyway? [y/N] " yn
+  read -rp "Restart server anyway? [y/N] " yn || true
   case "$yn" in [Yy]*) ;; *) exit 0 ;; esac
 else
   echo "Found $BEHIND new commit(s):"
   git log HEAD..origin/main --oneline
   echo ""
-  read -rp "Apply update and restart? [Y/n] " yn
+  read -rp "Apply update and restart? [Y/n] " yn || true
   case "$yn" in [Nn]*) echo "Aborted."; exit 0 ;; esac
 
   # 4. Pull latest code

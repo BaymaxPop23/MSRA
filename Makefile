@@ -29,11 +29,12 @@ logs:
 	@tail -f /tmp/msra_server.log
 
 install:
-	pip3 install flask weasyprint anthropic
+	pip3 install -r requirements.txt
 	@echo ""
 	@echo "External tools required:"
 	@echo "  jadx: brew install jadx  (APK decompilation)"
 	@echo "  adb:  brew install android-platform-tools  (dynamic analysis)"
+	@echo "  PDF:  brew install pango cairo gdk-pixbuf  (macOS, for PDF export)"
 
 docker:
 	docker compose up -d
