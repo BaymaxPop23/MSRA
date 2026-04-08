@@ -13,7 +13,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
+import logging
 import os
 import re
 import shutil
@@ -58,6 +60,8 @@ app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
 # ── Dynamic analysis job state ────────────────────────────────────────────
 import time as _time
 
+_log = logging.getLogger(__name__)
+
 
 def _load_dynamic_cfg() -> dict:
     if DYNAMIC_CFG_F.exists():
@@ -101,7 +105,9 @@ def _get_logcat(device_serial: str | None = None, lines: int = 300,
         args += ["-s", device_serial]
     args += ["logcat", "-d", "-t", str(lines)]
     if package:
-        args += ["--pid", _get_app_pid(device_serial, package)]
+        _pid = _get_app_pid(device_serial, package)
+        if _pid:
+            args += ["--pid", _pid]
     try:
         r = _sp.run(args, capture_output=True, text=True, timeout=20)
         return r.stdout or r.stderr
@@ -242,7 +248,9 @@ Return ONLY valid JSON:
             "confidence": 0,
             "reasoning": f"AI analysis failed: {e}",
             "key_evidence": [],
-            "suggested_action": "Review evidence manually"
+            "risk_context": "Manual review required — AI analysis unavailable.",
+            "suggested_action": "Review evidence manually",
+            "mode": "error",
         }
 
 
@@ -690,20 +698,25 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
         # ── Phase 3: Launch app properly ─────────────────────────────────
         _update_job(job_id, progress=30, message=f"Launching {package} via am start…")
         adb_prefix = (["-s", device_serial] if device_serial else [])
+        _device_ok = False
         if package:
             launched = _launch_app_am(adb_prefix, package, timeout=20)
             if not launched:
                 _update_job(job_id, progress=32,
                             message=f"Warning: could not confirm launch of {package} — proceeding anyway")
-            _time.sleep(6)   # wait for app to fully initialize
+            else:
+                _device_ok = True
+            if _device_ok:
+                _time.sleep(6)   # wait for app to fully initialize
 
         # Take filesystem snapshot before probing
         fs_before: set = set()
-        if package:
+        if package and _device_ok:
             fs_before = _fs_snapshot(adb_prefix, package)
 
         _update_job(job_id, progress=38, message="App running — observing startup behavior…")
-        _time.sleep(6)   # observe startup network/logcat
+        if _device_ok:
+            _time.sleep(6)   # observe startup network/logcat
 
         # ── Phase 3b: Login attempt ───────────────────────────────────────
         # Try filling login form with common test credentials so BFS
@@ -902,10 +915,18 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
                     "services": _cp_svcs,
                 }
                 _update_job(job_id, progress=62,
-                            message=f"ComponentProber: scanning {len(_cp_acts)} activities, "
+                            message=f"ComponentProber: probing {len(_cp_acts)} activities, "
                                     f"{len(_cp_provs)} providers, {len(_cp_rcvs)} receivers…")
                 _prober = _CP(package, device_serial=device_serial or None)
-                _probe_results = _prober.probe_all(_comp_manifest)
+                _cp_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                _cp_future = _cp_pool.submit(_prober.probe_all, _comp_manifest)
+                _cp_pool.shutdown(wait=False)
+                try:
+                    _probe_results = _cp_future.result(timeout=30)
+                except concurrent.futures.TimeoutError:
+                    _probe_results = []
+                    extra_evidence += "\nComponentProber: timed out (30s) — skipped.\n"
+                _update_job(job_id, progress=64, message="Component probing done, collecting evidence…")
                 _vuln_probes = [r for r in _probe_results if r.is_vulnerable]
                 if _vuln_probes:
                     extra_evidence += "\n=== ComponentProber Findings ===\n"
@@ -1037,7 +1058,9 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
                     "confidence": 0,
                     "reasoning": "No API key — set ANTHROPIC_API_KEY or use Basic Scan.",
                     "key_evidence": [],
-                    "suggested_action": "Configure API key or run Basic Scan"
+                    "risk_context": "AI analysis unavailable — configure ANTHROPIC_API_KEY.",
+                    "suggested_action": "Configure API key or run Basic Scan",
+                    "mode": "no_key",
                 }
         else:
             _update_job(job_id, progress=82, message="Running heuristic analysis…")
@@ -3997,7 +4020,10 @@ async function startDynVerify(scanId, idx, title, sev, cat, desc) {{
 
 async function pollDynJob(jobId, cardIdx) {{
   refreshDynJobs();
+  let _pollAttempts = 0;
+  const _POLL_MAX = 150; // 5 minutes at 2s
   const interval = setInterval(async () => {{
+    _pollAttempts++;
     try {{
       const data = await fetch(`/api/dynamic/verify/${{jobId}}`).then(r=>r.json());
       renderDynJob(data);
@@ -4006,7 +4032,12 @@ async function pollDynJob(jobId, cardIdx) {{
         updateDynVerifyBtn(cardIdx, data);
       }}
     }} catch {{ clearInterval(interval); }}
-  }}, 2500);
+    if (_pollAttempts >= _POLL_MAX) {{
+      clearInterval(interval);
+      const btn = document.getElementById(`dynBtn-${{cardIdx}}`);
+      if (btn) {{ btn.classList.remove('running'); btn.innerHTML='<i class="fa-solid fa-clock"></i> Timed out'; }}
+    }}
+  }}, 2000);
 }}
 
 function updateDynVerifyBtn(idx, job) {{
@@ -7259,7 +7290,10 @@ def api_dyn_corellium_instances():
 def api_dyn_start_verify():
     data        = request.get_json(force=True, silent=True) or {}
     scan_id     = data.get("scan_id", "")
-    finding_idx = int(data.get("finding_index", 0))
+    try:
+        finding_idx = int(data.get("finding_index", 0))
+    except (ValueError, TypeError):
+        return jsonify({"error": "finding_index must be an integer"}), 400
     finding     = data.get("finding", {})
     use_ai      = bool(data.get("use_ai", True))
 
@@ -7797,6 +7831,18 @@ def api_delete_scan(scan_id: str):
 # ── DB init (runs at import time so dev auto-reload works too) ────────────
 _db.init_db()
 _db.migrate_from_files(REPORTS_FOLDER)
+
+# ── Reset stale dynamic jobs left in "running" state from a previous session ──
+try:
+    import sqlite3 as _sqlite3
+    with _sqlite3.connect(str(_db.DB_PATH)) as _conn:
+        _conn.execute(
+            "UPDATE dynamic_jobs SET status='error', message='Interrupted by server restart' "
+            "WHERE status='running'"
+        )
+        _conn.commit()
+except Exception:
+    pass
 
 
 if __name__ == "__main__":
