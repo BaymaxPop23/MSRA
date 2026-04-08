@@ -3267,6 +3267,7 @@ function getFilteredRules() {{
     if (plat && r.platform !== plat) return false;
     if (sta === 'enabled'  && !r.enabled) return false;
     if (sta === 'disabled' &&  r.enabled) return false;
+    if (_quickTagFilter && !(r.tags||[]).includes(_quickTagFilter)) return false;
     return true;
   }}).sort((a, b) => {{
     const k = _rulesSort.key;
@@ -3361,8 +3362,18 @@ function renderRulesTable() {{
   }});
 }}
 
+let _quickTagFilter = '';
 function quickFilter(sev) {{
   _quickSevFilter = sev;
+  _quickTagFilter = '';
+  // Check if it's actually a tag filter (e.g. 'crawled')
+  if (sev && !['Critical','High','Medium','Low','Info','enabled',''].includes(sev)) {{
+    _quickTagFilter = sev;
+    _quickSevFilter = '';
+    sev = '';
+    // switch to Rules tab
+    switchIntelTab('rules');
+  }}
   // Highlight active stat
   document.querySelectorAll('.intel-stat').forEach(el => el.classList.remove('active'));
   if (sev === '') {{ document.getElementById('statAll')?.classList.add('active'); }}
@@ -4162,8 +4173,18 @@ async function runBlogSync() {{
     const found   = data.found   || 0;
     const sources = data.sources || 0;
 
-    status.textContent = `✓ Checked ${{sources}} sources — ${{found}} patterns found, ${{added}} added`;
-    status.style.color = added > 0 ? '#34d399' : 'var(--text3)';
+    const added   = data.added   || 0;
+    const found   = data.found   || 0;
+    const sources = data.sources || 0;
+    const totalCrawled = data.total_crawled || 0;
+
+    if (added > 0) {{
+      status.innerHTML = `<span style="color:#34d399"><i class="fa-solid fa-circle-check"></i> ${{added}} new rule${{added!==1?'s':''}} added from ${{found}} patterns</span>`;
+    }} else if (totalCrawled > 0) {{
+      status.innerHTML = `<span style="color:var(--text3)"><i class="fa-solid fa-circle-check" style="color:#34d399"></i> Up to date — ${{totalCrawled}} crawled rule${{totalCrawled!==1?'s':''}} already in your library (<a href="#" onclick="switchIntelTab('rules');quickFilter('crawled');return false" style="color:var(--accent)">view</a>)</span>`;
+    }} else {{
+      status.innerHTML = `<span style="color:var(--text3)">Checked ${{sources}} sources — ${{found}} patterns found, none matched import criteria</span>`;
+    }}
 
     if (data.source_details && Object.keys(data.source_details).length) {{
       const rows = Object.entries(data.source_details).map(([name, s]) => {{
@@ -4180,7 +4201,7 @@ async function runBlogSync() {{
       results.innerHTML = `<div style="border:1px solid var(--border);border-radius:6px;padding:10px 12px;max-height:220px;overflow-y:auto">${{rows}}</div>`;
     }}
 
-    if (added > 0) {{
+    if (added > 0 || true) {{
       const rules = await fetch('/api/rules').then(r=>r.json());
       _allRules = rules;
       const stats = await fetch('/api/rules/stats').then(r=>r.json());
@@ -5810,7 +5831,8 @@ def _build_intelligence_hub() -> str:
           <div class="sources-section-title"><i class="fa-solid fa-newspaper" style="color:#34d399;margin-right:6px"></i>Security Blog Sources <span style="font-size:10px;background:rgba(52,211,153,.15);color:#34d399;border-radius:4px;padding:2px 7px;margin-left:6px;font-weight:600">No AI Required</span></div>
           <div class="url-extractor-card" style="margin-bottom:0">
             <h3 style="margin-bottom:6px">Sync from Security Research Blogs</h3>
-            <p style="margin-bottom:14px">Fetches the latest Android vulnerability writeups from Oversecured, Google Project Zero, NowSecure, OWASP, CheckPoint Research, and 9 other sources using RSS feeds. Extracts detection patterns via keyword and regex analysis — no API key needed.</p>
+            <p style="margin-bottom:6px">Fetches the latest Android vulnerability writeups from Oversecured, Google Project Zero, NowSecure, CheckPoint Research, and 9 other sources via RSS. Extracts detection patterns automatically — <strong>no API key needed</strong>.</p>
+            <p style="margin-bottom:14px;font-size:12px;color:var(--text3)"><i class="fa-solid fa-circle-info" style="color:var(--accent)"></i> New rules are added directly to your <strong>Rules</strong> library (tagged <code style="font-size:11px;background:rgba(99,102,241,.15);padding:1px 5px;border-radius:3px">crawled</code>). Already-imported rules are skipped automatically.</p>
             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
               <button class="btn btn-primary" id="blogSyncBtn" onclick="runBlogSync()">
                 <i class="fa-solid fa-rotate"></i> Sync All Sources
@@ -5825,6 +5847,7 @@ def _build_intelligence_hub() -> str:
         <!-- External feeds (AI-powered) -->
         <div>
           <div class="sources-section-title"><i class="fa-solid fa-rss" style="color:var(--accent);margin-right:6px"></i>Intelligence Feeds <span style="font-size:10px;background:rgba(99,102,241,.15);color:#818cf8;border-radius:4px;padding:2px 7px;margin-left:6px;font-weight:600">AI-Powered</span></div>
+          <p style="font-size:12px;color:var(--text3);margin:0 0 14px 0"><i class="fa-solid fa-key" style="color:#f59e0b;margin-right:4px"></i>Requires <strong style="color:var(--text)">ANTHROPIC_API_KEY</strong> — Claude reads each feed and generates detection rules. Start the server with <code style="font-size:11px;background:rgba(255,255,255,.06);padding:1px 5px;border-radius:3px">ANTHROPIC_API_KEY=sk-ant-... python server.py</code></p>
           <div class="feed-grid" id="feedGrid">
 
             <div class="feed-card">
@@ -7401,58 +7424,67 @@ def api_intel_sources_sync():
         updater = ThreatIntelUpdater(config=cfg)
         result  = updater.update(force=True, quiet=True)
 
-        # Now import any pending/approved patterns directly into user_rules
-        crawled_dir = data_dir / "crawled"
+        # Now import any pending/approved patterns directly into user_rules.
+        # The updater writes to data_dir/"data"/"crawled"/<subdir>/*.json
+        # We walk all subdirectories recursively to find every crawled pattern file.
+        crawled_root = data_dir / "data" / "crawled"
         added = 0
         imported_titles: list = []
 
-        for pattern_dir in [crawled_dir / "approved", crawled_dir / "pending_review", crawled_dir]:
-            if not pattern_dir.exists():
-                continue
-            for pf in list(pattern_dir.glob("*.json")):
-                try:
-                    p = json.loads(pf.read_text())
-                    # Convert crawled pattern format → rules_api format
-                    rule_id = p.get("id") or p.get("rule_id") or f"crawled-{pf.stem}"
-                    title   = p.get("title") or p.get("name") or rule_id
+        existing_ids = {r.get("id") for r in rules_api.get_all_rules()}
 
-                    # Skip if already in user rules
-                    existing = rules_api.list_rules()
-                    if any(r.get("id") == rule_id for r in existing):
-                        continue
+        for pf in sorted(crawled_root.rglob("*.json")) if crawled_root.exists() else []:
+            try:
+                p = json.loads(pf.read_text())
+                rule_id = p.get("id") or p.get("rule_id") or f"crawled-{pf.stem}"
+                title   = p.get("title") or p.get("name") or rule_id
 
-                    # Build detections list
-                    detections = []
-                    for det in p.get("detections", p.get("patterns", [])):
-                        pat = det.get("pattern") or det.get("regex", "")
-                        if pat:
-                            detections.append({
-                                "type":       "regex",
-                                "pattern":    pat,
-                                "file_types": det.get("file_types", [".java", ".kt"]),
-                            })
-                    if not detections:
-                        continue
+                # Skip if already imported
+                if rule_id in existing_ids:
+                    continue
 
-                    rule = {
-                        "id":          rule_id,
-                        "title":       title,
-                        "severity":    p.get("severity", "Medium"),
-                        "category":    p.get("category", "Other"),
-                        "description": p.get("description", ""),
-                        "attack_path": p.get("attack_path", ""),
-                        "remediation": p.get("remediation", ""),
-                        "detections":  detections,
-                        "cwe":         p.get("cwe", []),
-                        "tags":        p.get("tags", []) + ["crawled"],
-                        "source":      "community",
-                        "enabled":     True,
-                    }
-                    rules_api.create_rule(rule)
-                    added    += 1
-                    imported_titles.append(title)
-                except Exception:
-                    pass
+                # Crawled files store patterns under "detection"."patterns"
+                # Fall back to top-level "patterns" or "detections" for other formats.
+                raw_patterns = (
+                    p.get("detection", {}).get("patterns")
+                    or p.get("patterns")
+                    or p.get("detections")
+                    or []
+                )
+                patterns = []
+                for det in raw_patterns:
+                    pat = det.get("pattern") or det.get("regex", "")
+                    if pat:
+                        patterns.append({
+                            "pattern":    pat,
+                            "flags":      det.get("flags", "i"),
+                            "file_types": det.get("file_types", [".java", ".kt"]),
+                        })
+                if not patterns:
+                    continue
+
+                meta = p.get("metadata", {})
+                rule = {
+                    "id":           rule_id,
+                    "title":        title,
+                    "severity":     p.get("severity", "Medium"),
+                    "category":     p.get("category", "Other"),
+                    "description":  p.get("description", ""),
+                    "attack_path":  p.get("attack_path", ""),
+                    "remediation":  p.get("remediation", ""),
+                    "patterns":     patterns,
+                    "cwe":          meta.get("cwe", p.get("cwe", [])),
+                    "cve":          meta.get("cve", p.get("cve", [])),
+                    "references":   meta.get("references", p.get("references", [])),
+                    "tags":         list({*p.get("tags", []), "crawled"}),
+                    "confidence":   meta.get("confidence", "medium"),
+                }
+                rules_api.create_custom_rule(rule)
+                added += 1
+                existing_ids.add(rule_id)
+                imported_titles.append(title)
+            except Exception:
+                pass
 
         # Build a log summary
         log_lines = []
@@ -7469,11 +7501,18 @@ def api_intel_sources_sync():
                 "error":    getattr(stats, "errors", [""])[0] if getattr(stats, "errors", []) else "",
             }
 
+        # Total crawled rules already in the system
+        total_crawled = sum(
+            1 for r in rules_api.get_all_rules()
+            if "crawled" in r.get("tags", [])
+        )
+
         return jsonify({
             "success":        True,
             "sources":        len(result.source_stats),
             "found":          result.patterns_found,
             "added":          added,
+            "total_crawled":  total_crawled,
             "log":            "\n".join(log_lines),
             "source_details": source_details,
             "imported":       imported_titles[:20],
@@ -7685,7 +7724,7 @@ _db.migrate_from_files(REPORTS_FOLDER)
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="MSRA — Mobile Security Review Assistant")
-    p.add_argument("--port", type=int, default=5000)
+    p.add_argument("--port", type=int, default=int(os.environ.get("PORT", 5001)))
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--debug", action="store_true")
     p.add_argument("--no-semgrep", action="store_true",
