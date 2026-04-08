@@ -20,6 +20,7 @@ import shutil
 import sys
 import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 import uuid
 import zipfile
 import tempfile
@@ -1080,6 +1081,16 @@ def _extract_authority(finding: dict, package: str) -> str:
 def _set_status(scan_id: str, **kw):
     _db.upsert_scan(scan_id, **kw)
 
+
+# ── Concurrency pools ─────────────────────────────────────────────────────────
+# Scan pool: max 2 scans running at once (decompile + static analysis is CPU-heavy).
+# Excess uploads are queued by the executor and start automatically when a slot frees.
+_SCAN_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="scan")
+
+# Dynamic pool: max 3 concurrent finding-verification jobs.
+# Each job probes one finding via ADB; I/O-bound so 3 workers gives ~3x throughput.
+# Per-device serialisation is handled by ADB's own command queuing.
+_DYN_POOL  = ThreadPoolExecutor(max_workers=3, thread_name_prefix="dyn")
 
 # ── Simple in-memory rate limiter ────────────────────────────────────────────
 _rate_store: dict = {}  # ip -> (count, window_start)
@@ -6895,16 +6906,19 @@ def upload():
                     message="Queued…", platform=platform,
                     package=f.filename, apk=f.filename)
 
-    if is_ios:
-        threading.Thread(target=_run_ios_scan, args=(scan_id, file_path), daemon=True).start()
-    elif is_jar:
-        threading.Thread(target=_run_jar_scan, args=(scan_id, file_path), daemon=True).start()
-    elif is_exe:
-        threading.Thread(target=_run_exe_scan, args=(scan_id, file_path), daemon=True).start()
-    else:
-        threading.Thread(target=_run_scan, args=(scan_id, file_path), daemon=True).start()
+    # Queue depth before submission — tells the UI how many scans are waiting ahead
+    queued_ahead = _SCAN_POOL._work_queue.qsize()
 
-    return jsonify({"scan_id": scan_id, "platform": platform})
+    if is_ios:
+        _SCAN_POOL.submit(_run_ios_scan, scan_id, file_path)
+    elif is_jar:
+        _SCAN_POOL.submit(_run_jar_scan, scan_id, file_path)
+    elif is_exe:
+        _SCAN_POOL.submit(_run_exe_scan, scan_id, file_path)
+    else:
+        _SCAN_POOL.submit(_run_scan, scan_id, file_path)
+
+    return jsonify({"scan_id": scan_id, "platform": platform, "queued_ahead": queued_ahead})
 
 
 @app.route("/api/scan/<scan_id>/status")
@@ -6912,6 +6926,17 @@ def scan_status(scan_id: str):
     data = _db.get_scan(scan_id) or {"status": "unknown", "message": "Not found"}
     data.pop("traceback", None)
     return jsonify(data)
+
+
+@app.route("/api/queue/status")
+def api_queue_status():
+    """Return current scan pool and dynamic pool queue depths."""
+    scan_q = _SCAN_POOL._work_queue.qsize()   # pending in queue (not yet running)
+    dyn_q  = _DYN_POOL._work_queue.qsize()
+    return jsonify({
+        "scan_pool":  {"max_workers": 2, "queued": scan_q},
+        "dyn_pool":   {"max_workers": 3, "queued": dyn_q},
+    })
 
 
 @app.route("/api/test-ai", methods=["POST"])
@@ -7263,12 +7288,7 @@ def api_dyn_start_verify():
     )
 
     cfg = _load_dynamic_cfg()
-    t   = threading.Thread(
-        target=_dynamic_verify_worker,
-        args=(job_id, scan_id, finding_idx, finding, cfg, use_ai),
-        daemon=True
-    )
-    t.start()
+    _DYN_POOL.submit(_dynamic_verify_worker, job_id, scan_id, finding_idx, finding, cfg, use_ai)
     return jsonify({"job_id": job_id, "mode": scan_mode}), 202
 
 
