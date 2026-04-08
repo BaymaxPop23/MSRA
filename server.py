@@ -1109,7 +1109,11 @@ def _extract_report_body(html: str) -> tuple[str, str, str]:
     Pull the three reusable pieces out of a generated report HTML:
       - inner_css  : everything inside <style>...</style>
       - body_html  : the <div class="main">...</div> block + <footer> block
-      - scripts    : <script type="application/json">...</script> + the main <script>...</script>
+      - scripts    : ONLY the reportData JSON block + the final inline <script>
+
+    IMPORTANT: We extract scripts by matching at the start-of-line boundary so we
+    don't accidentally match <script> tags that appear inside JSON string values
+    (e.g. in malicious_apk_code PoC fields that contain XSS payloads).
     """
     # CSS
     css_match = re.search(r'<style>(.*?)</style>', html, re.DOTALL)
@@ -1125,11 +1129,33 @@ def _extract_report_body(html: str) -> tuple[str, str, str]:
 
     body_html = (main_html + '\n' + foot_html) if main_html else html
 
-    # Scripts (JSON data block + main script block)
-    scripts = '\n'.join(re.findall(r'<script[\s\S]*?</script>', html))
-    # Strip CDN script tags (we'll add them ourselves)
-    scripts = re.sub(r'<script src="https?://[^"]+"></script>', '', scripts)
+    # Extract ONLY the two real script blocks we need:
+    # 1. The JSON data block:  <script type="application/json" id="reportData">...</script>
+    # 2. The final inline JS:  <script>\n... (no src, no type/id, starts at column 0)
+    # We match ^<script to avoid matching <script> inside JSON string values.
+    script_parts = []
 
+    # JSON data block (identified by id="reportData")
+    json_block = re.search(
+        r'<script\s+type="application/json"\s+id="reportData"[^>]*>([\s\S]*?)</script>',
+        html,
+    )
+    if json_block:
+        script_parts.append(
+            f'<script type="application/json" id="reportData">'
+            f'{json_block.group(1)}</script>'
+        )
+
+    # Final inline script block — anchored at start of line to avoid false positives
+    inline_block = re.search(
+        r'^<script>\n([\s\S]+?)\n</script>',
+        html,
+        re.MULTILINE,
+    )
+    if inline_block:
+        script_parts.append(f'<script>\n{inline_block.group(1)}\n</script>')
+
+    scripts = '\n'.join(script_parts)
     return inner_css, body_html, scripts
 
 
@@ -3203,6 +3229,7 @@ let _allRules = [];
 let _rulesSort  = {{ key: 'severity', dir: 1 }};
 let _openRuleId = null;
 let _quickSevFilter = '';
+let _quickTagFilter = '';
 const SEV_ORDER = {{ Critical:0, High:1, Medium:2, Low:3, Info:4 }};
 
 async function loadIntelHub() {{
@@ -3362,7 +3389,6 @@ function renderRulesTable() {{
   }});
 }}
 
-let _quickTagFilter = '';
 function quickFilter(sev) {{
   _quickSevFilter = sev;
   _quickTagFilter = '';
