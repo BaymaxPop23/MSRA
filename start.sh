@@ -26,6 +26,16 @@ if ! command -v jadx &>/dev/null; then
   echo "  Install: brew install jadx  (macOS) or apt install jadx (Linux)"
 fi
 
+# Check WeasyPrint system dependencies (needed for PDF export)
+if ! python3 -c "from weasyprint import HTML" 2>/dev/null; then
+  echo "WARNING: WeasyPrint not working -- PDF export will be unavailable."
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    echo "  Fix: brew install pango cairo gdk-pixbuf && pip install weasyprint"
+  else
+    echo "  Fix: apt install libpango-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 && pip install weasyprint"
+  fi
+fi
+
 # Start server
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "Starting MSRA on port $PORT..."

@@ -3232,12 +3232,28 @@ async function exportReport() {{
   }}
 }}
 
-function exportPdf(scanId) {{
+async function exportPdf(scanId) {{
   if (!scanId) return;
-  const a = document.createElement('a');
-  a.href = '/api/scans/' + scanId + '/export/pdf';
-  a.download = 'msra_' + scanId + '.pdf';
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  showToast('Generating PDF…', 'info');
+  try {{
+    const res = await fetch('/api/scans/' + scanId + '/export/pdf');
+    if (!res.ok) {{
+      let msg = 'PDF generation failed';
+      try {{ const d = await res.json(); msg = d.error || msg; }} catch {{}}
+      showToast(msg, 'error');
+      return;
+    }}
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'msra_' + scanId + '.pdf';
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }} catch(e) {{
+    showToast('PDF export error: ' + e.message, 'error');
+  }}
 }}
 
 // ── DELETE SCAN ──────────────────────────────────────────────
