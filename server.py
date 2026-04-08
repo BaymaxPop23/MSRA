@@ -592,10 +592,23 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
         if apk_candidates:
             # ADB install breaks if the filename contains shell-special chars
             # like parentheses or commas (e.g. apkmirror filenames).
-            # Copy to a clean temp path before installing.
+            # Also unwrap XAPK/APKM bundles to extract base.apk first.
             import tempfile as _tempfile
+            _src_apk = apk_candidates[0]
+            # If the file is a zip bundle containing base.apk, extract it
+            try:
+                if zipfile.is_zipfile(str(_src_apk)):
+                    with zipfile.ZipFile(str(_src_apk)) as _zf:
+                        if "base.apk" in _zf.namelist():
+                            _tmp_base = Path(_tempfile.gettempdir()) / "msra_base.apk"
+                            _tmp_base.write_bytes(_zf.read("base.apk"))
+                            _src_apk = _tmp_base
+                            _update_job(job_id, progress=21,
+                                        message="XAPK bundle detected — extracting base.apk…")
+            except Exception:
+                pass
             _tmp_apk = Path(_tempfile.gettempdir()) / "msra_install.apk"
-            shutil.copy2(str(apk_candidates[0]), str(_tmp_apk))
+            shutil.copy2(str(_src_apk), str(_tmp_apk))
             apk_path = str(_tmp_apk)
             _serial_args = ["-s", device_serial] if device_serial else []
             # Disable Play Protect / package verifier so ADB installs aren't blocked
@@ -627,6 +640,11 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
                 elif "verification_failure" in install_combined or "install_failed_verification" in install_combined:
                     msg = ("Install blocked by Play Protect even after disabling verifier. "
                            "On device: Play Store → Profile → Play Protect → disable 'Scan apps with Play Protect'.")
+                elif "install_parse_failed" in install_combined or "unexpected_exception" in install_combined:
+                    msg = ("APK parse failed — the file may be an XAPK/APKS bundle (multiple split APKs) "
+                           "rather than a single APK. Download the full universal APK from APKMirror "
+                           "(look for the '(nodpi)' or 'universal' variant, not the '(bundle)' one) "
+                           "and re-scan. Alternatively extract the base.apk from the XAPK zip manually.")
                 else:
                     msg = f"APK install failed: {raw[:200]}"
                 _update_job(job_id, status="error", message=msg, progress=22)
@@ -6626,10 +6644,11 @@ def _run_ios_scan(scan_id: str, ipa_path: Path):
         generate_html_report(wrapped, str(out_dir / "report.html"), report_meta)
 
         findings_data = {
-            "package":  pkg,
-            "apk":      ipa_path.name,
-            "platform": "ios",
-            "findings": findings,
+            "package":        pkg,
+            "apk":            ipa_path.name,
+            "platform":       "ios",
+            "total_findings": len(findings),
+            "findings":       findings,
         }
         (out_dir / "findings.json").write_text(
             json.dumps(findings_data, indent=2), encoding="utf-8"
@@ -6686,10 +6705,11 @@ def _run_jar_scan(scan_id: str, jar_path: Path):
         generate_html_report(wrapped, str(out_dir / "report.html"), report_meta)
 
         findings_data = {
-            "package":  pkg,
-            "apk":      jar_path.name,
-            "platform": "jar",
-            "findings": findings,
+            "package":        pkg,
+            "apk":            jar_path.name,
+            "platform":       "jar",
+            "total_findings": len(findings),
+            "findings":       findings,
         }
         (out_dir / "findings.json").write_text(
             json.dumps(findings_data, indent=2), encoding="utf-8"
@@ -6748,10 +6768,11 @@ def _run_exe_scan(scan_id: str, exe_path: Path):
         generate_html_report(wrapped, str(out_dir / "report.html"), report_meta)
 
         findings_data = {
-            "package":  pkg,
-            "apk":      exe_path.name,
-            "platform": "exe",
-            "findings": findings,
+            "package":        pkg,
+            "apk":            exe_path.name,
+            "platform":       "exe",
+            "total_findings": len(findings),
+            "findings":       findings,
         }
         (out_dir / "findings.json").write_text(
             json.dumps(findings_data, indent=2), encoding="utf-8"
@@ -7629,10 +7650,27 @@ def export_pdf(scan_id: str):
 
 @app.route("/api/scans/<scan_id>", methods=["DELETE"])
 def api_delete_scan(scan_id: str):
-    """Delete a scan and all its data."""
+    """Delete a scan and all its data.
+
+    Returns 409 Conflict if the scan is still actively running, to prevent
+    destroying the output directory of a live scan worker thread.
+    """
     scan_dir = _scan_dir(scan_id)
-    if not scan_dir.exists() and not _db.get_scan(scan_id):
+    scan_rec = _db.get_scan(scan_id)
+    if not scan_dir.exists() and not scan_rec:
         return jsonify({"error": "Scan not found"}), 404
+
+    # Refuse to delete a scan that is actively running — the worker thread
+    # still holds references to files inside scan_dir and will crash/stop
+    # if we rmtree it beneath it.
+    active_statuses = {"queued", "decompiling", "scanning", "reporting"}
+    current_status = (scan_rec or {}).get("status", "")
+    if current_status in active_statuses:
+        return jsonify({
+            "error": f"Cannot delete a scan that is currently '{current_status}'. "
+                     "Wait for it to finish or reach an error state first."
+        }), 409
+
     shutil.rmtree(scan_dir, ignore_errors=True)
     _db.delete_scan(scan_id)
     return jsonify({"success": True})
