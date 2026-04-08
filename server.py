@@ -4195,13 +4195,9 @@ async function runBlogSync() {{
 
     log.textContent = data.log || '';
 
-    const added   = data.added   || 0;
-    const found   = data.found   || 0;
-    const sources = data.sources || 0;
-
-    const added   = data.added   || 0;
-    const found   = data.found   || 0;
-    const sources = data.sources || 0;
+    const added        = data.added   || 0;
+    const found        = data.found   || 0;
+    const sources      = data.sources || 0;
     const totalCrawled = data.total_crawled || 0;
 
     if (added > 0) {{
