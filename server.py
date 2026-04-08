@@ -3321,7 +3321,7 @@ function renderRulesTable() {{
   if (meta) meta.textContent = `Showing ${{filtered.length}} of ${{_allRules.length}} rules`;
 
   // Update sort headers
-  ['severity','title','category','source'].forEach(k => {{
+  ['severity','title','category','source','created_at'].forEach(k => {{
     const th = document.getElementById('th-'+k);
     if (th) {{
       th.className = 'sortable' + (_rulesSort.key===k ? ' sort-'+(_rulesSort.dir===1?'asc':'desc') : '');
@@ -3331,7 +3331,7 @@ function renderRulesTable() {{
   const tbody = document.getElementById('rulesTbody');
   tbody.innerHTML = '';
   filtered.forEach(rule => {{
-    const isCustom  = rule.source === 'custom';
+    const isCustom  = rule.source === 'custom' || (rule.tags||[]).includes('crawled');
     const isIos     = rule.platform === 'ios';
     const isJar     = rule.platform === 'jar';
     const isExe     = rule.platform === 'exe';
@@ -3381,6 +3381,7 @@ function renderRulesTable() {{
       <td><span class="det-pill"><i class="fa-solid ${{detIcon}}"></i> ${{escHtml(rule.detection_type)}}</span></td>
       <td>${{cweHtml || '<span style="color:var(--text3);font-size:11px">—</span>'}}</td>
       <td><span class="src-pill ${{escHtml(rule.source)}}">${{escHtml(rule.source)}}</span></td>
+      <td style="font-size:10px;color:var(--text3);white-space:nowrap">${{rule.created_at ? new Date(rule.created_at*1000).toLocaleDateString('en-US',{{month:'short',day:'numeric',year:'numeric'}}) : '<span style="color:var(--text3)">—</span>'}}</td>
       <td style="text-align:right">
         ${{isCustom ? `<button class="btn btn-sm" style="padding:3px 8px;font-size:10px;color:var(--critical);border-color:rgba(239,68,68,.25)" onclick="event.stopPropagation();deleteRule('${{escHtml(rule.id)}}')" title="Delete"><i class="fa-solid fa-trash"></i></button>` : ''}}
         <i class="fa-solid fa-chevron-right" style="color:var(--text3);font-size:10px;margin-left:6px"></i>
@@ -5810,6 +5811,7 @@ def _build_intelligence_hub() -> str:
                 <th>Detection</th>
                 <th>CWE</th>
                 <th class="sortable" id="th-source" onclick="sortBy('source')">Source</th>
+                <th class="sortable" id="th-created_at" onclick="sortBy('created_at')" style="width:90px">Added</th>
                 <th style="width:60px"></th>
               </tr>
             </thead>
@@ -7453,7 +7455,9 @@ def api_intel_sources_sync():
         added = 0
         imported_titles: list = []
 
-        existing_ids = {r.get("id") for r in rules_api.get_all_rules()}
+        all_existing   = rules_api.get_all_rules()
+        existing_ids   = {r.get("id") for r in all_existing}
+        existing_titles = {r.get("title", "").strip().lower() for r in all_existing}
 
         for pf in sorted(crawled_root.rglob("*.json")) if crawled_root.exists() else []:
             try:
@@ -7461,8 +7465,10 @@ def api_intel_sources_sync():
                 rule_id = p.get("id") or p.get("rule_id") or f"crawled-{pf.stem}"
                 title   = p.get("title") or p.get("name") or rule_id
 
-                # Skip if already imported
+                # Skip if already imported (by ID or by title to prevent content duplicates)
                 if rule_id in existing_ids:
+                    continue
+                if title.strip().lower() in existing_titles:
                     continue
 
                 # Crawled files store patterns under "detection"."patterns"
@@ -7504,6 +7510,7 @@ def api_intel_sources_sync():
                 rules_api.create_custom_rule(rule)
                 added += 1
                 existing_ids.add(rule_id)
+                existing_titles.add(title.strip().lower())
                 imported_titles.append(title)
             except Exception:
                 pass

@@ -152,6 +152,7 @@ def _pattern_to_dict(raw: dict, source: str, overrides: Dict[str, List[str]],
         "source":         source,
         "platform":       raw.get("platform", platform),
         "test_cases":     raw.get("test_cases", []),
+        "created_at":     raw.get("created_at"),
     }
 
 
@@ -246,15 +247,18 @@ def toggle_rule(rule_id: str) -> dict:
     """Toggle a rule's enabled state. Returns {"id": ..., "enabled": ...}."""
     overrides = _load_overrides()
 
-    # Determine default enabled state from builtin file
+    # Determine default enabled state from any builtin pattern file
     original_enabled = True
-    builtin = DATA_DIR / "builtin" / "patterns.json"
-    if builtin.exists():
+    for builtin_name in ("patterns.json", "ios_patterns.json", "jar_patterns.json", "exe_patterns.json"):
+        builtin = DATA_DIR / "builtin" / builtin_name
+        if not builtin.exists():
+            continue
         try:
             data = json.loads(builtin.read_text())
             match = next((p for p in data.get("patterns", []) if p.get("id") == rule_id), None)
             if match is not None:
                 original_enabled = match.get("enabled", True)
+                break
         except Exception:
             pass
 
@@ -380,6 +384,7 @@ def _build_rule_dict(rule_id: str, data: dict) -> dict:
         "adb_category":data.get("adb_category", "general"),
         "enabled":     True,
         "tags":        data.get("tags", []),
+        "created_at":  int(time.time()),
         "detection": {
             "type":            det_type,
             "patterns":        data.get("patterns", []),
