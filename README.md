@@ -1,11 +1,15 @@
 # MSRA — Mobile Security Review Assistant
 
-Multi-platform security analysis for Android APK, iOS IPA, Java JAR, and Windows PE/EXE files. Pattern-based static detection, AI-assisted triage, and dynamic runtime verification.
-
 ![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![License MIT](https://img.shields.io/badge/license-MIT-green.svg)
 ![Patterns](https://img.shields.io/badge/patterns-215+-orange.svg)
 ![Platforms](https://img.shields.io/badge/platforms-Android%20%7C%20iOS%20%7C%20JAR%20%7C%20EXE-blueviolet.svg)
+
+MSRA is a multi-platform security scanner and web dashboard built for penetration testers and security researchers. It automates the tedious parts of mobile app security reviews — upload an APK, IPA, JAR, or EXE and within minutes get a fully triaged vulnerability report mapped to OWASP Mobile Top 10, CWEs, and severity ratings.
+
+It goes beyond pattern matching: MSRA decompiles Android apps with jadx and runs inter-procedural taint analysis to trace real data flows from source to sink. It then drives ADB to dynamically probe exported components with SQLi, path traversal, and intent injection payloads — confirming whether static findings are actually exploitable at runtime. Findings come with ready-to-use `adb` PoC commands so pentesters can move straight to exploitation and reporting.
+
+**AI (powered by Claude):** The AI-Enhanced Dynamic Scan passes runtime logcat, Frida hook output, and ADB probe results to Claude, which returns a structured true positive / false positive / uncertain verdict with confidence score and reasoning — cutting manual triage time dramatically. The Intelligence Hub lets you paste any blog URL or CVE and Claude auto-generates new detection rules; it also crawls 15 security research blogs (Oversecured, Project Zero, NowSecure, etc.) to keep rules current. AI features require an `ANTHROPIC_API_KEY` — everything else runs fully offline.
 
 ## Highlights
 
@@ -131,14 +135,62 @@ pip3 install -r requirements.txt
 
 ## Requirements
 
-| Dependency | Purpose | Install |
+### Python (required)
+
+| Package | Purpose |
+|---|---|
+| Python 3.8+ | Runtime — [python.org](https://python.org) |
+| `flask` | Web server |
+| `weasyprint` | PDF report export |
+| `pefile` | Windows PE / EXE / DLL scanning |
+
+Install all Python packages at once:
+```bash
+pip3 install -r requirements.txt
+```
+
+### System libraries — WeasyPrint PDF export
+
+WeasyPrint requires native system libraries. **Without these, PDF export will not work.**
+
+**macOS:**
+```bash
+brew install pango cairo gdk-pixbuf
+```
+
+**Ubuntu / Debian:**
+```bash
+sudo apt install libpango-1.0-0 libcairo2 libgdk-pixbuf-2.0-0
+```
+
+**Fedora / RHEL:**
+```bash
+sudo dnf install pango cairo gdk-pixbuf2
+```
+
+> `start.sh` will print a warning at startup if WeasyPrint is not working correctly.
+
+### External tools
+
+| Tool | Purpose | Install |
 |---|---|---|
-| Python 3.8+ | Runtime | [python.org](https://python.org) |
-| `flask`, `weasyprint` | Web server, PDF export | `pip3 install -r requirements.txt` |
-| `pefile` | Windows PE analysis (EXE/DLL scans) | included in requirements.txt |
-| `jadx` | APK decompilation (Android scans) | `brew install jadx` |
-| `adb` | Dynamic analysis (optional) | `brew install android-platform-tools` |
-| `ANTHROPIC_API_KEY` | AI-enhanced scan + PoC generation (optional) | [console.anthropic.com](https://console.anthropic.com) |
+| `jadx` | APK decompilation (required for Android scans) | `brew install jadx` / `apt install jadx` |
+| `adb` | Dynamic analysis — ADB probes (optional) | `brew install android-platform-tools` |
+| `frida-tools` | Runtime instrumentation hooks (optional) | `pip3 install frida-tools` |
+
+### AI features (optional)
+
+Set `ANTHROPIC_API_KEY` to enable:
+- AI-Enhanced Dynamic Scan (Claude verdict + reasoning)
+- PoC code generation
+- Intelligence Hub — URL-to-rule extraction and feed analysis
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+# or add to .env (copy from .env.example)
+```
+
+Get a key at [console.anthropic.com](https://console.anthropic.com). All scanning and heuristic dynamic analysis works fully offline without a key.
 
 ---
 
