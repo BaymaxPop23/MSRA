@@ -139,3 +139,11 @@ def usd_for_usage(model: str, usage: dict, overrides: Optional[dict] = None) -> 
     usd = (inp * p["input"] + out * p["output"]
            + cr * p["input"] * 0.10 + cw * p["input"] * 1.25) / 1_000_000
     return round(usd, 6)
+
+
+def model_info(model: str, overrides: Optional[dict] = None) -> Dict[str, object]:
+    """Routing/size/price facts the UI shows next to a model choice."""
+    price = price_for(model, overrides)
+    return {"api": "chat-completions" if uses_chat_completions(model) else "messages",
+            "context": context_window_for(model),
+            "price_in": price["input"], "price_out": price["output"]}

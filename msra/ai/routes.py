@@ -9,7 +9,7 @@ from flask import Blueprint, jsonify, request
 
 from . import learning, settings as S
 from .client import LLMError, get_client
-from .models import PRICING_NOTE, valid_model_id
+from .models import PRICING_NOTE, model_info, valid_model_id
 from .triage import select_findings, triage_findings
 
 bp = Blueprint("ai", __name__)
@@ -74,7 +74,22 @@ def ai_models():
         models = c.list_models(force=request.args.get("refresh") == "1")
     except Exception as e:           # never 500 the settings dialog
         return jsonify({"models": [], "error": str(e)[:200]}), 200
-    return jsonify({"models": models, "provider": c.provider.public()})
+    pricing = S.load().get("pricing")
+    enriched = [dict(m, **model_info(m["id"], pricing)) for m in models]
+    return jsonify({"models": enriched, "provider": c.provider.public(), "pricing_note": PRICING_NOTE})
+
+
+@bp.route("/api/ai/model-info")
+def ai_model_info():
+    mid = (request.args.get("model") or "").strip()
+    if not valid_model_id(mid):
+        return jsonify({"error": "invalid model id"}), 400
+    resolved = c_resolve(mid)
+    return jsonify(dict(id=mid, resolved=resolved, **model_info(resolved, S.load().get("pricing"))))
+
+
+def c_resolve(mid: str) -> str:
+    return _client().resolve(mid)
 
 
 @bp.route("/api/ai/settings", methods=["GET", "PUT"])
@@ -231,3 +246,13 @@ def ai_triage_cancel(scan_id: str):
         return jsonify({"error": "No AI triage running for this scan"}), 404
     ev.set()
     return jsonify({"ok": True})
+
+
+# ── UI asset ────────────────────────────────────────────────────────────
+
+@bp.route("/ai-assets/panel.js")
+def ai_panel_js():
+    from pathlib import Path
+    from flask import Response
+    js = (Path(__file__).parent / "static" / "panel.js").read_text(encoding="utf-8")
+    return Response(js, mimetype="application/javascript", headers={"Cache-Control": "no-cache"})

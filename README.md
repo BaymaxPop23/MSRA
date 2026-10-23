@@ -110,6 +110,34 @@ Run the tests with `make test` (needs `pip install pytest`).
 
 ---
 
+## AI features
+
+Everything AI is optional; scanning works fully offline without it. Open **AI** in the top bar to configure.
+
+**Providers** (credentials come from the environment only - MSRA never stores them):
+
+| Provider | Set |
+|---|---|
+| Anthropic (default) | `ANTHROPIC_API_KEY` |
+| Bedrock-style LLM gateway | `MSRA_LLM_BASE_URL` + `MSRA_LLM_TOKEN` (optional: `MSRA_LLM_AUTH_HEADER`, `MSRA_LLM_API_PATH`, `MSRA_LLM_CHAT_PATH`, `MSRA_LLM_MODELS_PATH`) |
+
+With a gateway, Claude models use the Messages API and every other vendor (DeepSeek, Qwen, Llama, Nova, ...) is routed to chat-completions automatically. The model list is fetched live from the gateway.
+
+**Choose a model per feature** in *AI Settings*: finding triage, dynamic scan verdicts, PoC generation, intel rule extraction and quick checks. Pick from the catalog or type any model id; bare names (`sonnet`, `opus`, `haiku`, `fable`) resolve to exact ids, and MSRA warns when a provider silently answers with a different model. Each row shows the API used, context window and an estimated price, and has a **Test** button. Set a **spend cap** to stop AI calls once it is reached.
+
+**AI Triage** reviews un-triaged findings with N independent verifiers, each through a different lens (reachability, input control, mitigations). A finding is called *likely real* only when all N agree and *likely false positive* only on a majority. Results show as badges on the findings list and in the finding drawer. They are advisory: your own triage decision always wins, and findings you have already triaged are skipped.
+
+**It learns from you.** Every False Positive / Confirmed decision is tallied per rule. Rules you keep rejecting are listed in *AI Settings -> Learning from your triage* (with a one-click disable), a rule's track record is shown next to its findings, and the AI verifier is told each rule's history.
+
+**Safety.** Anything originating in an app or on the web (code snippets, logcat, blog text) is wrapped in a random per-request delimiter and treated strictly as data; secrets and tokens are masked before text is sent to a model. Rules produced from AI or crawled content are imported **disabled** under server-generated ids and must be enabled by an analyst.
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `MSRA_AI_CONFIG` | `data/custom/ai_config.json` | Where model choices/budget are saved (no credentials). |
+| `MSRA_CLAUDE_MODEL`, `MSRA_CLAUDE_FAST_MODEL` | unset | Legacy defaults, used until you pick a model in the UI. |
+
+---
+
 ## Updating
 
 MSRA ships an `update.sh` script that pulls the latest code, updates dependencies, and restarts the server in one step.
