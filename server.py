@@ -3318,7 +3318,7 @@ function runPocGeneration() {{
     description:        finding.description       || '',
     severity:           finding.severity          || '',
     category:           finding.category          || '',
-    component:          ev.file ? ev.file.split('/').pop().replace(/\.(java|kt)$/, '') : '',
+    component:          ev.file ? ev.file.split('/').pop().replace(/\\.(java|kt)$/, '') : '',
     authority:          pkg + '.provider',
     snippet:            ev.snippet                || finding._liveSnippet || '',
     file_path:          ev.file                   || '',
@@ -3525,7 +3525,7 @@ function populateCategoryFilter(rules) {{
   cats.forEach(c => {{
     const opt = document.createElement('option');
     opt.value = c;
-    opt.textContent = c.replace(/OWASP-M\d+-/,'').replace(/-/g,' ');
+    opt.textContent = c.replace(/OWASP-M\\d+-/,'').replace(/-/g,' ');
     sel.appendChild(opt);
   }});
 }}
@@ -3628,7 +3628,7 @@ function renderRulesTable() {{
         <div class="rule-title-cell">${{platBadge}}${{escHtml(rule.title)}}</div>
         <code class="rule-id-cell">${{escHtml(rule.id)}}</code>
       </td>
-      <td><span class="cat-pill" title="${{escHtml(rule.category)}}">${{escHtml(rule.category.replace(/OWASP-M\d+-/,''))}}</span></td>
+      <td><span class="cat-pill" title="${{escHtml(rule.category)}}">${{escHtml(rule.category.replace(/OWASP-M\\d+-/,''))}}</span></td>
       <td><span class="det-pill"><i class="fa-solid ${{detIcon}}"></i> ${{escHtml(rule.detection_type)}}</span></td>
       <td>${{cweHtml || '<span style="color:var(--text3);font-size:11px">—</span>'}}</td>
       <td><span class="src-pill ${{escHtml(rule.source)}}">${{escHtml(rule.source)}}</span></td>
@@ -3694,7 +3694,7 @@ function openRuleDetail(id) {{
   if (pills) {{
     pills.innerHTML = `
       <span class="sev-dot ${{escHtml(rule.severity)}}" style="font-size:12px">${{escHtml(rule.severity)}}</span>
-      <span class="cat-pill">${{escHtml(rule.category.replace(/OWASP-M\d+-/,''))}}</span>
+      <span class="cat-pill">${{escHtml(rule.category.replace(/OWASP-M\\d+-/,''))}}</span>
       <span class="src-pill ${{escHtml(rule.source)}}">${{escHtml(rule.source)}}</span>`;
   }}
 
@@ -3828,7 +3828,7 @@ function openRuleDetail(id) {{
   const refDiv = document.getElementById('rdpRefs');
   if (refDiv) {{
     refDiv.innerHTML = (rule.references||[]).map(r => {{
-      const lbl = r.replace(/^https?:\/\/(www\.)?/,'').split('/').slice(0,2).join('/');
+      const lbl = r.replace(/^https?:\\/\\/(www\\.)?/,'').split('/').slice(0,2).join('/');
       return `<a class="ref-link" href="${{escHtml(r)}}" target="_blank" rel="noopener"><i class="fa-solid fa-arrow-up-right-from-square" style="font-size:9px;flex-shrink:0"></i> ${{escHtml(lbl)}}</a>`;
     }}).join('') || '<span style="color:var(--text3);font-size:13px">No references</span>';
   }}
@@ -4190,7 +4190,7 @@ function injectDynVerifyButtons(scanId) {{
     if (!header) return;
     const sev   = card.dataset.sev || '';
     const title = card.querySelector('.card-title')?.textContent?.trim()
-                  .replace(/^#\d+\s*/, '') || `Finding ${{idx+1}}`;
+                  .replace(/^#\\d+\\s*/, '') || `Finding ${{idx+1}}`;
     const desc  = card.querySelector('.desc-text')?.textContent?.trim() || '';
     const cat   = card.dataset.cat || '';
     const btn   = document.createElement('button');
@@ -4288,7 +4288,7 @@ function renderDynJobHTML(job) {{
     job.status==='done' ? (v==='true_positive'?'done_tp':v==='false_positive'?'done_fp':'queued') : job.status] || 'queued';
   const iconI   = {{queued:'fa-clock',running:'fa-circle-notch fa-spin',done_tp:'fa-triangle-exclamation',done_fp:'fa-check-circle',error:'fa-xmark-circle'}}[iconCls] || 'fa-clock';
   const badgeCls = {{true_positive:'true-positive',false_positive:'false-positive',uncertain:'uncertain'}}[v] || 'running';
-  const badgeTxt = v ? v.replace('_',' ').replace(/\b\w/g,c=>c.toUpperCase()) : (job.status==='error'?'Error':'Running');
+  const badgeTxt = v ? v.replace('_',' ').replace(/\b\\w/g,c=>c.toUpperCase()) : (job.status==='error'?'Error':'Running');
   const pct     = job.progress || 0;
   const barCls  = v==='true_positive'?'done-tp':v==='false_positive'?'done-fp':'';
   return `
@@ -4743,7 +4743,7 @@ function renderNextPage() {{
     if (ev.snippet) {{
       const lines = ev.snippet.split('\\n');
       for (const ln of lines) {{
-        const stripped = ln.replace(/^\d+:\s*/, '').trim();
+        const stripped = ln.replace(/^\\d+:\\s*/, '').trim();
         if (stripped) {{ snippetLine = stripped; break; }}
       }}
     }}
@@ -4839,7 +4839,7 @@ function openDrawer(f) {{
 
   const refLinks = (f.references||[]).slice(0,4).map(r =>
     `<a href="${{escHtml(r)}}" target="_blank" rel="noopener" class="drawer-ref-link">
-      <i class="fa-solid fa-link" style="font-size:10px"></i> ${{escHtml(r.replace(/^https?:\/\//,'').substring(0,60))}}
+      <i class="fa-solid fa-link" style="font-size:10px"></i> ${{escHtml(r.replace(/^https?:\\/\\//,'').substring(0,60))}}
     </a>`
   ).join('');
 
@@ -6859,6 +6859,20 @@ def api_export_sarif(scan_id: str):
         mimetype="application/json",
         headers={"Content-Disposition": f'attachment; filename="{_sec.header_filename(pkg)}_msra.sarif"'},
     )
+
+
+@app.route("/api/scans/<scan_id>/sbom.json")
+def export_sbom(scan_id: str):
+    """CycloneDX 1.5 SBOM built from the scan's decompiled build metadata."""
+    from msra.analysis.sbom import collect_components, to_cyclonedx
+    dec = _scan_dir(scan_id) / "decompiled"
+    if not dec.is_dir():
+        return jsonify({"error": "No decompiled output for this scan (it may have been pruned)"}), 404
+    rec = _db.get_scan(scan_id) or {}
+    doc = to_cyclonedx(collect_components(str(dec)), rec.get("package") or scan_id)
+    resp = jsonify(doc)
+    resp.headers["Content-Disposition"] = f'attachment; filename="{_sec.header_filename(scan_id)}-sbom.json"'
+    return resp
 
 
 @app.route("/api/scans/<scan_id>/export/csv")

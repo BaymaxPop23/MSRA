@@ -114,6 +114,7 @@ Run the tests with `make test` (needs `pip install pytest`).
 
 - **Hybrid apps:** React Native bundles (plain JS and Hermes bytecode), Flutter `libapp.so`, Xamarin assemblies and Unity metadata are detected and scanned for hardcoded secrets, since jadx only decompiles the Java/Kotlin shell.
 - **Taint + ICC:** the web scan and the CLI (`msra scan`, skip with `--no-taint`) both run the inter-procedural taint engine and the exported-component ICC chain analysis.
+- **SBOM / vulnerable dependencies:** libraries are inventoried offline from build metadata (CycloneDX 1.5 at `/api/scans/<id>/sbom.json`). Set `MSRA_OSV_LOOKUP=1` to check them against OSV.dev; only public `group:artifact` + version coordinates are sent.
 - **Permission rules** (`permission-install-packages`, `-system-alert-window`, `-bind-accessibility`, `-device-admin`) are evaluated natively and respect the Intelligence Hub toggles.
 
 ## Operations & scaling

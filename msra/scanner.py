@@ -204,6 +204,11 @@ class Scanner:
             findings.extend(scan_hybrid(self.decompiled_dir))
         except Exception as exc:                    # never let this kill a scan
             print(f"[!] Hybrid-framework scan warning: {exc}")
+        try:
+            from .analysis.sbom import scan_sbom
+            findings.extend(scan_sbom(self.decompiled_dir))
+        except Exception as exc:
+            print(f"[!] SBOM scan warning: {exc}")
 
         # Deduplicate by (rule_id, file, line)
         findings = self._deduplicate_findings(findings)
