@@ -163,6 +163,7 @@ def _pattern_to_dict(raw: dict, source: str, overrides: Dict[str, List[str]],
         "tags":           raw.get("tags", []),
         "adb_category":   raw.get("adb_category", "general"),
         "enabled":        enabled,
+        "default_enabled": default_enabled,
         "source":         source,
         "platform":       raw.get("platform", platform),
         "test_cases":     raw.get("test_cases", []),
@@ -291,46 +292,47 @@ def _validate_patterns(data: dict) -> None:
                 "catastrophic backtracking (ReDoS); please rewrite it")
 
 
+def _original_enabled(rule_id: str) -> bool:
+    """Default enabled state of a rule from its source file (before overrides)."""
+    for rule in _compute_all_rules():
+        if rule["id"] == rule_id:
+            return bool(rule.get("default_enabled", True))
+    return True
+
+
+def _current_enabled(rule_id: str, overrides: Dict[str, List[str]], original: bool) -> bool:
+    if rule_id in overrides.get("disabled", []):
+        return False
+    if rule_id in overrides.get("enabled", []):
+        return True
+    return original
+
+
+def set_rule_enabled(rule_id: str, enabled: bool) -> dict:
+    """Explicit, idempotent enable/disable. Returns {"id", "enabled"}.
+
+    Raises ValueError for an unknown rule id so a typo can never be silently
+    recorded as an override for some other rule."""
+    if rule_id not in {r["id"] for r in _compute_all_rules()}:
+        raise ValueError(f"Unknown rule '{rule_id}'")
+    original = _original_enabled(rule_id)
+    with _WRITE_LOCK:
+        overrides = _load_overrides()
+        disabled = [r for r in overrides.get("disabled", []) if r != rule_id]
+        enabled_l = [r for r in overrides.get("enabled", []) if r != rule_id]
+        if enabled != original:
+            (enabled_l if enabled else disabled).append(rule_id)
+        overrides["disabled"], overrides["enabled"] = disabled, enabled_l
+        _save_overrides(overrides)
+    _invalidate_cache()
+    return {"id": rule_id, "enabled": enabled}
+
+
 def toggle_rule(rule_id: str) -> dict:
     """Toggle a rule's enabled state. Returns {"id": ..., "enabled": ...}."""
     overrides = _load_overrides()
-
-    # Determine default enabled state from any builtin pattern file
-    original_enabled = True
-    for builtin_name in ("patterns.json", "ios_patterns.json", "jar_patterns.json", "exe_patterns.json"):
-        builtin = DATA_DIR / "builtin" / builtin_name
-        if not builtin.exists():
-            continue
-        try:
-            data = json.loads(builtin.read_text())
-            match = next((p for p in data.get("patterns", []) if p.get("id") == rule_id), None)
-            if match is not None:
-                original_enabled = match.get("enabled", True)
-                break
-        except Exception:
-            pass
-
-    # Determine current state
-    if rule_id in overrides.get("disabled", []):
-        current = False
-    elif rule_id in overrides.get("enabled", []):
-        current = True
-    else:
-        current = original_enabled
-
-    new_state = not current
-
-    disabled = [r for r in overrides.get("disabled", []) if r != rule_id]
-    enabled  = [r for r in overrides.get("enabled",  []) if r != rule_id]
-
-    if new_state != original_enabled:
-        (enabled if new_state else disabled).append(rule_id)
-
-    overrides["disabled"] = disabled
-    overrides["enabled"]  = enabled
-    _save_overrides(overrides)
-    _invalidate_cache()
-    return {"id": rule_id, "enabled": new_state}
+    current = _current_enabled(rule_id, overrides, _original_enabled(rule_id))
+    return set_rule_enabled(rule_id, not current)
 
 
 def create_custom_rule(data: dict) -> dict:
@@ -339,7 +341,8 @@ def create_custom_rule(data: dict) -> dict:
     rules   = _load_user_rules()
     rule_id = (data.get("id") or "").strip() or ("custom-" + uuid.uuid4().hex[:8])
 
-    if any(r.get("id") == rule_id for r in rules):
+    if any(r.get("id") == rule_id for r in rules) or rule_id in {r["id"] for r in _compute_all_rules()}:
+        # Includes built-in iOS/JAR/EXE rules: a custom rule must never shadow a shipped detection
         raise ValueError(f"Rule ID '{rule_id}' already exists")
 
     rule = _build_rule_dict(rule_id, data)
@@ -430,7 +433,7 @@ def _build_rule_dict(rule_id: str, data: dict) -> dict:
         "attack_path": data.get("attack_path", ""),
         "remediation": data.get("remediation", ""),
         "adb_category":data.get("adb_category", "general"),
-        "enabled":     True,
+        "enabled":     bool(data.get("enabled", True)),
         "tags":        data.get("tags", []),
         "created_at":  int(time.time()),
         "detection": {

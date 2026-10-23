@@ -80,8 +80,42 @@ class PatternManager:
         if self.config.custom_patterns_dir:
             self._load_custom(self.config.custom_patterns_dir)
 
+        # 5. The analyst's own rules from the Intelligence Hub, then their
+        #    enable/disable choices - previously neither reached the scanner.
+        self._load_user_rules()
+        self._apply_overrides()
+
         self._loaded = True
         logger.info(f"Loaded {len(self._patterns)} patterns from {len(self._loaded_sources)} sources")
+
+    def _load_user_rules(self) -> None:
+        user_file = self.config.data_dir / "custom" / "user_rules.json"
+        if not user_file.exists():
+            return
+        try:
+            patterns = self._loader.load_file(user_file)
+        except Exception as e:                      # one bad file must not break scans
+            logger.warning(f"Skipping user rules {user_file.name}: {e}")
+            return
+        builtin_ids = set(self._patterns)
+        for pattern in patterns:
+            if pattern.id in builtin_ids:
+                # A custom rule may never silently replace a built-in detection
+                logger.warning(f"Ignoring user rule '{pattern.id}': id collides with a built-in rule")
+                continue
+            self._patterns[pattern.id] = pattern
+        if patterns:
+            self._loaded_sources.append(f"custom:{user_file.name}")
+
+    def _apply_overrides(self) -> None:
+        from .overrides import load_overrides
+        ov = load_overrides(self.config.data_dir)
+        for pid in ov["disabled"]:
+            if pid in self._patterns:
+                self._patterns[pid].enabled = False
+        for pid in ov["enabled"]:
+            if pid in self._patterns:
+                self._patterns[pid].enabled = True
 
     def _load_builtin(self) -> None:
         """Load built-in patterns from package data directory."""

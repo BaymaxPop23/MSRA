@@ -7875,19 +7875,34 @@ FEED CONTENT (untrusted source material):
     rules = _parse_json_array(raw_text)
 
     # ── 3. Import new rules (skip if ID already exists) ─────────────────
-    # AI-extracted rules come from untrusted web content, so they are imported
-    # DISABLED: an analyst reviews and enables them in the Intelligence Hub.
+    # AI-extracted rules come from untrusted web content. They are imported DISABLED
+    # under server-generated ids (never an id the model/feed chose, which could
+    # collide with and shadow a built-in detection) for an analyst to review.
     added = 0
     for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        slug = re.sub(r"[^a-z0-9]+", "-", str(rule.get("title", "rule")).lower()).strip("-")[:32] or "rule"
+        safe = {k: v for k, v in rule.items() if k not in ("id", "enabled")}
+        safe["id"] = f"ai-{slug}-{uuid.uuid4().hex[:6]}"
+        safe["enabled"] = False
+        safe["tags"] = [str(t)[:40] for t in (rule.get("tags") or [])[:10]] + ["ai-extracted", "needs-review"]
         try:
-            created = rules_api.create_custom_rule(rule)
-            if created.get("enabled", True):
-                rules_api.toggle_rule(created["id"])
-            added += 1
-        except ValueError:
-            pass  # duplicate ID / invalid rule - skip
+            created = rules_api.create_custom_rule(safe)
         except Exception:
-            pass
+            continue                      # invalid/duplicate rule - skip
+        if created.get("enabled"):        # fail closed: never leave an unreviewed rule active
+            try:
+                rules_api.set_rule_enabled(created["id"], False)
+                if rules_api.get_rule_by_id(created["id"]).get("enabled"):
+                    raise RuntimeError("still enabled")
+            except Exception:
+                try:
+                    rules_api.delete_custom_rule(created["id"])
+                except Exception:
+                    pass
+                continue
+        added += 1
 
     return jsonify({"added": added, "total_suggested": len(rules), "imported_disabled": True})
 

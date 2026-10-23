@@ -169,5 +169,6 @@ def test_feed_sync_wraps_untrusted_text_and_imports_rules_disabled(env, monkeypa
     prompt = next(q[2]["messages"][0]["content"] for q in fake.requests if q[2])
     assert "<untrusted_data_" in prompt and "addJavascriptInterface" in prompt
     # ...and the AI-authored rule starts disabled until an analyst enables it
-    stored = json.loads((tmp_path / "overrides.json").read_text())
-    assert "ai-rule-1" in stored["disabled"]
+    created = json.loads((tmp_path / "user_rules.json").read_text())["patterns"]
+    assert len(created) == 1 and created[0]["id"].startswith("ai-") and created[0]["id"] != "ai-rule-1"
+    assert created[0]["enabled"] is False
