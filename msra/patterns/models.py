@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import os
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 from typing import List, Optional, Pattern as RegexPattern
+
+logger = logging.getLogger(__name__)
 
 
 class Severity(Enum):
@@ -84,6 +88,51 @@ class PatternContext:
     within_lines: int = 10
 
 
+class TimedRegex:
+    """Compiled regex whose matching is bounded by a hard time limit.
+
+    Rules from user / crawled / AI sources are untrusted and the static ReDoS
+    checks in msra.patterns.safety can never be complete, so they execute here
+    with the third-party ``regex`` engine's ``timeout``. A match that exceeds the
+    limit is abandoned (that file simply yields no matches for the rule) instead
+    of hanging the scan. Without the ``regex`` package such rules cannot run.
+    """
+    TIMEOUT_S = float(os.environ.get("MSRA_RULE_TIMEOUT", "2"))
+    timeouts = 0                      # total abandoned matches (class-wide, for diagnostics)
+
+    def __init__(self, pattern: str, re_flags: int):
+        try:
+            import regex as _regex
+        except ImportError as exc:                       # fail closed
+            raise RuntimeError("the 'regex' package is required to run custom/crawled/AI rules "
+                               "(pip install regex)") from exc
+        self.pattern = pattern
+        self.flags = re_flags
+        self._rx = _regex.compile(pattern, re_flags)
+
+    def finditer(self, text: str):
+        try:
+            for m in self._rx.finditer(text, timeout=self.TIMEOUT_S):
+                yield m
+        except TimeoutError:
+            TimedRegex.timeouts += 1
+            logger.warning("rule regex exceeded %.1fs and was abandoned: %.80s", self.TIMEOUT_S, self.pattern)
+
+    def search(self, text: str):
+        try:
+            return self._rx.search(text, timeout=self.TIMEOUT_S)
+        except TimeoutError:
+            TimedRegex.timeouts += 1
+            return None
+
+    def match(self, text: str):
+        try:
+            return self._rx.match(text, timeout=self.TIMEOUT_S)
+        except TimeoutError:
+            TimedRegex.timeouts += 1
+            return None
+
+
 @dataclass
 class RegexDetection:
     """A single regex pattern with metadata."""
@@ -91,6 +140,7 @@ class RegexDetection:
     flags: str = "i"
     file_types: List[str] = field(default_factory=lambda: [".java", ".kt", ".xml"])
     context: Optional[PatternContext] = None
+    untrusted: bool = False           # True for user/crawled/AI rules -> time-bounded engine
     _compiled: Optional[RegexPattern] = field(default=None, repr=False)
 
     def compile(self) -> RegexPattern:
@@ -103,7 +153,8 @@ class RegexDetection:
                 re_flags |= re.MULTILINE
             if "s" in self.flags:
                 re_flags |= re.DOTALL
-            self._compiled = re.compile(self.pattern, re_flags)
+            self._compiled = (TimedRegex(self.pattern, re_flags) if self.untrusted
+                              else re.compile(self.pattern, re_flags))
         return self._compiled
 
     @property

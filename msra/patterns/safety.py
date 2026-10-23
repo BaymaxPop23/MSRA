@@ -64,20 +64,28 @@ def _has_repeat(sp) -> bool:
     return False
 
 
+def _fold(cp: int) -> set:
+    """All case variants of a code point. Rules are matched with IGNORECASE by default
+    (and (?i) can appear inline), so 'a' and 'A' must be treated as the same start char."""
+    ch = chr(cp)
+    return {cp, ord(ch.lower()[0]), ord(ch.upper()[0])}
+
+
 def _first_chars(sp):
-    """Set of code points a sub-pattern can start with, or None if not determinable."""
+    """Case-folded set of code points a sub-pattern can start with, or None if not determinable."""
     for op, av in sp:
         if op == _LITERAL:
-            return {av}
+            return _fold(av)
         if op == _IN:
-            out = set()
+            out: set = set()
             for kind, val in av:
                 if kind == _LITERAL:
-                    out.add(val)
+                    out |= _fold(val)
                 elif kind == _sre_const.RANGE:
                     if val[1] - val[0] > 255:
                         return None
-                    out.update(range(val[0], val[1] + 1))
+                    for cp in range(val[0], val[1] + 1):
+                        out |= _fold(cp)
                 else:
                     return None                      # NEGATE / CATEGORY: broad
             return out
@@ -101,27 +109,60 @@ def _overlapping_alternation(av) -> bool:
     return False
 
 
-def _walk(sp, under_unbounded: bool) -> Optional[str]:
+_INF = 10 ** 9
+_MAX_STACKED = 3          # unbounded repeats that can consume the same character, per sequence
+
+
+def _poly_problem(sp) -> Optional[str]:
+    """Polynomial backtracking: several unbounded repeats in one sequence that can all
+    consume the same characters (a*a*a*b, .*.*.*x, \\d+\\d+\\d+x ...)."""
+    # Only DIRECTLY adjacent repeats count: repeats separated by literal text
+    # (e.g. "[^)]*\\)...[^)]*") are normal in rules and far less costly.
+    universals = 0
+    counts: dict = {}
+    for op, av in sp:
+        if op in _REPEATS and av[1] == _MAXREPEAT:
+            fc = _first_chars(av[2])
+            if fc is None:
+                universals += 1
+            else:
+                for c in fc:
+                    counts[c] = counts.get(c, 0) + 1
+        else:
+            universals, counts = 0, {}              # a non-repeat item breaks the run
+        worst = (max(counts.values()) if counts else 0) + universals
+        if worst > _MAX_STACKED:
+            return "several adjacent unbounded repeats that overlap (polynomial backtracking risk)"
+    return None
+
+
+def _walk(sp, mult: int) -> Optional[str]:
+    """*mult* is the product of the repeat counts of every enclosing repeat (capped), so
+    bounded repeats compose: ((a+){3}){3} is treated like a 9-fold repeat."""
+    r = _poly_problem(sp)
+    if r:
+        return r
     for op, av in sp:
         if op in _REPEATS:
             lo, hi, body = av
-            unbounded = hi == _MAXREPEAT
-            if hi > 1 and _has_repeat(body) and (unbounded or hi > _MAX_NESTED_OUTER_REPEAT):
+            hi_eff = _INF if hi == _MAXREPEAT else hi
+            new_mult = mult if hi <= 1 else min(mult * hi_eff, _INF)
+            if hi > 1 and _has_repeat(body) and new_mult > _MAX_NESTED_OUTER_REPEAT:
                 return "nested quantifier (catastrophic backtracking / ReDoS risk)"
             for c in _children(op, av):
-                r = _walk(c, under_unbounded or (hi > 1 and unbounded))
+                r = _walk(c, new_mult)
                 if r:
                     return r
         elif op == _BRANCH:
-            if under_unbounded and _overlapping_alternation(av):
+            if mult > _MAX_NESTED_OUTER_REPEAT and _overlapping_alternation(av):
                 return "repeated alternation whose branches can overlap (ReDoS risk)"
             for c in _children(op, av):
-                r = _walk(c, under_unbounded)
+                r = _walk(c, mult)
                 if r:
                     return r
         else:
             for c in _children(op, av):
-                r = _walk(c, under_unbounded)
+                r = _walk(c, mult)
                 if r:
                     return r
     return None
@@ -139,7 +180,7 @@ def regex_problem(pattern: str) -> Optional[str]:
     except (re.error, RecursionError, OverflowError) as exc:
         return f"invalid regex: {exc}"
     try:
-        return _walk(parsed, False)
+        return _walk(parsed, 1)
     except RecursionError:
         return "regex too deeply nested"
 

@@ -126,6 +126,7 @@ class PatternManager:
                 continue
             # Crawler/AI-derived rules stay off until an analyst enables them
             pattern.enabled = default_enabled(pattern.tags, pattern.enabled)
+            self._mark_untrusted(pattern)
             self._patterns[pattern.id] = pattern
             loaded += 1
         if loaded:
@@ -192,11 +193,19 @@ class PatternManager:
         if custom_dir.exists():
             self._load_from_directory(custom_dir, "custom")
 
+    @staticmethod
+    def _mark_untrusted(pattern) -> None:
+        """Route this rule's regexes through the time-bounded engine."""
+        for det in pattern.detection.patterns:
+            det.untrusted = True
+
     def _load_from_directory(self, directory: Path, source_name: str,
                              exclude_prefixes: tuple = ()) -> None:
         """Load all pattern files from a directory."""
         patterns = self._loader.load_directory(directory, exclude_prefixes)
         for pattern in patterns:
+            if source_name != "builtin":            # community / crawled / custom dirs
+                self._mark_untrusted(pattern)
             # Later sources override earlier ones (by ID)
             self._patterns[pattern.id] = pattern
 
