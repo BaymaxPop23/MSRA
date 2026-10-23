@@ -361,11 +361,11 @@ class TaintEngine:
 
         method_pattern = re.compile(
             r'(?:(?:public|private|protected|static|final|synchronized|abstract|native|default)\s+)*'
-            r'(?:<[^>]*>\s*)?'          # optional generic return type
-            r'(?:[\w\[\]<>,\s]+\s+)?'  # return type (permissive)
+            r'(?:<[^>\n]{0,200}>\s*)?'  # optional generic return type (bounded)
+            r'(?:[\w\[\]<>,\s]{1,200}?\s+)?'  # return type (permissive, bounded)
             r'(\w+)\s*\('               # method name + opening paren
-            r'[^)]*\)\s*'               # parameters
-            r'(?:throws\s+[\w,\s]+)?\s*'
+            r'[^)]{0,1000}\)\s*'      # parameters (bounded)
+            r'(?:throws\s+[\w,\s]{1,200})?\s*'
             r'\{',                      # opening brace
             re.MULTILINE,
         )
@@ -403,19 +403,25 @@ class TaintEngine:
 
         return results
 
+    # Generic arguments are length-bounded and matching is per line (see
+    # _MAX_REGEX_LINE) so hostile `A<A<A<...` input cannot cause quadratic scans.
     _TYPE_DECL_RE = re.compile(
-        r'\b([A-Z]\w*)(?:<[^;(){}=]*>)?(?:\[\])?\s+(\w+)\s*(?==|;|,|\)|:)')
+        r'\b([A-Z]\w{0,80})(?:<[^;(){}=\n]{0,200}>)?(?:\[\])?\s{1,8}(\w{1,80})\s{0,4}(?==|;|,|\)|:)')
+    _MAX_REGEX_LINE = 2000
     _NOT_VARS = {"return", "new", "throw", "else", "case", "import", "package", "class",
                  "extends", "implements", "instanceof", "static", "final"}
 
     def _extract_var_types(self, content: str) -> Dict[str, str]:
         """Map variable/field/parameter name -> declared simple type (file-wide)."""
         types: Dict[str, str] = {}
-        for m in self._TYPE_DECL_RE.finditer(content):
-            type_name, var = m.group(1), m.group(2)
-            if var in self._NOT_VARS or var[0].isupper():
-                continue
-            types.setdefault(var, type_name)
+        for line in content.splitlines():
+            if len(line) > self._MAX_REGEX_LINE:
+                continue                  # minified / generated blobs
+            for m in self._TYPE_DECL_RE.finditer(line):
+                type_name, var = m.group(1), m.group(2)
+                if var in self._NOT_VARS or var[0].isupper():
+                    continue
+                types.setdefault(var, type_name)
         return types
 
     def _resolve_class(self, simple: str, imports: Dict[str, str], package: str) -> Optional[str]:

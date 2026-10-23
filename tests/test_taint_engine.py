@@ -147,3 +147,16 @@ def test_sql_sanitizer_is_type_specific(tmp_path):
     # ...but weak checks are no longer treated as sanitizers
     flows_local = _by_comp(_flows(tmp_path), "Local")
     assert flows_local and not flows_local[0].is_sanitized
+
+
+def test_hostile_input_does_not_blow_up(tmp_path):
+    import time
+    src = tmp_path / "sources" / "com" / "t"
+    src.mkdir(parents=True)
+    (src / "Evil.java").write_text(
+        "package com.t;\npublic class Evil {\n"
+        + "A<" * 20000 + "\n"
+        + "void f() {" + "x " * 50000 + "\n}\n}\n")
+    t0 = time.time()
+    TaintEngine(str(tmp_path), {"_package": "com.t"}).analyze()
+    assert time.time() - t0 < 5
