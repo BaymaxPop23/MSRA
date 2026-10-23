@@ -7,6 +7,7 @@ dangerous sinks (SQL, WebView, exec, file, crypto).
 """
 
 import os
+import bisect
 import re
 from collections import deque
 from dataclasses import dataclass, field
@@ -58,6 +59,9 @@ class TaintFlow:
     data_flow: str = "call-chain"
 
 
+_BRACE_RE = re.compile(r'[{}]')
+
+
 @dataclass
 class CallGraph:
     # (class, method) -> [(target_class, target_method, file, line)]
@@ -99,6 +103,8 @@ _SINK_PATTERNS: List[Tuple[str, str, str]] = [
     (r'new\s+SecretKeySpec\s*\(', "crypto", "High"),
     (r'Cipher\s*\.\s*getInstance\s*\(', "crypto", "High"),
 ]
+
+_SINK_RES = {rx: re.compile(rx) for rx, _t, _s in _SINK_PATTERNS}
 
 # Sink API display names keyed by regex prefix (used for labelling)
 _SINK_DISPLAY: Dict[str, str] = {
@@ -361,17 +367,15 @@ class TaintEngine:
         """
         results: List[Tuple[str, str, int]] = []
 
+        # Match just `name(params) [throws X] {`. Modifiers/return types are not needed to find a
+        # method and a permissive prefix made this scan quadratic on large decompiled trees.
         method_pattern = re.compile(
-            r'(?:(?:public|private|protected|static|final|synchronized|abstract|native|default)\s+)*'
-            r'(?:<[^>\n]{0,200}>\s*)?'  # optional generic return type (bounded)
-            r'(?:[\w\[\]<>,\s]{1,200}?\s+)?'  # return type (permissive, bounded)
-            r'(\w+)\s*\('               # method name + opening paren
-            r'[^)]{0,1000}\)\s*'      # parameters (bounded)
-            r'(?:throws\s+[\w,\s]{1,200})?\s*'
-            r'\{',                      # opening brace
-            re.MULTILINE,
+            r'\b(\w+)\s*\([^)]{0,1000}\)\s*'      # method name + parameters (bounded)
+            r'(?:throws\s+[\w,.\s]{1,200})?\s*'
+            r'\{',                                  # opening brace
         )
 
+        line_starts = [0] + [nl.end() for nl in re.finditer(r"\n", content)]
         for m in method_pattern.finditer(content):
             method_name = m.group(1)
             # Filter out known non-method keywords
@@ -387,18 +391,18 @@ class TaintEngine:
             if brace_pos == -1:
                 continue
 
-            start_line = content[:m.start()].count("\n") + 1
+            start_line = bisect.bisect_right(line_starts, m.start())
 
-            # Count braces to find matching close
+            # Count braces to find the matching close (regex jumps between braces)
             depth = 1
             pos = brace_pos + 1
-            while pos < len(content) and depth > 0:
-                ch = content[pos]
-                if ch == "{":
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                pos += 1
+            for bm in _BRACE_RE.finditer(content, pos):
+                depth += 1 if bm.group() == "{" else -1
+                if depth == 0:
+                    pos = bm.end()
+                    break
+            else:
+                pos = len(content)
 
             body = content[brace_pos:pos]
             results.append((method_name, body, start_line))
@@ -652,8 +656,10 @@ class TaintEngine:
                 }:
                     current_method = md.group(1)
 
+                if "(" not in line:
+                    continue                      # every sink pattern needs a call paren
                 for sink_regex, sink_type, severity in _SINK_PATTERNS:
-                    if re.search(sink_regex, line):
+                    if _SINK_RES[sink_regex].search(line):
                         api_name = self._label_sink(sink_regex)
                         snippet = self._build_snippet(lines, line_no)
 

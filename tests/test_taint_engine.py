@@ -215,3 +215,23 @@ def test_tainted_arg_in_wrong_position_is_not_verified(tmp_path):
     fl = _hop_flows(tmp_path, CONST_SRC, "Const")
     assert fl and fl[0].data_flow == "call-chain"
     assert fl[0].severity != "Critical"
+
+
+def test_method_extraction_handles_jadx_style_constructors_and_comments(tmp_path):
+    src = '''package com.t;
+public final /* synthetic */ class R implements Runnable {
+    public /* synthetic */ R(String a, int b) {
+        this.a = a;
+    }
+
+    @Override // java.lang.Runnable
+    public final void run() {
+        if (x) { y(); }
+    }
+}
+'''
+    e = TaintEngine(str(tmp_path), {})
+    got = {n: ln for n, _b, ln in e._extract_methods(src, src.splitlines(), "com.t.R", "R.java")}
+    assert {"R", "run"} <= set(got)
+    assert got["R"] == 3 and got["run"] == 8          # line numbers point at the declaration
+    assert e._method_params[("com.t.R", "R")] == ["a", "b"]
