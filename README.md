@@ -9,10 +9,25 @@ MSRA is a multi-platform security scanner and web dashboard built for penetratio
 
 It goes beyond pattern matching: MSRA decompiles Android apps with jadx and runs inter-procedural taint analysis to trace real data flows from source to sink. It then drives ADB to dynamically probe exported components with SQLi, path traversal, and intent injection payloads — confirming whether static findings are actually exploitable at runtime. Findings come with ready-to-use `adb` PoC commands so pentesters can move straight to exploitation and reporting.
 
-**AI (powered by Claude):** The AI-Enhanced Dynamic Scan passes runtime logcat, Frida hook output, and ADB probe results to Claude, which returns a structured true positive / false positive / uncertain verdict with confidence score and reasoning — cutting manual triage time dramatically. The Intelligence Hub lets you paste any blog URL or CVE and Claude auto-generates new detection rules; it also crawls 15 security research blogs (Oversecured, Project Zero, NowSecure, etc.) to keep rules current. AI features require an `ANTHROPIC_API_KEY` — everything else runs fully offline.
+**AI (optional, bring your own provider):** Pick a model per feature in the AI Settings dialog (Anthropic API, native AWS Bedrock, or a Bedrock-style gateway). AI triage runs independent verifier votes over each finding, dynamic scans get a true positive / false positive / uncertain verdict with reasoning, and the Intelligence Hub turns blog posts and CVEs into candidate detection rules that stay **disabled until you review them**. Secrets are masked before anything is sent to a model, and the app learns from your triage which rules are noisy. Everything else runs fully offline.
+
+## Screenshots
+
+| Dashboard | Findings |
+|---|---|
+| ![Dashboard](docs/screenshots/dashboard.jpg) | ![Findings](docs/screenshots/findings.jpg) |
+| **Taint flows** | **Finding detail with PoC** |
+| ![Taint flows](docs/screenshots/taint-flows.jpg) | ![Finding detail](docs/screenshots/finding-detail.jpg) |
+
+![AI settings](docs/screenshots/ai-settings.jpg)
+
+*Screenshots show a synthetic demo app (`com.demo.bank`) with deliberately planted vulnerabilities.*
 
 ## Highlights
 
+- **Taint analysis that checks its work** — call-chain flows are only marked verified when the tainted argument is traced into the callee's parameter all the way to the sink
+- **Secrets, SBOM and hybrid apps** — masked secret detection, CycloneDX SBOM with optional OSV lookup, React Native / Flutter / Xamarin / Unity payload scanning
+- **Hardened by default** — loopback bind, optional token auth, SSRF-safe fetching, ReDoS-guarded rules, crawled/AI rules imported disabled
 - **Web Dashboard** — Upload files, browse scans, triage findings in a single-page UI
 - **215+ Security Patterns** — Android (77), iOS (45), Java JAR (49), Windows PE (44)
 - **Multi-Platform Scanning** — APK / APKM / XAPK · IPA · JAR · EXE / DLL

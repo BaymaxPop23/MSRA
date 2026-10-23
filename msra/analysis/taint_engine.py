@@ -587,8 +587,8 @@ class TaintEngine:
         result: Dict[str, Tuple[str, bool]] = {}
 
         # Format 1 — scanner's list-based manifest_data (preferred)
-        for comp_type in ("activities", "services", "receivers", "providers"):
-            type_key = comp_type.rstrip("s")  # activity/service/receiver/provider
+        for comp_type, type_key in (("activities", "activity"), ("services", "service"),
+                                    ("receivers", "receiver"), ("providers", "provider")):
             for entry in self.manifest_data.get(comp_type, []):
                 if not isinstance(entry, dict):
                     continue

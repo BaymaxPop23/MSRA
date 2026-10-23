@@ -4738,14 +4738,19 @@ function renderNextPage() {{
       ? `<span class="fr-loc-file">${{escHtml(fileName)}}${{escHtml(lineNum)}}</span>`
       : '';
 
-    // Code snippet: first non-empty line of the snippet block
+    // Code snippet: the line that was actually matched (falls back to the first non-empty line)
     let snippetLine = '';
     if (ev.snippet) {{
       const lines = ev.snippet.split('\\n');
+      let firstLine = '';
       for (const ln of lines) {{
-        const stripped = ln.replace(/^\\d+:\\s*/, '').trim();
-        if (stripped) {{ snippetLine = stripped; break; }}
+        const m = ln.match(/^\\s*(\\d+):\\s?(.*)$/);
+        const stripped = (m ? m[2] : ln).trim();
+        if (!stripped) continue;
+        if (!firstLine) firstLine = stripped;
+        if (m && ev.line && parseInt(m[1], 10) === Number(ev.line)) {{ snippetLine = stripped; break; }}
       }}
+      if (!snippetLine) snippetLine = firstLine;
     }}
     const snippetHtml = snippetLine
       ? `<span class="fr-snippet" title="${{escHtml(snippetLine)}}">${{escHtml(snippetLine)}}</span>`
