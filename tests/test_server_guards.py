@@ -57,7 +57,13 @@ def test_dynamic_verify_rejects_bad_scan_id(client):
 
 
 def test_extract_from_url_blocks_internal(client, monkeypatch):
-    monkeypatch.setattr(server, "ANTHROPIC_API_KEY", "x")
+    class _Prov:
+        configured = True
+
+    class _Stub:
+        provider = _Prov()
+
+    monkeypatch.setattr(server, "_get_ai_client", lambda: _Stub())
     r = client.post("/api/intel/extract-from-url",
                     json={"url": "http://169.254.169.254/latest/meta-data/"})
     assert r.status_code == 400

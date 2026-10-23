@@ -306,6 +306,19 @@ def parse_json_block(text: str) -> Any:
     raise ValueError("no JSON found in model output")
 
 
+def parse_json_array(text: str) -> list:
+    """Extract the first JSON array from model output; [] when there is none."""
+    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", (text or "").strip(), flags=re.M)
+    s, e = t.find("["), t.rfind("]")
+    if s != -1 and e > s:
+        try:
+            val = json.loads(t[s:e + 1])
+            return val if isinstance(val, list) else []
+        except ValueError:
+            pass
+    return []
+
+
 _client_lock = threading.Lock()
 _client: Optional[LLMClient] = None
 

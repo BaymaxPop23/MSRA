@@ -35,6 +35,8 @@ class FakeLLM:
                     self._send(200, {"data": [
                         {"id": "anthropic.claude-sonnet-5-5"}, {"id": "deepseek.v3.2"},
                         {"id": "amazon.titan-embed-text-v2"}, {"id": "meta.llama4-70b"}]})
+                elif self.path == "/feed":
+                    self._send(200, {"items": ["Android WebView JS bridge abuse via addJavascriptInterface"]})
                 else:
                     self._send(404, {"error": "nope"})
 
