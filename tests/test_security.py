@@ -71,3 +71,26 @@ def test_rule_validation(tmp_path):
     ):
         with pytest.raises(ValueError):
             ra._validate_patterns(dict(bad))
+
+
+def test_device_shell_args_are_quoted():
+    """Payloads reach the provider verbatim but cannot break out of the shell."""
+    from msra.dynamic.device.adb_device import ADBDevice
+
+    sent = []
+
+    class Probe(ADBDevice):
+        def __init__(self):            # no real device
+            pass
+
+        def _shell(self, cmd, *a, **k):
+            sent.append(cmd)
+            return True, ""
+
+    d = Probe()
+    d.query_content_provider("content://a/x;reboot", ["id;id", "b"], "1' OR '1'='1; reboot")
+    d.start_activity("com.a", "Main;reboot", extras={"k;id": "v'; reboot #"}, data_uri="x';reboot")
+    joined = "\n".join(sent)
+    assert "--where '1'\"'\"' OR '\"'\"'1'\"'\"'='\"'\"'1; reboot'" in joined
+    assert "'content://a/x;reboot'" in joined and "'id;id:b'" in joined
+    assert "'com.a/Main;reboot'" in joined and "'k;id'" in joined

@@ -61,10 +61,10 @@ CLAUDE_FAST_MODEL = os.environ.get("MSRA_CLAUDE_FAST_MODEL", "claude-haiku-4-5-2
 # present it as "Authorization: Bearer <token>" / "X-MSRA-Token", or hold the
 # session cookie issued by POST /login.
 AUTH_TOKEN = os.environ.get("MSRA_AUTH_TOKEN", "")
-# Set by the __main__ block: when bound to loopback only, reject foreign Host
-# headers (DNS-rebinding defence).
-_LOOPBACK_ONLY = False
+_LOOPBACK_ONLY = False          # set by __main__; only used for startup warnings
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_ALLOWED_HOSTS = _LOOPBACK_HOSTS | {
+    h.strip().lower() for h in os.environ.get("MSRA_ALLOWED_HOSTS", "").split(",") if h.strip()}
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
@@ -80,12 +80,15 @@ _log = logging.getLogger(__name__)
 @app.before_request
 def _request_guards():
     import hmac
-    # 1. Host-header allowlist when bound to loopback (DNS rebinding).
-    if _LOOPBACK_ONLY:
+    # 1. Host-header allowlist (DNS rebinding). Enforced whenever no auth token
+    # is configured - independent of the bind address, so a container bound to
+    # 0.0.0.0 behind a loopback-published port is still protected. Add other
+    # hostnames with MSRA_ALLOWED_HOSTS=host1,host2.
+    if not AUTH_TOKEN:
         from urllib.parse import urlparse
         host = urlparse("//" + (request.host or "")).hostname or ""
-        if host.lower() not in _LOOPBACK_HOSTS:
-            return jsonify({"error": "Forbidden host"}), 403
+        if host.lower() not in _ALLOWED_HOSTS:
+            return jsonify({"error": "Forbidden host (set MSRA_ALLOWED_HOSTS or MSRA_AUTH_TOKEN)"}), 403
 
     # 2. Optional token auth. Programmatic clients send the raw token in a
     # header; browsers log in once via POST /login and keep a derived session
@@ -933,14 +936,14 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
                 ("Stacked",       "'; SELECT * FROM sqlite_master;--"),
                 ("Blind true",    "1' AND '1'='1"),
                 ("Comment bypass","1'--"),
-                ("Null byte",     "1\x00' OR '1'='1"),
+                ("Null byte",     "1%00' OR '1'='1"),   # literal NUL cannot be passed in argv
             ]
             for auth in all_authorities[:3]:
                 for payload_name, payload in sqli_payloads:
                     rc, out, err = _run_adb(
                         adb_prefix + ["shell", "content", "query",
                                       "--uri", f"content://{auth}/",
-                                      "--where", payload], timeout=10)
+                                      "--where", _sec.sh_quote(payload)], timeout=10)
                     combined = (out + err).strip()
                     if combined:
                         extra_evidence += (
@@ -955,7 +958,7 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
                                   "%2F..%2F..%2Fetc%2Fpasswd"]:
                     _, out2, _ = _run_adb(
                         adb_prefix + ["shell", "content", "query",
-                                      "--uri", f"content://{auth}/{traversal}"], timeout=8)
+                                      "--uri", _sec.sh_quote(f"content://{auth}/{traversal}")], timeout=8)
                     if out2.strip():
                         extra_evidence += f"\nPath traversal [{traversal}] on {auth}:\n{out2[:400]}\n"
                         break
@@ -986,16 +989,18 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
 
             # data:// URI
             _run_adb(adb_prefix + ["shell", "am", "start", "-a", "android.intent.action.VIEW",
-                                   "-d", "data:text/html,<script>alert(1)</script>"], timeout=10)
+                                   "-d", _sec.sh_quote("data:text/html,<script>alert(1)</script>")], timeout=10)
 
             # Intent extras injection against all exported activities
-            exported_acts = re.findall(r'activity\s+([^\s]+)\s+filter', dumpsys_out)
+            exported_acts = _only_components(
+                re.findall(r'activity\s+([^\s]+)\s+filter', dumpsys_out))
             for act in exported_acts[:5]:
                 for extra_key in ["url", "uri", "path", "link", "redirect", "file"]:
                     _run_adb(adb_prefix + ["shell", "am", "start", "-n",
-                                          f"{package}/{act}",
-                                          "--es", extra_key, "javascript:alert(document.cookie)",
-                                          "--es", "path", "../../../../etc/passwd"],
+                                          _sec.sh_quote(f"{package}/{act}"),
+                                          "--es", extra_key,
+                                          _sec.sh_quote("javascript:alert(document.cookie)"),
+                                          "--es", "path", _sec.sh_quote("../../../../etc/passwd")],
                              timeout=8)
 
             # Post-probe logcat check
@@ -1007,13 +1012,13 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
         # ── 4c: Exported Activity / Service / Receiver probing ────────────
         _update_job(job_id, progress=60, message="Probing exported components directly…")
         # Null-intent crash test on all exported activities
-        exported_components = re.findall(
+        exported_components = _only_components(re.findall(
             r'([A-Za-z][A-Za-z0-9_.]+Activity|[A-Za-z][A-Za-z0-9_.]+Service|'
-            r'[A-Za-z][A-Za-z0-9_.]+Receiver)', dumpsys_out)
+            r'[A-Za-z][A-Za-z0-9_.]+Receiver)', dumpsys_out))
         crash_evidence = []
         for comp in exported_components[:8]:
             rc_c, out_c, _ = _run_adb(
-                adb_prefix + ["shell", "am", "start", "-n", f"{package}/{comp}"],
+                adb_prefix + ["shell", "am", "start", "-n", _sec.sh_quote(f"{package}/{comp}")],
                 timeout=8)
             if rc_c == 0 and "error" not in out_c.lower():
                 _time.sleep(1)
@@ -1028,15 +1033,16 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
             extra_evidence += f"\n=== Component Crashes ===\n" + "\n".join(crash_evidence) + "\n"
 
         # Exported broadcast receivers
-        exported_rcvs = re.findall(
-            r'Receiver\s+\{[^}]*\}\s+([A-Za-z][A-Za-z0-9_.]+)', dumpsys_out)
+        exported_rcvs = _only_components(re.findall(
+            r'Receiver\s+\{[^}]*\}\s+([A-Za-z][A-Za-z0-9_.]+)', dumpsys_out))
         for rcv in exported_rcvs[:4]:
             # Try all registered actions
-            actions = re.findall(
-                rf'{re.escape(rcv)}.*?action=([^\s]+)', dumpsys_out[:2000])
+            actions = _only_actions(re.findall(
+                rf'{re.escape(rcv)}.*?action=([^\s]+)', dumpsys_out[:2000]))
             for action in actions[:2]:
                 _run_adb(adb_prefix + ["shell", "am", "broadcast",
-                                      "-a", action, "-n", f"{package}/{rcv}"], timeout=8)
+                                      "-a", _sec.sh_quote(action),
+                                      "-n", _sec.sh_quote(f"{package}/{rcv}")], timeout=8)
 
         # ── 4c-ext: ComponentProber systematic scan ───────────────────────
         if package:
@@ -1045,23 +1051,23 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
                 # Build manifest_components from dumpsys output
                 _cp_acts = [
                     {"name": a, "intent_filters": []}
-                    for a in re.findall(
-                        r'([A-Za-z][A-Za-z0-9_.]+Activity)\s+filter', dumpsys_out)[:10]
+                    for a in _only_components(re.findall(
+                        r'([A-Za-z][A-Za-z0-9_.]+Activity)\s+filter', dumpsys_out))[:10]
                 ]
                 _cp_provs = [
                     {"authority": auth, "paths": []}
                     for auth in authorities[:5]
                 ]
                 _cp_rcvs = [
-                    {"name": r, "actions": re.findall(
-                        rf'{re.escape(r)}.*?action=([^\s]+)', dumpsys_out[:3000])[:3]}
-                    for r in re.findall(
-                        r'([A-Za-z][A-Za-z0-9_.]+Receiver)', dumpsys_out)[:5]
+                    {"name": r, "actions": _only_actions(re.findall(
+                        rf'{re.escape(r)}.*?action=([^\s]+)', dumpsys_out[:3000]))[:3]}
+                    for r in _only_components(re.findall(
+                        r'([A-Za-z][A-Za-z0-9_.]+Receiver)', dumpsys_out))[:5]
                 ]
                 _cp_svcs = [
                     {"name": s}
-                    for s in re.findall(
-                        r'([A-Za-z][A-Za-z0-9_.]+Service)\s+filter', dumpsys_out)[:5]
+                    for s in _only_components(re.findall(
+                        r'([A-Za-z][A-Za-z0-9_.]+Service)\s+filter', dumpsys_out))[:5]
                 ]
                 _comp_manifest = {
                     "activities": _cp_acts,
@@ -1106,14 +1112,14 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
             # SharedPreferences file list + content
             _, sp_out, _ = _run_adb(
                 adb_prefix + ["shell", "run-as", package,
-                              "find", f"/data/data/{package}/shared_prefs", "-name", "*.xml"],
+                              "find", f"/data/data/{package}/shared_prefs", "-name", "'*.xml'"],
                 timeout=8)
             if sp_out.strip():
                 extra_evidence += f"\n=== SharedPreferences files ===\n{sp_out[:400]}\n"
                 # Read first prefs file content
                 for pref_file in sp_out.splitlines()[:2]:
                     _, pref_content, _ = _run_adb(
-                        adb_prefix + ["shell", "run-as", package, "cat", pref_file.strip()],
+                        adb_prefix + ["shell", "run-as", package, "cat", _sec.sh_quote(pref_file.strip())],
                         timeout=6)
                     if pref_content.strip():
                         extra_evidence += f"\n{pref_file} content:\n{pref_content[:600]}\n"
@@ -1123,14 +1129,14 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
             # SQLite databases — list and dump schema
             _, db_out, _ = _run_adb(
                 adb_prefix + ["shell", "run-as", package,
-                              "find", f"/data/data/{package}/databases", "-name", "*.db"],
+                              "find", f"/data/data/{package}/databases", "-name", "'*.db'"],
                 timeout=8)
             if db_out.strip():
                 extra_evidence += f"\n=== SQLite databases ===\n{db_out[:300]}\n"
                 for db_file in db_out.splitlines()[:2]:
                     _, schema_out, _ = _run_adb(
                         adb_prefix + ["shell", "run-as", package,
-                                     "sqlite3", db_file.strip(), ".schema"],
+                                     "sqlite3", _sec.sh_quote(db_file.strip()), ".schema"],
                         timeout=8)
                     if schema_out.strip():
                         extra_evidence += f"\n{db_file} schema:\n{schema_out[:500]}\n"
@@ -1145,7 +1151,7 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
             # External storage
             _, ext_out, _ = _run_adb(
                 adb_prefix + ["shell", "find", "/sdcard/Android/data",
-                              "-path", f"*{package}*"], timeout=10)
+                              "-path", f"'*{package}*'"], timeout=10)
             if ext_out.strip():
                 extra_evidence += f"\n=== External storage files ===\n{ext_out[:400]}\n"
 
@@ -1241,6 +1247,18 @@ def _scan_dir(scan_id: str) -> Path:
 
 
 _AUTHORITY_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,200}$")
+_COMPONENT_RE = re.compile(r"^[A-Za-z0-9_.$]{1,300}$")
+_ACTION_RE    = re.compile(r"^[A-Za-z0-9_.:\-]{1,200}$")
+
+
+def _only_components(values) -> list:
+    """Drop dumpsys-derived component names that are not plain class identifiers
+    (they end up inside `adb shell` command strings run by the device shell)."""
+    return [v for v in values if _COMPONENT_RE.match(v)]
+
+
+def _only_actions(values) -> list:
+    return [v for v in values if _ACTION_RE.match(v)]
 
 
 def _extract_authority(finding: dict, package: str) -> str:

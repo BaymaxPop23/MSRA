@@ -34,8 +34,8 @@ def test_cross_origin_post_blocked(client):
     assert r.status_code == 403
 
 
-def test_host_header_enforced_on_loopback(client, monkeypatch):
-    monkeypatch.setattr(server, "_LOOPBACK_ONLY", True)
+def test_host_header_enforced_without_token_even_if_bound_wide(client, monkeypatch):
+    monkeypatch.setattr(server, "_LOOPBACK_ONLY", False)   # e.g. docker 0.0.0.0 bind
     r = client.get("/api/queue/status", headers={"Host": "evil.example"})
     assert r.status_code == 403
     r = client.get("/api/queue/status", headers={"Host": "localhost:5001"})
@@ -80,3 +80,9 @@ def test_login_flow_keeps_token_out_of_urls(client, monkeypatch):
     assert "msra_session=" in cookie and "s3cret" not in cookie
     assert "HttpOnly" in cookie and "SameSite=Strict" in cookie
     assert client.get("/api/queue/status").status_code == 200
+
+
+def test_allowed_hosts_extension(client, monkeypatch):
+    monkeypatch.setattr(server, "_ALLOWED_HOSTS", server._LOOPBACK_HOSTS | {"msra.internal"})
+    assert client.get("/api/queue/status", headers={"Host": "msra.internal:5001"}).status_code == 200
+    assert client.get("/api/queue/status", headers={"Host": "other.internal"}).status_code == 403

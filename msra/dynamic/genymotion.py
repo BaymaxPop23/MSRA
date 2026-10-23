@@ -883,8 +883,8 @@ class GenymotionDeviceAdapter:
         """Query a content provider."""
         cmd = f'content query --uri {shlex.quote(str(uri))}'
         if projection:
-            cmd += f' --projection {":".join(projection)}'
+            cmd += f' --projection {shlex.quote(":".join(map(str, projection)))}'
         if selection:
-            cmd += f' --where "{selection}"'
+            cmd += f' --where {shlex.quote(str(selection))}'
 
         return self.execute_shell(cmd)

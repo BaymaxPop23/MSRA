@@ -1,6 +1,6 @@
 # MSRA — Mobile Security Review Assistant
 
-![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)
+![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)
 ![License MIT](https://img.shields.io/badge/license-MIT-green.svg)
 ![Patterns](https://img.shields.io/badge/patterns-215+-orange.svg)
 ![Platforms](https://img.shields.io/badge/platforms-Android%20%7C%20iOS%20%7C%20JAR%20%7C%20EXE-blueviolet.svg)
@@ -89,6 +89,26 @@ Scan data and reports persist in Docker volumes across restarts.
 
 ---
 
+## Security & configuration
+
+MSRA drives real devices and parses untrusted files, so it is locked down by default:
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `--host` / `MSRA_HOST` | `127.0.0.1` | Bind address. `--debug` is refused on non-loopback hosts. |
+| `MSRA_AUTH_TOKEN` | unset | Require a token. Browsers sign in at `/login` (token in the POST body, never the URL); scripts send `Authorization: Bearer <token>`. |
+| `MSRA_ALLOWED_HOSTS` | unset | Extra `Host` names accepted when no token is set (DNS-rebinding guard). |
+| `MSRA_AUTO_INSTALL` | unset | Set to `1` to auto-install scanned APKs on a connected device (off by default). |
+| `MSRA_DB_PATH` | `./msra.db` | SQLite location (Docker keeps it on the data volume). |
+| `MSRA_CLAUDE_MODEL`, `MSRA_CLAUDE_FAST_MODEL` | built-in | Models used for AI features. |
+| `MSRA_JADX_TIMEOUT` | 300 (server) / 600 (CLI) | Seconds before jadx is abandoned. |
+
+Exposing the dashboard beyond localhost? Set `MSRA_AUTH_TOKEN` and put it behind HTTPS. With Docker, the port is published on `127.0.0.1` unless you set `MSRA_BIND`.
+
+Run the tests with `make test` (needs `pip install pytest`).
+
+---
+
 ## Updating
 
 MSRA ships an `update.sh` script that pulls the latest code, updates dependencies, and restarts the server in one step.
@@ -139,7 +159,7 @@ pip3 install -r requirements.txt
 
 | Package | Purpose |
 |---|---|
-| Python 3.8+ | Runtime — [python.org](https://python.org) |
+| Python 3.9+ | Runtime — [python.org](https://python.org) |
 | `flask` | Web server |
 | `weasyprint` | PDF report export |
 | `pefile` | Windows PE / EXE / DLL scanning |

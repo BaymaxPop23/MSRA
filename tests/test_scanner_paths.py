@@ -61,3 +61,23 @@ def test_android_scanner_does_not_load_other_platform_rules():
     from msra.patterns import PatternManager
     ids = {p.id for p in PatternManager().get_patterns(enabled_only=False)}
     assert not any(i.startswith(("ios-", "jar-", "exe-", "pe-")) for i in ids)
+
+
+def test_manifest_platform_checks(tmp_path):
+    dec = tmp_path / "decompiled"
+    (dec / "resources" / "res" / "xml").mkdir(parents=True)
+    (dec / "sources" / "com" / "a").mkdir(parents=True)
+    (dec / "resources" / "AndroidManifest.xml").write_text(
+        '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.a">'
+        '<uses-sdk android:minSdkVersion="19" android:targetSdkVersion="26"/>'
+        '<application android:testOnly="true" android:networkSecurityConfig="@xml/nsc"/></manifest>')
+    (dec / "resources" / "res" / "xml" / "nsc.xml").write_text(
+        '<network-security-config><base-config cleartextTrafficPermitted="true">'
+        '<trust-anchors><certificates src="system"/><certificates src="user"/></trust-anchors>'
+        '</base-config></network-security-config>')
+    ids = {f.fid for f in Scanner(str(dec), adb_path=None, use_semgrep=False).scan()}
+    # grouping may suffix ids; compare on prefix
+    joined = " ".join(ids)
+    for expected in ("manifest-test-only", "manifest-backup-default", "manifest-low-target-sdk",
+                     "manifest-low-min-sdk", "nsc-base-cleartext", "nsc-trusts-user-ca"):
+        assert expected in joined, (expected, ids)

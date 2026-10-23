@@ -196,6 +196,10 @@ class Scanner:
         # so they are scanned after the class-based exploitability filter.
         findings.extend(self._scan_resources())
 
+        # Hardcoded secrets (known key formats + entropy) across code, resources
+        # and bundled assets.
+        findings.extend(self._scan_secrets(sources_root))
+
         # Deduplicate by (rule_id, file, line)
         findings = self._deduplicate_findings(findings)
 
@@ -538,6 +542,7 @@ class Scanner:
         app = root.find("application")
         if app is not None:
             findings.extend(self._manifest_app_flags(app, manifest_path))
+            findings.extend(self._manifest_platform_checks(root, app, manifest_path))
             findings.extend(self._manifest_components(root, manifest_path))
 
         return findings
@@ -699,6 +704,130 @@ class Scanner:
                 )
             )
 
+        return findings
+
+    # ── Platform / policy checks (SDK levels, backup defaults, network security config)
+
+    @staticmethod
+    def _int_attr(value: Optional[str]) -> Optional[int]:
+        try:
+            return int(value) if value is not None else None
+        except ValueError:
+            return None
+
+    def _manifest_platform_checks(self, root: ET.Element, app: ET.Element,
+                                  manifest_path: str) -> List[Finding]:
+        findings: List[Finding] = []
+        sdk = root.find("uses-sdk")
+        min_sdk = self._int_attr(self._get_android_attr(sdk, "minSdkVersion")) if sdk is not None else None
+        target_sdk = self._int_attr(self._get_android_attr(sdk, "targetSdkVersion")) if sdk is not None else None
+
+        def add(fid, title, sev, desc, attack, token, cwe, refs=None, remediation=""):
+            findings.append(Finding(
+                fid=fid, title=title, severity=sev, description=desc, attack_path=attack,
+                adb_commands=[], evidence=self._manifest_evidence(manifest_path, token),
+                references=refs or [], extra={"cwe": [cwe], "category": "Platform Security",
+                                              "remediation": remediation}))
+
+        if self._get_android_attr(app, "testOnly") == "true":
+            add("manifest-test-only", "Test-only build (android:testOnly=true)", "Medium",
+                "The package is marked testOnly. Such builds can be installed with 'adb install -t' "
+                "and are not meant for distribution; they often ship debug functionality.",
+                "A testOnly app can be sideloaded and instrumented without a release signature.",
+                "testOnly", "CWE-489", remediation="Build release variants without android:testOnly.")
+
+        backup = self._get_android_attr(app, "allowBackup")
+        has_policy = (self._get_android_attr(app, "fullBackupContent") is not None or
+                      self._get_android_attr(app, "dataExtractionRules") is not None)
+        if backup is None and not has_policy:
+            add("manifest-backup-default", "allowBackup not set (defaults to enabled)", "Low",
+                "android:allowBackup is not specified, so it defaults to true and no "
+                "fullBackupContent/dataExtractionRules limit what is backed up.",
+                "A user or attacker with USB access can pull app data with 'adb backup'.",
+                "<application", "CWE-530",
+                ["https://developer.android.com/guide/topics/data/autobackup"],
+                "Set android:allowBackup=\"false\" or define dataExtractionRules excluding sensitive files.")
+
+        if target_sdk is not None and target_sdk < 31:
+            add("manifest-low-target-sdk", f"Outdated targetSdkVersion ({target_sdk})", "Medium" if target_sdk < 28 else "Low",
+                f"targetSdkVersion={target_sdk} opts the app out of newer platform protections "
+                "(scoped storage, implicit-export rules, background limits, cleartext-off-by-default for API 28+).",
+                "The app runs with legacy, weaker security behaviour on current Android versions.",
+                "targetSdkVersion", "CWE-1104",
+                ["https://developer.android.com/distribute/best-practices/develop/target-sdk"],
+                "Raise targetSdkVersion to a current API level and fix resulting behaviour changes.")
+        if min_sdk is not None and min_sdk < 24:
+            add("manifest-low-min-sdk", f"Low minSdkVersion ({min_sdk})", "Low",
+                f"minSdkVersion={min_sdk} keeps the app installable on Android versions that lack "
+                "modern security features (network security config defaults, file-based encryption, etc.).",
+                "Users on very old devices run the app without platform mitigations.",
+                "minSdkVersion", "CWE-1104")
+
+        findings.extend(self._network_security_config_findings(app, manifest_path, target_sdk))
+        return findings
+
+    def _find_resource_xml(self, ref: str) -> Optional[str]:
+        """Resolve '@xml/name' to a decompiled resources file."""
+        name = ref.split("/")[-1]
+        for base in (os.path.join(self.decompiled_dir, "resources", "res", "xml"),
+                     os.path.join(self.decompiled_dir, "res", "xml")):
+            candidate = os.path.join(base, name + ".xml")
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+
+    def _network_security_config_findings(self, app: ET.Element, manifest_path: str,
+                                          target_sdk: Optional[int]) -> List[Finding]:
+        findings: List[Finding] = []
+        ref = self._get_android_attr(app, "networkSecurityConfig")
+        cleartext_attr = self._get_android_attr(app, "usesCleartextTraffic")
+
+        def add(fid, title, sev, desc, attack, path, token, cwe="CWE-295"):
+            ev = self._manifest_evidence(path, token) if path else None
+            findings.append(Finding(
+                fid=fid, title=title, severity=sev, description=desc, attack_path=attack,
+                adb_commands=[], evidence=ev, extra={"cwe": [cwe], "category": "Network Security"},
+                references=["https://developer.android.com/privacy-and-security/security-config"]))
+
+        if not ref:
+            if target_sdk is not None and target_sdk < 28 and cleartext_attr is None:
+                add("nsc-cleartext-default", "Cleartext traffic allowed by default (targetSdk < 28)", "Medium",
+                    "No network security config and targetSdkVersion < 28: HTTP is permitted by default.",
+                    "Network attacker intercepts or modifies HTTP traffic.", manifest_path, "targetSdkVersion", "CWE-319")
+            return findings
+
+        path = self._find_resource_xml(ref)
+        if not path:
+            return findings
+        try:
+            nsc = ET.parse(path).getroot()
+        except ET.ParseError:
+            return findings
+
+        base = nsc.find("base-config")
+        if base is not None and base.attrib.get("cleartextTrafficPermitted", "").lower() == "true":
+            add("nsc-base-cleartext", "Network security config permits cleartext globally", "Medium",
+                "base-config sets cleartextTrafficPermitted=\"true\" for every domain.",
+                "Network attacker intercepts or modifies HTTP traffic.", path, "cleartextTrafficPermitted", "CWE-319")
+        for cfg in nsc.iter():
+            if cfg.tag in ("base-config", "domain-config") and \
+               any(c.tag == "trust-anchors" and any(a.attrib.get("src") == "user" for a in c)
+                   for c in cfg):
+                add("nsc-trusts-user-ca", "App trusts user-installed CA certificates", "Medium",
+                    "The network security config trusts the 'user' certificate store, so a CA the "
+                    "user (or malware) installs can MITM the app's TLS traffic.",
+                    "Install a proxy CA on the device and intercept HTTPS without any bypass.", path, "user")
+                break
+        for dc in nsc.findall("domain-config"):
+            if dc.attrib.get("cleartextTrafficPermitted", "").lower() == "true":
+                domains = ", ".join((d.text or "").strip() for d in dc.findall("domain"))[:200]
+                add("nsc-domain-cleartext", f"Cleartext permitted for domain(s): {domains}", "Low",
+                    "A domain-config allows HTTP for the listed domains.",
+                    "Traffic to those hosts can be intercepted on the network.", path, "cleartextTrafficPermitted", "CWE-319")
+        if nsc.find("debug-overrides") is not None:
+            add("nsc-debug-overrides", "debug-overrides present in network security config", "Info",
+                "debug-overrides only apply to debuggable builds, but confirm they cannot ship in release.",
+                "A debuggable build trusts extra CAs.", path, "debug-overrides")
         return findings
 
     def _manifest_components(self, root: ET.Element, manifest_path: str) -> List[Finding]:
@@ -897,6 +1026,21 @@ class Scanner:
         evidence = find_line_snippet(text, idx)
         evidence.file_path = manifest_path
         return evidence
+
+    def _scan_secrets(self, sources_root: Optional[str]) -> List[Finding]:
+        """Secret detection; third-party library code is skipped to avoid noise."""
+        try:
+            from .analysis.secrets import scan_paths
+            roots = [r for r in (sources_root, os.path.join(self.decompiled_dir, "resources")) if r]
+            found = scan_paths(roots)
+        except Exception as exc:  # never let secret scanning kill a scan
+            print(f"[!] Secret scan warning: {exc}")
+            return []
+        if not self.skip_library_code:
+            return found
+        return [f for f in found
+                if not (f.evidence and classify_path(f.evidence.file_path, self.package_name)
+                        in ("library", "obfuscated"))]
 
     def _scan_resources(self) -> List[Finding]:
         """Run XML-applicable patterns over jadx's decompiled resources tree."""
