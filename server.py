@@ -673,13 +673,19 @@ def _dynamic_device_cleanup(cfg: dict, finding: dict) -> None:
         _log.debug("dynamic cleanup failed", exc_info=True)
 
 
+def _job_budget(cfg: dict) -> int:
+    """Per-job time limit in seconds, clamped to a sane range (60s - 1h)."""
+    try:
+        raw = int(cfg.get("job_timeout") or os.environ.get("MSRA_DYN_JOB_TIMEOUT", 900))
+    except (TypeError, ValueError):
+        raw = 900
+    return max(60, min(raw, 3600))
+
+
 def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
                             finding: dict, cfg: dict, use_ai: bool = True):
     """Serialise per device, run the pipeline under a deadline, always clean up."""
-    try:
-        budget = int(cfg.get("job_timeout") or os.environ.get("MSRA_DYN_JOB_TIMEOUT", 900))
-    except (TypeError, ValueError):
-        budget = 900
+    budget = _job_budget(cfg)
     with _device_lock(cfg.get("adb_serial", "")):
         # The clock starts once we hold the device, not while queued behind it.
         _adb_util.set_deadline(budget)
@@ -791,11 +797,13 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
             try:
                 rc, out, err = _run_adb(adb_args, timeout=120)
             finally:
-                # Always re-enable the verifier, even if the install raised
-                _run_adb(_serial_args + ["shell", "settings", "put", "global",
-                                         "verifier_verify_adb_installs", "1"], timeout=5)
-                _run_adb(_serial_args + ["shell", "settings", "put", "global",
-                                         "package_verifier_enable", "1"], timeout=5)
+                # Always re-enable the verifier, even if the install raised or the
+                # job deadline has already passed (restore must not be skippable).
+                with _adb_util.no_deadline():
+                    _run_adb(_serial_args + ["shell", "settings", "put", "global",
+                                             "verifier_verify_adb_installs", "1"], timeout=10)
+                    _run_adb(_serial_args + ["shell", "settings", "put", "global",
+                                             "package_verifier_enable", "1"], timeout=10)
                 shutil.rmtree(_job_tmp, ignore_errors=True)
             install_combined = (out + err).lower()
             if rc != 0 and "already installed" not in install_combined:

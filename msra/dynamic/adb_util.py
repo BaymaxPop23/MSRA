@@ -44,6 +44,18 @@ def deadline(seconds: Optional[float]):
         clear_deadline()
 
 
+@contextmanager
+def no_deadline():
+    """Suspend the job deadline - for restore/cleanup steps that must still run
+    after the budget is spent (e.g. re-enabling the package verifier)."""
+    saved = getattr(_ctx, "deadline", None)
+    _ctx.deadline = None
+    try:
+        yield
+    finally:
+        _ctx.deadline = saved
+
+
 def check_deadline() -> None:
     dl = getattr(_ctx, "deadline", None)
     if dl is not None and time.monotonic() > dl:

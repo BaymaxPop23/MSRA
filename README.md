@@ -102,6 +102,7 @@ MSRA drives real devices and parses untrusted files, so it is locked down by def
 | `MSRA_DB_PATH` | `./msra.db` | SQLite location (Docker keeps it on the data volume). |
 | `MSRA_CLAUDE_MODEL`, `MSRA_CLAUDE_FAST_MODEL` | built-in | Models used for AI features. |
 | `MSRA_JADX_TIMEOUT` | 300 (server) / 600 (CLI) | Seconds before jadx is abandoned. |
+| `MSRA_DYN_JOB_TIMEOUT` | 900 | Time budget per dynamic job in seconds (clamped to 60-3600). Timed-out jobs are marked failed and the device is cleaned up. |
 
 Exposing the dashboard beyond localhost? Set `MSRA_AUTH_TOKEN` and put it behind HTTPS. With Docker, the port is published on `127.0.0.1` unless you set `MSRA_BIND`.
 
