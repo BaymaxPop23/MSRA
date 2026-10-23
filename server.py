@@ -1459,6 +1459,7 @@ def _build_dashboard(scan_id: str | None, all_summaries: list, view: str | None 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+<script src="/ai-assets/panel.js" defer></script>
 {hosted_inject}
 <style>
 /* ── RESET & BASE ── */
@@ -7732,36 +7733,27 @@ def api_intel_sources_sync():
                     "confidence":   meta.get("confidence", "medium"),
                 }
 
-                title_key = title.strip().lower()
-
-                if rule_id in existing_ids:
-                    # Exact ID match — check if patterns changed and update if so
-                    existing = next((r for r in all_existing if r.get("id") == rule_id), None)
-                    if existing and existing.get("source") == "custom":
-                        old_pats = {p2.get("pattern", "") for p2 in existing.get("patterns", [])}
-                        new_pats = {p2.get("pattern", "") for p2 in patterns}
-                        if old_pats != new_pats:
-                            rules_api.update_custom_rule(rule_id, rule_data)
-                            updated += 1
+                # Crawled text is untrusted, so it gets the same policy as AI feed rules:
+                # server-generated deterministic id (never the file's own id, which could
+                # collide with or overwrite a built-in or a rule the analyst wrote), imported
+                # DISABLED for review, and never used to update an existing rule.
+                import hashlib as _hl
+                fingerprint = _hl.sha1(json.dumps([title, [x["pattern"] for x in patterns]],
+                                                  sort_keys=True).encode()).hexdigest()[:10]
+                slug = re.sub(r"[^a-z0-9]+", "-", str(title).lower()).strip("-")[:28] or "rule"
+                new_id = f"crawled-{slug}-{fingerprint}"
+                if new_id in existing_ids or title.strip().lower() in existing_by_title:
                     continue
-
-                if title_key in existing_by_title:
-                    # Same title, different ID — update patterns if rule is custom/crawled
-                    existing = existing_by_title[title_key]
-                    if existing.get("source") == "custom":
-                        old_pats = {p2.get("pattern", "") for p2 in existing.get("patterns", [])}
-                        new_pats = {p2.get("pattern", "") for p2 in patterns}
-                        if old_pats != new_pats:
-                            rules_api.update_custom_rule(existing["id"], rule_data)
-                            updated += 1
-                    # Either updated or it's a builtin with same title — don't create duplicate
-                    continue
-
-                # New rule — create it
-                rules_api.create_custom_rule(rule_data)
+                rule_data["id"] = new_id
+                rule_data["enabled"] = False
+                rule_data["tags"] = sorted({*(str(t)[:40] for t in (p.get("tags") or [])[:10]),
+                                            "crawled", "needs-review"})
+                created = rules_api.create_custom_rule(rule_data)
+                if created.get("enabled"):          # fail closed
+                    rules_api.set_rule_enabled(new_id, False)
                 added += 1
-                existing_ids.add(rule_id)
-                existing_by_title[title_key] = rule_data
+                existing_ids.add(new_id)
+                existing_by_title[title.strip().lower()] = rule_data
                 imported_titles.append(title)
             except Exception:
                 pass

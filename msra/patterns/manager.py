@@ -89,22 +89,46 @@ class PatternManager:
         logger.info(f"Loaded {len(self._patterns)} patterns from {len(self._loaded_sources)} sources")
 
     def _load_user_rules(self) -> None:
+        import json as _json
+        from .safety import ALLOWED_CUSTOM_TYPES, default_enabled, regex_problem
         user_file = self.config.data_dir / "custom" / "user_rules.json"
         if not user_file.exists():
             return
         try:
-            patterns = self._loader.load_file(user_file)
+            raw_rules = _json.loads(user_file.read_text()).get("patterns", [])
         except Exception as e:                      # one bad file must not break scans
             logger.warning(f"Skipping user rules {user_file.name}: {e}")
             return
+
         builtin_ids = set(self._patterns)
-        for pattern in patterns:
-            if pattern.id in builtin_ids:
-                # A custom rule may never silently replace a built-in detection
-                logger.warning(f"Ignoring user rule '{pattern.id}': id collides with a built-in rule")
+        loaded = 0
+        for raw in raw_rules:
+            rid = raw.get("id", "?") if isinstance(raw, dict) else "?"
+            det = (raw.get("detection") or {}) if isinstance(raw, dict) else {}
+            # The loader would silently treat an unknown detection type as regex, so
+            # vet the raw rule first (this also covers hand-edited / older files).
+            if det.get("type", "regex") not in ALLOWED_CUSTOM_TYPES:
+                logger.warning(f"Ignoring user rule '{rid}': unsupported detection type")
                 continue
+            bad = next((p for p in (regex_problem(d.get("pattern", "")) for d in det.get("patterns", [])
+                                    if isinstance(d, dict) and d.get("pattern")) if p), None)
+            if bad:
+                logger.warning(f"Ignoring user rule '{rid}': {bad}")
+                continue
+            if rid in builtin_ids:
+                # A custom rule may never silently replace a built-in detection
+                logger.warning(f"Ignoring user rule '{rid}': id collides with a built-in rule")
+                continue
+            try:
+                pattern = self._loader._parse_pattern(raw)
+            except Exception as e:
+                logger.warning(f"Failed to parse user rule '{rid}': {e}")
+                continue
+            # Crawler/AI-derived rules stay off until an analyst enables them
+            pattern.enabled = default_enabled(pattern.tags, pattern.enabled)
             self._patterns[pattern.id] = pattern
-        if patterns:
+            loaded += 1
+        if loaded:
             self._loaded_sources.append(f"custom:{user_file.name}")
 
     def _apply_overrides(self) -> None:

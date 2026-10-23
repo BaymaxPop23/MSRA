@@ -142,3 +142,127 @@ def test_feed_sync_ignores_ai_chosen_ids_and_enabled_flag(rules_env, monkeypatch
     finally:
         fake.close()
         monkeypatch.setattr(ai_client, "_client", None)
+
+
+# ── validation cannot be bypassed via detection type ─────────────────────
+EVIL = "(a+)+$"
+
+
+@pytest.mark.parametrize("det_type", ["ast", "foo", "binary_string", "REGEX", "", None])
+def test_unknown_detection_types_rejected(rules_env, det_type):
+    with pytest.raises(ValueError):
+        ra.create_custom_rule({**RULE, "id": "x1", "detection_type": det_type,
+                               "patterns": [{"pattern": EVIL}]})
+
+
+@pytest.mark.parametrize("det_type", ["regex", "regex-multiline", "combined", "manifest"])
+def test_unsafe_regex_rejected_for_every_allowed_type(rules_env, det_type):
+    with pytest.raises(ValueError, match="backtracking|ReDoS"):
+        ra.create_custom_rule({**RULE, "id": "x2", "detection_type": det_type,
+                               "patterns": [{"pattern": EVIL}]})
+
+
+def test_update_cannot_smuggle_unsafe_regex_by_changing_type(rules_env):
+    ra.create_custom_rule({**RULE, "id": "ok-1"})
+    for bad in ({"detection_type": "ast", "patterns": [{"pattern": EVIL}]},
+                {"detection_type": "manifest", "patterns": [{"pattern": EVIL}]},
+                {"patterns": [{"pattern": EVIL}]},
+                {"detection_type": "nope"}):
+        with pytest.raises(ValueError):
+            ra.update_custom_rule("ok-1", dict(bad))
+    assert ra.update_custom_rule("ok-1", {"title": "renamed"})["title"] == "renamed"
+
+
+# ── loader-side defence in depth + review gating ─────────────────────────
+def _scan_env(tmp_path, user_rules, overrides=None):
+    data = tmp_path / "data"
+    (data / "custom").mkdir(parents=True)
+    (data / "builtin").mkdir()
+    for f in (ROOT / "data" / "builtin").glob("*.json"):
+        (data / "builtin" / f.name).write_text(f.read_text())
+    (data / "custom" / "user_rules.json").write_text(json.dumps({"patterns": user_rules}))
+    if overrides:
+        (data / "custom" / "overrides.json").write_text(json.dumps(overrides))
+    pm = PatternManager(PatternConfig(data_dir=data, load_community=False, load_crawled=False))
+    return {p.id: p for p in pm.get_patterns(enabled_only=False)}
+
+
+def _rule(rid, pattern="foo\\(", det="regex", tags=None, **kw):
+    return {"id": rid, "title": rid, "severity": "High", "category": "Other", "tags": tags or [],
+            "detection": {"type": det, "patterns": [{"pattern": pattern, "file_types": [".java"]}]}, **kw}
+
+
+def test_hand_edited_user_file_cannot_load_unsafe_or_untyped_rules(tmp_path):
+    got = _scan_env(tmp_path, [_rule("redos", EVIL), _rule("untyped", EVIL, det="ast"),
+                               _rule("long", "a" * 5000), _rule("fine")])
+    assert "fine" in got and got["fine"].enabled
+    assert "redos" not in got and "untyped" not in got and "long" not in got
+
+
+def test_crawled_and_ai_rules_stay_disabled_until_analyst_enables(tmp_path):
+    rules = [_rule("c1", tags=["crawled"]), _rule("a1", tags=["ai-extracted"]),
+             _rule("n1", tags=["needs-review"]), _rule("mine", tags=["custom"]),
+             _rule("c2", tags=["crawled"], enabled=True)]
+    got = _scan_env(tmp_path, rules)
+    assert [got[i].enabled for i in ("c1", "a1", "n1", "c2")] == [False] * 4
+    assert got["mine"].enabled is True
+    got = _scan_env(tmp_path / "again", rules, overrides={"disabled": [], "enabled": ["c1"]})
+    assert got["c1"].enabled is True and got["a1"].enabled is False       # explicit enable only
+
+
+def test_hub_listing_and_enabling_agree_with_the_scanner(rules_env):
+    ra.create_custom_rule({**RULE, "id": "crawled-x", "tags": ["crawled"]})
+    listed = next(r for r in ra._compute_all_rules() if r["id"] == "crawled-x")
+    assert listed["enabled"] is False                                   # Hub shows it off by default
+    ra.set_rule_enabled("crawled-x", True)
+    assert json.loads((rules_env / "overrides.json").read_text())["enabled"] == ["crawled-x"]
+    assert next(r for r in ra._compute_all_rules() if r["id"] == "crawled-x")["enabled"] is True
+
+
+# ── crawler import: same policy as AI feed import ────────────────────────
+def test_crawler_sync_cannot_overwrite_or_activate_rules(rules_env, monkeypatch, tmp_path):
+    import types
+    import server
+    victim_id = builtin_ids("patterns.json")[0]
+    mine = ra.create_custom_rule({**RULE, "id": "my-own-rule", "title": "My Own Rule",
+                                  "patterns": [{"pattern": "mine\\(", "file_types": [".java"]}]})
+    crawled = tmp_path / "data" / "data" / "crawled" / "blog"
+    crawled.mkdir(parents=True)
+
+    def put(name, **d):
+        (crawled / name).write_text(json.dumps(d))
+
+    pat = {"detection": {"patterns": [{"pattern": "evil\\(", "file_types": [".java"]}]}}
+    put("1.json", id=victim_id, title="Overwrite builtin by id", severity="Info", **pat)          # id collision
+    put("2.json", id="my-own-rule", title="Overwrite mine by id", **pat)                          # overwrite custom by id
+    put("3.json", id="zzz", title="My Own Rule", **pat)                                           # overwrite custom by title
+    put("4.json", id="fresh", title="Brand new crawled rule", **pat)                              # legit new rule
+    put("5.json", id="redos", title="Redos rule",
+        detection={"patterns": [{"pattern": EVIL}]})                                              # unsafe regex
+
+    class StubUpdater:
+        def __init__(self, config=None):
+            pass
+
+        def update(self, force=False, quiet=True):
+            return types.SimpleNamespace(source_stats={}, patterns_found=0, patterns_approved=0)
+
+    import msra.crawler.updater as up
+    monkeypatch.setattr(up, "ThreatIntelUpdater", StubUpdater)
+    monkeypatch.setattr(server, "__file__", str(tmp_path / "server.py"))
+    monkeypatch.setattr(server, "AUTH_TOKEN", "")
+    server.app.config["TESTING"] = True
+    r = server.app.test_client().post("/api/intel/sources-sync", json={})
+    assert r.status_code == 200, r.get_data(as_text=True)[:300]
+
+    rules = {x["id"]: x for x in ra._compute_all_rules()}
+    assert rules[victim_id]["title"] != "Overwrite builtin by id" and rules[victim_id]["enabled"]
+    assert [p["pattern"] for p in rules["my-own-rule"]["patterns"]] == ["mine\\("]               # untouched
+    crawled_rules = [x for x in rules.values() if x["id"].startswith("crawled-")]
+    # The file-supplied ids are ignored: attempts become harmless NEW rules under server ids
+    titles = sorted(x["title"] for x in crawled_rules)
+    assert titles == ["Brand new crawled rule", "Overwrite builtin by id", "Overwrite mine by id"]
+    assert all(x["enabled"] is False for x in crawled_rules)                  # nothing active unreviewed
+    assert all({"crawled", "needs-review"} <= set(x["tags"]) for x in crawled_rules)
+    assert "fresh" not in rules and "redos" not in rules and "zzz" not in rules   # ids not honoured, ReDoS rejected
+    assert sum(1 for x in rules.values() if x["title"] == "My Own Rule") == 1    # title collision skipped

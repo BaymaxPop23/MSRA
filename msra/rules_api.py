@@ -13,6 +13,8 @@ import threading
 import time
 import uuid
 from pathlib import Path
+
+from .patterns import safety as _safety
 from typing import Any, Dict, List, Optional
 
 DATA_DIR     = Path(__file__).parent.parent / "data"
@@ -91,7 +93,7 @@ def _save_user_rules(rules: List[dict]):
 def _pattern_to_dict(raw: dict, source: str, overrides: Dict[str, List[str]],
                      platform: str = "android") -> dict:
     pid             = raw.get("id", "")
-    default_enabled = raw.get("enabled", True)
+    default_enabled = _safety.default_enabled(raw.get("tags"), raw.get("enabled", True))
 
     if pid in overrides.get("disabled", []):
         enabled = False
@@ -246,19 +248,15 @@ def get_rule_by_id(rule_id: str) -> Optional[dict]:
 _VALID_SEVERITIES = {"critical": "Critical", "high": "High", "medium": "Medium",
                      "low": "Low", "info": "Info"}
 _RULE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-_MAX_PATTERNS = 50
-_MAX_PATTERN_LEN = 2000
-# A group that contains an unbounded quantifier and is itself repeated -
-# the classic catastrophic-backtracking shape, e.g. (a+)+ or (.*)*
-_NESTED_QUANT_RE = re.compile(r"\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)[+*]|\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)\{\d+,\}")
 
 
 def _validate_patterns(data: dict) -> None:
-    """Raise ValueError if the rule's metadata or any regex is invalid/unsafe.
+    """Raise ValueError if the rule's metadata, type or any regex is invalid/unsafe.
 
-    Rules can originate from AI extraction of untrusted web pages, so severity,
-    category and id are constrained and regexes are checked for ReDoS shapes.
-    """
+    Rules can originate from AI extraction or crawled web content, so severity,
+    category, id and detection type are constrained, and EVERY pattern is checked
+    whatever the declared detection type (the loader treats unknown types as regex,
+    so skipping the check for them would bypass it)."""
     if "severity" in data:
         sev = _VALID_SEVERITIES.get(str(data["severity"]).strip().lower())
         if not sev:
@@ -271,25 +269,21 @@ def _validate_patterns(data: dict) -> None:
         raise ValueError("Category too long")
 
     det_type = data.get("detection_type", "regex")
-    if det_type not in ("regex", "regex-multiline", "combined"):
-        return
-    pats = data.get("patterns", [])
-    if len(pats) > _MAX_PATTERNS:
-        raise ValueError(f"Too many patterns (max {_MAX_PATTERNS})")
+    if det_type not in _safety.ALLOWED_CUSTOM_TYPES:
+        raise ValueError(f"Unsupported detection type '{det_type}' "
+                         f"(allowed: {', '.join(_safety.ALLOWED_CUSTOM_TYPES)})")
+    pats = data.get("patterns", []) or []
+    if not isinstance(pats, list):
+        raise ValueError("patterns must be a list")
+    if len(pats) > _safety.MAX_PATTERNS:
+        raise ValueError(f"Too many patterns (max {_safety.MAX_PATTERNS})")
     for p in pats:
-        pat = p.get("pattern", "")
+        pat = p.get("pattern", "") if isinstance(p, dict) else ""
         if not pat:
             continue
-        if len(pat) > _MAX_PATTERN_LEN:
-            raise ValueError(f"Regex too long (max {_MAX_PATTERN_LEN} chars)")
-        try:
-            re.compile(pat)
-        except re.error as exc:
-            raise ValueError(f"Invalid regex pattern '{pat}': {exc}") from exc
-        if _NESTED_QUANT_RE.search(pat):
-            raise ValueError(
-                f"Regex '{pat}' has a nested unbounded quantifier that can cause "
-                "catastrophic backtracking (ReDoS); please rewrite it")
+        problem = _safety.regex_problem(pat)
+        if problem:
+            raise ValueError(f"Regex '{pat[:80]}': {problem}")
 
 
 def _original_enabled(rule_id: str) -> bool:
@@ -354,11 +348,17 @@ def create_custom_rule(data: dict) -> dict:
 
 def update_custom_rule(rule_id: str, data: dict) -> Optional[dict]:
     """Update a custom rule. Returns None if not found. Raises ValueError on invalid regex."""
-    _validate_patterns(data)
     rules = _load_user_rules()
     idx   = next((i for i, r in enumerate(rules) if r.get("id") == rule_id), None)
     if idx is None:
         return None
+    # Validate what will actually be stored: a type change must not smuggle
+    # previously-validated-under-a-different-type patterns past the check.
+    cur_det = rules[idx].get("detection", {}) or {}
+    _validate_patterns({
+        **{"detection_type": cur_det.get("type", "regex"), "patterns": cur_det.get("patterns", [])},
+        **data,
+    })
 
     rule = rules[idx]
     for f in ["title", "severity", "category", "description", "attack_path", "remediation", "tags", "adb_category"]:
