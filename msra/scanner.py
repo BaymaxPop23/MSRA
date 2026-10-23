@@ -199,6 +199,11 @@ class Scanner:
         # Hardcoded secrets (known key formats + entropy) across code, resources
         # and bundled assets.
         findings.extend(self._scan_secrets(sources_root))
+        try:
+            from .analysis.hybrid import scan_hybrid
+            findings.extend(scan_hybrid(self.decompiled_dir))
+        except Exception as exc:                    # never let this kill a scan
+            print(f"[!] Hybrid-framework scan warning: {exc}")
 
         # Deduplicate by (rule_id, file, line)
         findings = self._deduplicate_findings(findings)

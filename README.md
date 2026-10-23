@@ -110,6 +110,12 @@ Run the tests with `make test` (needs `pip install pytest`).
 
 ---
 
+## Scanner coverage notes
+
+- **Hybrid apps:** React Native bundles (plain JS and Hermes bytecode), Flutter `libapp.so`, Xamarin assemblies and Unity metadata are detected and scanned for hardcoded secrets, since jadx only decompiles the Java/Kotlin shell.
+- **Taint + ICC:** the web scan and the CLI (`msra scan`, skip with `--no-taint`) both run the inter-procedural taint engine and the exported-component ICC chain analysis.
+- **Permission rules** (`permission-install-packages`, `-system-alert-window`, `-bind-accessibility`, `-device-admin`) are evaluated natively and respect the Intelligence Hub toggles.
+
 ## AI features
 
 Everything AI is optional; scanning works fully offline without it. Open **AI** in the top bar to configure.
