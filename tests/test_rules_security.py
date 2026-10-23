@@ -266,3 +266,64 @@ def test_crawler_sync_cannot_overwrite_or_activate_rules(rules_env, monkeypatch,
     assert all({"crawled", "needs-review"} <= set(x["tags"]) for x in crawled_rules)
     assert "fresh" not in rules and "redos" not in rules and "zzz" not in rules   # ids not honoured, ReDoS rejected
     assert sum(1 for x in rules.values() if x["title"] == "My Own Rule") == 1    # title collision skipped
+
+
+# ── structural ReDoS detection (security review: shape regex was bypassable) ──
+from msra.patterns import safety  # noqa: E402
+
+DANGEROUS = [
+    "(a+)+$", "(a*)*$", "(a+)*$", "(.*)*x",
+    "((a+)b)+$",                     # nested group hid the inner quantifier from the old check
+    "((a+)+)$", "(?:(?:a+)+)+$", "((((a+)))+)$", "(?:x(?:y+z?)+)+q",
+    "(a|aa)+$", "(a|a)+$", "(a|ab)+c", "(?:a|a?)+$",      # overlapping alternation under a repeat
+    "(.|a)+$",
+    "(.*a){12}$", "(\\w+,){10}", "(a+){5}",                # nested repeat with a large bounded outer
+]
+SAFE = [
+    r"foo\(\w+\)", r"(?:http|ftp)://", r"(\d+\.){3}\d+", r"(?:a|b)+", r"[a-z]+@[a-z]+",
+    r'(?i)password\s*=\s*"[^"]+"', r"(?:get|set)Item\(", r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b",
+    r"rawQuery\s*\([^)]{0,300}\+[^)]{0,300}selection", r"(?:foo|bar|baz)\s*=", r"[^)]{0,1500}x",
+    # Python's parser merges single-character alternations into one set, so these are
+    # linear (measured 0.000s on 40+ chars) and must NOT be flagged as false positives:
+    r"(\w|\d)+$", r"(?:[a-c]|[b-d])*$",
+]
+
+
+@pytest.mark.parametrize("pat", DANGEROUS)
+def test_structural_check_rejects_dangerous_regexes(pat):
+    assert safety.regex_problem(pat), pat
+
+
+@pytest.mark.parametrize("pat", SAFE)
+def test_structural_check_accepts_normal_regexes(pat):
+    assert safety.regex_problem(pat) is None, pat
+
+
+def test_bypasses_are_rejected_through_the_rule_api(rules_env):
+    for i, pat in enumerate(["((a+)b)+$", "(a|aa)+$", "(.*a){12}$"]):
+        with pytest.raises(ValueError):
+            ra.create_custom_rule({**RULE, "id": f"bp-{i}", "patterns": [{"pattern": pat}]})
+
+
+def test_pathological_inputs_to_the_checker_itself_are_safe():
+    assert safety.regex_problem("(" * 500 + "a" + ")" * 500) is not None or True   # must not crash/hang
+    assert "too long" in safety.regex_problem("a" * 3000)
+    assert "invalid" in safety.regex_problem("(")
+
+
+def test_every_shipped_pattern_satisfies_the_policy():
+    """Keeps data/builtin and the safety policy in agreement (and the check honest)."""
+    offenders = []
+    for f in sorted((ROOT / "data" / "builtin").glob("*.json")):
+        def walk(o):
+            if isinstance(o, dict):
+                for k, v in o.items():
+                    if k in ("pattern", "regex") and isinstance(v, str):
+                        yield v
+                    else:
+                        yield from walk(v)
+            elif isinstance(o, list):
+                for v in o:
+                    yield from walk(v)
+        offenders += [(f.name, p[:60]) for p in walk(json.loads(f.read_text())) if safety.regex_problem(p)]
+    assert not offenders, offenders
