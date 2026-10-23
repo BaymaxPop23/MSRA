@@ -543,6 +543,7 @@ class Scanner:
         if app is not None:
             findings.extend(self._manifest_app_flags(app, manifest_path))
             findings.extend(self._manifest_platform_checks(root, app, manifest_path))
+            findings.extend(self._manifest_permission_checks(root, manifest_path))
             findings.extend(self._manifest_components(root, manifest_path))
 
         return findings
@@ -704,6 +705,56 @@ class Scanner:
                 )
             )
 
+        return findings
+
+    # Rule ids shared with data/builtin/patterns.json (type "manifest"), whose XPath checks
+    # ElementTree cannot evaluate. They are implemented here so the Hub toggles still apply.
+    # id -> (title, severity, default_enabled, permission names, component tags guarded by them, CWE)
+    _PERMISSION_RULES = {
+        "permission-install-packages": (
+            "App can install other packages", "High", True,
+            ("android.permission.INSTALL_PACKAGES", "android.permission.REQUEST_INSTALL_PACKAGES"), (),
+            "CWE-250"),
+        "permission-system-alert-window": (
+            "SYSTEM_ALERT_WINDOW (draw over other apps)", "High", True,
+            ("android.permission.SYSTEM_ALERT_WINDOW",), (), "CWE-1021"),
+        "permission-bind-accessibility": (
+            "Accessibility service binding", "High", True,
+            ("android.permission.BIND_ACCESSIBILITY_SERVICE",), ("service",), "CWE-250"),
+        "permission-device-admin": (
+            "Device administrator binding", "High", True,
+            ("android.permission.BIND_DEVICE_ADMIN",), ("receiver",), "CWE-250"),
+    }
+
+    def _manifest_permission_checks(self, root: ET.Element, manifest_path: str) -> List[Finding]:
+        from .patterns.overrides import is_enabled, load_overrides
+        ov = load_overrides()
+        declared = {self._get_android_attr(e, "name") for e in root.findall("uses-permission")}
+        declared |= {self._get_android_attr(e, "name") for e in root.findall("uses-permission-sdk-23")}
+        app = root.find("application")
+        findings: List[Finding] = []
+        for rid, (title, sev, default, perms, tags, cwe) in self._PERMISSION_RULES.items():
+            if not is_enabled(rid, default, ov):
+                continue
+            hit = next((p for p in perms if p in declared), None)
+            if hit is None and app is not None:
+                for tag in tags:
+                    for comp in app.findall(tag):
+                        if self._get_android_attr(comp, "permission") in perms:
+                            hit = self._get_android_attr(comp, "permission")
+                            break
+                    if hit:
+                        break
+            if hit is None:
+                continue
+            findings.append(Finding(
+                fid=rid, title=title, severity=sev,
+                description=(f"The manifest uses {hit}. This is a high-impact capability: review whether the "
+                             "app genuinely needs it and how it is protected from misuse."),
+                attack_path="Abuse of the capability by a compromised component or a malicious caller.",
+                adb_commands=[], evidence=self._manifest_evidence(manifest_path, hit),
+                references=["https://developer.android.com/reference/android/Manifest.permission"],
+                extra={"cwe": [cwe], "category": "Permissions"}))
         return findings
 
     # ── Platform / policy checks (SDK levels, backup defaults, network security config)

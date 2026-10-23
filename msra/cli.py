@@ -1016,6 +1016,14 @@ def cmd_scan(args) -> int:
     print("[+] Scanning decompiled sources...")
     scanner = Scanner(decompiled_dir, adb_path=args.adb_path, pattern_config=pattern_config)
     findings = scanner.scan()
+    if not getattr(args, "no_taint", False):
+        print("[+] Running taint + ICC analysis...")
+        from msra.analysis.deep import run_deep_analysis
+        extra, _flows = run_deep_analysis(decompiled_dir, scanner.manifest_data,
+                                          scanner.package_name or "unknown")
+        if extra:
+            print(f"[+] Taint/ICC analysis added {len(extra)} finding(s)")
+            findings = list(findings) + extra
     source_file_count = sum(1 for _ in iter_source_files(decompiled_dir))
 
     # Get package name and create reports directory
@@ -2208,6 +2216,8 @@ Examples:
     scan_parser.add_argument("--out", default="report", help="Output directory")
     scan_parser.add_argument("--jadx-path", default=None, help="Path to jadx")
     scan_parser.add_argument("--adb-path", default="adb", help="Path to adb")
+    scan_parser.add_argument("--no-taint", action="store_true",
+                             help="Skip the taint + ICC analysis pass (faster on huge APKs)")
     scan_parser.add_argument("--patterns-dir", help="Custom patterns directory")
     scan_parser.add_argument("--keep-decompiled", action="store_true", help="Keep decompiled output")
     scan_parser.add_argument("--no-update", action="store_true", help="Skip threat intel update")

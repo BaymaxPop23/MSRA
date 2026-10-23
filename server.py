@@ -6486,63 +6486,14 @@ def _run_scan(scan_id: str, apk_path: Path):
             _scan_done_evt.set()
         pkg      = scanner.package_name or "unknown"
 
-        # ── Taint analysis (source-sink inter-procedural flows) ─────────────
+        # ── Taint analysis + ICC chains ──────────────────────────────────────
         _set_status(scan_id, status="scanning", progress=79,
                     message="Running inter-procedural taint analysis…")
-        try:
-            from msra.analysis.taint_engine import TaintEngine, to_finding as _taint_to_finding
-            _taint_manifest = scanner.manifest_data or {}
-            _taint_manifest.setdefault("_package", pkg)
-            _taint_engine = TaintEngine(str(decompiled), _taint_manifest)
-            _taint_flows = _taint_engine.analyze()
-            if _taint_flows:
-                findings = list(findings) + [_taint_to_finding(f) for f in _taint_flows]
-                _log.info("Taint engine: %d flows found for %s", len(_taint_flows), scan_id)
-        except Exception as _te:
-            _log.warning("Taint engine failed (non-fatal): %s", _te)
-            _taint_flows = []
-
-        # ── ICC graph (cross-component taint via Intent forwarding) ─────────
-        try:
-            from msra.analysis.icc_graph import ICCGraph
-            from msra.utils import Finding, Evidence
-            _icc = ICCGraph(str(decompiled), _taint_manifest).build()
-            _icc_chains = _icc.get_exploitable_chains(_taint_flows)
-            if _icc_chains:
-                def _icc_to_finding(chain):
-                    from msra.utils import Finding, Evidence
-                    return Finding(
-                        fid=f"ICC_{chain.sink.sink_type.upper()}_{chain.entry_point.split('.')[-1].upper()}",
-                        title=f"ICC taint chain: exported {chain.entry_point.split('.')[-1]} → {chain.icc_target.split('.')[-1]} → {chain.sink.sink_api}",
-                        severity=chain.severity,
-                        description=(
-                            f"An exported component forwards untrusted Intent extras to an internal "
-                            f"component via ICC. Key '{chain.extra_key}' reaches {chain.sink.sink_api} "
-                            f"({chain.sink.sink_type}) in {chain.icc_target}."
-                        ),
-                        attack_path=(
-                            f"Exported: {chain.entry_point}\n"
-                            f"→ ICC ({chain.extra_key!r})\n"
-                            f"→ Internal: {chain.icc_target}\n"
-                            f"→ Sink: {chain.sink.sink_api}"
-                        ),
-                        adb_commands=chain.poc_commands,
-                        evidence=Evidence(
-                            file_path=chain.sink.file_path,
-                            line_number=chain.sink.line_number,
-                            snippet=chain.sink.code_snippet,
-                            matched_text=chain.sink.sink_api,
-                        ),
-                        references=[
-                            "https://developer.android.com/topic/security/risks/intent-injection",
-                            "https://owasp.org/www-project-mobile-top-10/",
-                        ],
-                        extra={"icc_chain": True, "extra_key": chain.extra_key},
-                    )
-                findings = list(findings) + [_icc_to_finding(c) for c in _icc_chains]
-                _log.info("ICC graph: %d exploitable chains for %s", len(_icc_chains), scan_id)
-        except Exception as _ie:
-            _log.debug("ICC graph failed (non-fatal): %s", _ie)
+        from msra.analysis.deep import run_deep_analysis
+        _deep_extra, _taint_flows = run_deep_analysis(str(decompiled), scanner.manifest_data, pkg)
+        if _deep_extra:
+            findings = list(findings) + _deep_extra
+            _log.info("Deep analysis: %d extra findings for %s", len(_deep_extra), scan_id)
 
         _set_status(scan_id, status="reporting", progress=80,
                     message=f"Generating report ({len(findings)} findings)…")
