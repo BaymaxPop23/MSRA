@@ -217,21 +217,10 @@ class MitmCapture:
     # ------------------------------------------------------------------ #
 
     def _adb(self, args: List[str], timeout: int = 10) -> subprocess.CompletedProcess:
-        """Run an ADB command and return the CompletedProcess."""
-        cmd = ["adb"]
-        if self.device_serial:
-            cmd += ["-s", self.device_serial]
-        cmd += args
-        try:
-            return subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout
-            )
-        except subprocess.TimeoutExpired:
-            logger.debug("ADB command timed out: %s", cmd)
-            return subprocess.CompletedProcess(cmd, returncode=-1, stdout="", stderr="timeout")
-        except Exception as exc:
-            logger.debug("ADB command failed: %s – %s", cmd, exc)
-            return subprocess.CompletedProcess(cmd, returncode=-1, stdout="", stderr=str(exc))
+        """Run an ADB command via the shared runner and return a CompletedProcess."""
+        from ..adb_util import run_adb
+        rc, out, err = run_adb(args, timeout=timeout, serial=self.device_serial or None)
+        return subprocess.CompletedProcess(["adb"] + list(args), returncode=rc, stdout=out, stderr=err)
 
     def _configure_device_proxy(self, host_ip: str) -> bool:
         """Set the Android device's global HTTP proxy via ADB settings."""

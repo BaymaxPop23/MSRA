@@ -30,9 +30,9 @@ class JARScanner:
             patterns_path = _DEFAULT_PATTERNS_PATH
         with open(patterns_path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
-        self.patterns: List[Dict[str, Any]] = [
-            p for p in data.get("patterns", []) if p.get("enabled", True)
-        ]
+        # Honour analyst enable/disable overrides from the Intelligence Hub
+        from .patterns.overrides import filter_enabled
+        self.patterns: List[Dict[str, Any]] = filter_enabled(data.get("patterns", []))
 
     # ── Public API ──────────────────────────────────────────────────────────
 

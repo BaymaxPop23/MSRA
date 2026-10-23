@@ -147,8 +147,24 @@ class ICCGraph:
         if "components" in raw and isinstance(raw["components"], dict):
             raw = raw["components"]
 
+        # Scanner.manifest_data format: {"activities": [{"name":..,"exported":..}], ...}
+        _LIST_KEYS = {"activities": "activity", "services": "service",
+                      "receivers": "receiver", "providers": "provider"}
+        for key, ctype in _LIST_KEYS.items():
+            entries = raw.get(key)
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict) or not entry.get("name"):
+                    continue
+                name = entry["name"]
+                if name.startswith(".") and self._package:
+                    name = self._package + name
+                self._comp_info[name] = (ctype, bool(entry.get("exported", False)))
+                self._comp_info.setdefault(name.split(".")[-1], self._comp_info[name])
+
         for name, info in raw.items():
-            if name.startswith("_"):
+            if name.startswith("_") or name in _LIST_KEYS:
                 continue
             if hasattr(info, "component_type"):
                 self._comp_info[name] = (info.component_type, info.exported)

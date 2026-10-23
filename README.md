@@ -1,6 +1,6 @@
 # MSRA — Mobile Security Review Assistant
 
-![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)
+![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)
 ![License MIT](https://img.shields.io/badge/license-MIT-green.svg)
 ![Patterns](https://img.shields.io/badge/patterns-215+-orange.svg)
 ![Platforms](https://img.shields.io/badge/platforms-Android%20%7C%20iOS%20%7C%20JAR%20%7C%20EXE-blueviolet.svg)
@@ -89,6 +89,76 @@ Scan data and reports persist in Docker volumes across restarts.
 
 ---
 
+## Security & configuration
+
+MSRA drives real devices and parses untrusted files, so it is locked down by default:
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `--host` / `MSRA_HOST` | `127.0.0.1` | Bind address. `--debug` is refused on non-loopback hosts. |
+| `MSRA_AUTH_TOKEN` | unset | Require a token. Browsers sign in at `/login` (token in the POST body, never the URL); scripts send `Authorization: Bearer <token>`. |
+| `MSRA_ALLOWED_HOSTS` | unset | Extra `Host` names accepted when no token is set (DNS-rebinding guard). |
+| `MSRA_AUTO_INSTALL` | unset | Set to `1` to auto-install scanned APKs on a connected device (off by default). |
+| `MSRA_DB_PATH` | `./msra.db` | SQLite location (Docker keeps it on the data volume). |
+| `MSRA_CLAUDE_MODEL`, `MSRA_CLAUDE_FAST_MODEL` | built-in | Models used for AI features. |
+| `MSRA_JADX_TIMEOUT` | 300 (server) / 600 (CLI) | Seconds before jadx is abandoned. |
+| `MSRA_DYN_JOB_TIMEOUT` | 900 | Time budget per dynamic job in seconds (clamped to 60-3600). Timed-out jobs are marked failed and the device is cleaned up. |
+
+Exposing the dashboard beyond localhost? Set `MSRA_AUTH_TOKEN` and put it behind HTTPS. With Docker, the port is published on `127.0.0.1` unless you set `MSRA_BIND`.
+
+Run the tests with `make test` (needs `pip install pytest`).
+
+---
+
+## Scanner coverage notes
+
+- **Hybrid apps:** React Native bundles (plain JS and Hermes bytecode), Flutter `libapp.so`, Xamarin assemblies and Unity metadata are detected and scanned for hardcoded secrets, since jadx only decompiles the Java/Kotlin shell.
+- **Taint + ICC:** the web scan and the CLI (`msra scan`, skip with `--no-taint`) both run the inter-procedural taint engine and the exported-component ICC chain analysis.
+- **SBOM / vulnerable dependencies:** libraries are inventoried offline from build metadata (CycloneDX 1.5 at `/api/scans/<id>/sbom.json`). Set `MSRA_OSV_LOOKUP=1` to check them against OSV.dev; only public `group:artifact` + version coordinates are sent.
+- **Permission rules** (`permission-install-packages`, `-system-alert-window`, `-bind-accessibility`, `-device-admin`) are evaluated natively and respect the Intelligence Hub toggles.
+
+## Operations & scaling
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MSRA_SCAN_WORKERS` | 2 | Concurrent scans (decompile + analysis is CPU/RAM heavy; extra uploads queue). Clamped 1-32 |
+| `MSRA_DYN_WORKERS` | 3 | Concurrent dynamic verification jobs (still serialised per device) |
+| `MSRA_AI_WORKERS` | 2 | Concurrent AI triage jobs |
+| `MSRA_UPLOAD_TTL_HOURS` | off | Delete leftover uploads older than this (never for active scans) |
+| `MSRA_DECOMPILED_TTL_DAYS` | off | Delete old `decompiled/` trees; reports and findings are kept (dynamic/AI re-checks of that scan need a rescan) |
+| `MSRA_DB_PATH` | `./msra.db` | SQLite location (WAL, busy-timeout, indexed) |
+
+`GET /healthz` is an unauthenticated liveness probe (returns `{"ok": true}` only); the Docker healthcheck uses it, so it keeps working when `MSRA_AUTH_TOKEN` is set. `GET /api/queue/status` shows pool depths. Responses carry `nosniff`/frame/referrer headers. SQLite plus an in-process queue targets a single node; for multiple nodes put scans behind a shared queue and move the DB to a server database first.
+
+## AI features
+
+Everything AI is optional; scanning works fully offline without it. Open **AI** in the top bar to configure.
+
+**Providers** (credentials come from the environment only - MSRA never stores them):
+
+| Provider | Set |
+|---|---|
+| Anthropic (default) | `ANTHROPIC_API_KEY` |
+| Native AWS Bedrock (boto3 Converse; `pip install boto3`) | `MSRA_LLM_PROVIDER=bedrock` + `MSRA_BEDROCK_REGION` (or `AWS_REGION`); credentials from the standard AWS chain (`AWS_PROFILE`, SSO, env keys, instance role) - MSRA never reads them |
+| Bedrock-style LLM gateway | `MSRA_LLM_BASE_URL` + `MSRA_LLM_TOKEN` (optional: `MSRA_LLM_AUTH_HEADER`, `MSRA_LLM_API_PATH`, `MSRA_LLM_CHAT_PATH`, `MSRA_LLM_MODELS_PATH`) |
+
+With a gateway, Claude models use the Messages API and every other vendor (DeepSeek, Qwen, Llama, Nova, ...) is routed to chat-completions automatically. The model list is fetched live from the gateway.
+
+**Choose a model per feature** in *AI Settings*: finding triage, dynamic scan verdicts, PoC generation, intel rule extraction and quick checks. Pick from the catalog or type any model id; bare names (`sonnet`, `opus`, `haiku`, `fable`) resolve to exact ids, and MSRA warns when a provider silently answers with a different model. Each row shows the API used, context window and an estimated price, and has a **Test** button. Set a **spend cap** to stop AI calls once it is reached.
+
+**AI Triage** reviews un-triaged findings with N independent verifiers, each through a different lens (reachability, input control, mitigations). A finding is called *likely real* only when all N agree and *likely false positive* only on a majority. Results show as badges on the findings list and in the finding drawer. They are advisory: your own triage decision always wins, and findings you have already triaged are skipped.
+
+**It learns from you.** Every False Positive / Confirmed decision is tallied per rule. Rules you keep rejecting are listed in *AI Settings -> Learning from your triage* (with a one-click disable), a rule's track record is shown next to its findings, and the AI verifier is told each rule's history.
+
+**Safety.** Anything originating in an app or on the web (code snippets, logcat, blog text) is wrapped in a random per-request delimiter and treated strictly as data; secrets and tokens are masked before text is sent to a model. Rules produced from AI or crawled content are imported **disabled** under server-generated ids and must be enabled by an analyst.
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `MSRA_AI_CONFIG` | `data/custom/ai_config.json` | Where model choices/budget are saved (no credentials). |
+| `MSRA_CLAUDE_MODEL`, `MSRA_CLAUDE_FAST_MODEL` | unset | Legacy defaults, used until you pick a model in the UI. |
+
+---
+
 ## Updating
 
 MSRA ships an `update.sh` script that pulls the latest code, updates dependencies, and restarts the server in one step.
@@ -139,7 +209,7 @@ pip3 install -r requirements.txt
 
 | Package | Purpose |
 |---|---|
-| Python 3.8+ | Runtime — [python.org](https://python.org) |
+| Python 3.9+ | Runtime — [python.org](https://python.org) |
 | `flask` | Web server |
 | `weasyprint` | PDF report export |
 | `pefile` | Windows PE / EXE / DLL scanning |

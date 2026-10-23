@@ -43,14 +43,21 @@ class PatternLoader:
             logger.error(f"Failed to load {file_path}: {e}")
             raise
 
-    def load_directory(self, directory: Path) -> List[VulnerabilityPattern]:
-        """Load all pattern files from a directory."""
+    def load_directory(self, directory: Path,
+                       exclude_prefixes: tuple = ()) -> List[VulnerabilityPattern]:
+        """Load all pattern files from a directory.
+
+        Files whose name starts with one of *exclude_prefixes* are skipped
+        (used to keep iOS/JAR/EXE rule files out of the Android scanner).
+        """
         patterns = []
         if not directory.exists():
             logger.warning(f"Pattern directory does not exist: {directory}")
             return patterns
 
         for file_path in sorted(directory.glob("*.json")):
+            if exclude_prefixes and file_path.name.startswith(exclude_prefixes):
+                continue
             try:
                 file_patterns = self.load_file(file_path)
                 patterns.extend(file_patterns)

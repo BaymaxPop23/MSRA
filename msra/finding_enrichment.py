@@ -909,6 +909,10 @@ def _canonical_rule(fid: str) -> str:
     """Map a finding's rule id to a canonical bucket for cross-pattern dedup."""
     if not fid:
         return ""
+    if fid.startswith("semgrep:"):
+        # semgrep ids are "semgrep:<rule>:<path>:<line>"; keep the rule part
+        parts = fid.split(":")
+        return ":".join(parts[:2])
     base = fid.split(":", 1)[0]
     return _DEDUP_ALIASES.get(base, base)
 

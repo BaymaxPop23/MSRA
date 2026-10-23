@@ -3,14 +3,22 @@ services:
     build: .
     container_name: msra
     ports:
-      - "5001:5001"
+      # Loopback only by default. To expose on the network, set MSRA_BIND=0.0.0.0
+      # AND MSRA_AUTH_TOKEN (the app has no other authentication).
+      - "${MSRA_BIND:-127.0.0.1}:5001:5001"
     volumes:
-      # Persist scan data, reports, and user config across restarts
+      # Persist scan data, reports, user config and the SQLite DB across restarts
       - msra_uploads:/app/uploads
       - msra_reports:/app/reports
       - msra_data:/app/data/custom
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - MSRA_LLM_PROVIDER=${MSRA_LLM_PROVIDER:-}
+      - MSRA_BEDROCK_REGION=${MSRA_BEDROCK_REGION:-}
+      - MSRA_AUTH_TOKEN=${MSRA_AUTH_TOKEN:-}
+      - MSRA_LLM_BASE_URL=${MSRA_LLM_BASE_URL:-}
+      - MSRA_LLM_TOKEN=${MSRA_LLM_TOKEN:-}
+      - MSRA_LLM_AUTH_HEADER=${MSRA_LLM_AUTH_HEADER:-Authorization}
       - PORT=5001
     restart: unless-stopped
 

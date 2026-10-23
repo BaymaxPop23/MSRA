@@ -338,14 +338,14 @@ def _build_findings(findings: List[Dict]) -> str:
         sev      = _v(f, "severity", default="Info")
         color    = _SEV_COLORS.get(sev, "#94a3b8")
         bg       = _SEV_BG.get(sev, "#f8fafc")
-        desc     = _html.escape(_v(f, "description", default=""))[:800]
+        desc     = _html.escape(str(_v(f, "description", default=""))[:800])
         ev       = f.get("evidence") or {}
-        filepath = _html.escape(_v(ev, "file_path", default=""))
-        lineno   = _v(ev, "line_number", default="")
-        snippet  = _html.escape(_v(ev, "snippet", default=""))[:600]
+        filepath = _html.escape(str(_v(ev, "file_path", default="") or _v(ev, "file", default="")))
+        lineno   = _v(ev, "line_number", default="") or _v(ev, "line", default="")
+        snippet  = _html.escape(str(_v(ev, "snippet", default=""))[:600])
         adb_cmds = f.get("adb_commands") or []
         extra    = f.get("extra") or {}
-        attack   = _html.escape(_v(f, "attack_path", default=""))[:400]
+        attack   = _html.escape(str(_v(f, "attack_path", default=""))[:400])
 
         meta_parts = []
         if filepath:

@@ -7,10 +7,14 @@ Enable/disable overrides are persisted to data/custom/overrides.json.
 from __future__ import annotations
 
 import json
+import os
 import re
+import threading
 import time
 import uuid
 from pathlib import Path
+
+from .patterns import safety as _safety
 from typing import Any, Dict, List, Optional
 
 DATA_DIR     = Path(__file__).parent.parent / "data"
@@ -46,9 +50,20 @@ def _load_overrides() -> Dict[str, List[str]]:
     return {"disabled": [], "enabled": []}
 
 
+_WRITE_LOCK = threading.RLock()
+
+
+def _atomic_write(path, text: str) -> None:
+    """Write via temp file + rename so a crash/concurrent reader never sees a partial file."""
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
 def _save_overrides(data: Dict[str, List[str]]):
     _ensure_dirs()
-    OVERRIDES_F.write_text(json.dumps(data, indent=2))
+    with _WRITE_LOCK:
+        _atomic_write(OVERRIDES_F, json.dumps(data, indent=2))
 
 
 # ── Custom rules ────────────────────────────────────────────────────────────
@@ -65,11 +80,12 @@ def _load_user_rules() -> List[dict]:
 
 def _save_user_rules(rules: List[dict]):
     _ensure_dirs()
-    USER_RULES_F.write_text(json.dumps({
-        "schema_version": "1.0.0",
-        "name": "User Custom Rules",
-        "patterns": rules,
-    }, indent=2))
+    with _WRITE_LOCK:
+        _atomic_write(USER_RULES_F, json.dumps({
+            "schema_version": "1.0.0",
+            "name": "User Custom Rules",
+            "patterns": rules,
+        }, indent=2))
 
 
 # ── Serialization ───────────────────────────────────────────────────────────
@@ -77,7 +93,7 @@ def _save_user_rules(rules: List[dict]):
 def _pattern_to_dict(raw: dict, source: str, overrides: Dict[str, List[str]],
                      platform: str = "android") -> dict:
     pid             = raw.get("id", "")
-    default_enabled = raw.get("enabled", True)
+    default_enabled = _safety.default_enabled(raw.get("tags"), raw.get("enabled", True))
 
     if pid in overrides.get("disabled", []):
         enabled = False
@@ -149,6 +165,7 @@ def _pattern_to_dict(raw: dict, source: str, overrides: Dict[str, List[str]],
         "tags":           raw.get("tags", []),
         "adb_category":   raw.get("adb_category", "general"),
         "enabled":        enabled,
+        "default_enabled": default_enabled,
         "source":         source,
         "platform":       raw.get("platform", platform),
         "test_cases":     raw.get("test_cases", []),
@@ -228,61 +245,88 @@ def get_rule_by_id(rule_id: str) -> Optional[dict]:
     return next((r for r in get_all_rules() if r["id"] == rule_id), None)
 
 
+_VALID_SEVERITIES = {"critical": "Critical", "high": "High", "medium": "Medium",
+                     "low": "Low", "info": "Info"}
+_RULE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
 def _validate_patterns(data: dict) -> None:
-    """Raise ValueError if any regex pattern in data fails to compile."""
+    """Raise ValueError if the rule's metadata, type or any regex is invalid/unsafe.
+
+    Rules can originate from AI extraction or crawled web content, so severity,
+    category, id and detection type are constrained, and EVERY pattern is checked
+    whatever the declared detection type (the loader treats unknown types as regex,
+    so skipping the check for them would bypass it)."""
+    if "severity" in data:
+        sev = _VALID_SEVERITIES.get(str(data["severity"]).strip().lower())
+        if not sev:
+            raise ValueError(f"Invalid severity '{data['severity']}' "
+                             f"(expected one of {', '.join(_VALID_SEVERITIES.values())})")
+        data["severity"] = sev
+    if data.get("id") and not _RULE_ID_RE.match(str(data["id"]).strip()):
+        raise ValueError("Invalid rule id: use letters, digits, '.', '_' or '-' (max 64 chars)")
+    if "category" in data and len(str(data["category"])) > 80:
+        raise ValueError("Category too long")
+
     det_type = data.get("detection_type", "regex")
-    if det_type not in ("regex", "regex-multiline", "combined"):
-        return
-    for p in data.get("patterns", []):
-        pat = p.get("pattern", "")
+    if det_type not in _safety.ALLOWED_CUSTOM_TYPES:
+        raise ValueError(f"Unsupported detection type '{det_type}' "
+                         f"(allowed: {', '.join(_safety.ALLOWED_CUSTOM_TYPES)})")
+    pats = data.get("patterns", []) or []
+    if not isinstance(pats, list):
+        raise ValueError("patterns must be a list")
+    if len(pats) > _safety.MAX_PATTERNS:
+        raise ValueError(f"Too many patterns (max {_safety.MAX_PATTERNS})")
+    for p in pats:
+        pat = p.get("pattern", "") if isinstance(p, dict) else ""
         if not pat:
             continue
-        try:
-            re.compile(pat)
-        except re.error as exc:
-            raise ValueError(f"Invalid regex pattern '{pat}': {exc}") from exc
+        problem = _safety.regex_problem(pat)
+        if problem:
+            raise ValueError(f"Regex '{pat[:80]}': {problem}")
+
+
+def _original_enabled(rule_id: str) -> bool:
+    """Default enabled state of a rule from its source file (before overrides)."""
+    for rule in _compute_all_rules():
+        if rule["id"] == rule_id:
+            return bool(rule.get("default_enabled", True))
+    return True
+
+
+def _current_enabled(rule_id: str, overrides: Dict[str, List[str]], original: bool) -> bool:
+    if rule_id in overrides.get("disabled", []):
+        return False
+    if rule_id in overrides.get("enabled", []):
+        return True
+    return original
+
+
+def set_rule_enabled(rule_id: str, enabled: bool) -> dict:
+    """Explicit, idempotent enable/disable. Returns {"id", "enabled"}.
+
+    Raises ValueError for an unknown rule id so a typo can never be silently
+    recorded as an override for some other rule."""
+    if rule_id not in {r["id"] for r in _compute_all_rules()}:
+        raise ValueError(f"Unknown rule '{rule_id}'")
+    original = _original_enabled(rule_id)
+    with _WRITE_LOCK:
+        overrides = _load_overrides()
+        disabled = [r for r in overrides.get("disabled", []) if r != rule_id]
+        enabled_l = [r for r in overrides.get("enabled", []) if r != rule_id]
+        if enabled != original:
+            (enabled_l if enabled else disabled).append(rule_id)
+        overrides["disabled"], overrides["enabled"] = disabled, enabled_l
+        _save_overrides(overrides)
+    _invalidate_cache()
+    return {"id": rule_id, "enabled": enabled}
 
 
 def toggle_rule(rule_id: str) -> dict:
     """Toggle a rule's enabled state. Returns {"id": ..., "enabled": ...}."""
     overrides = _load_overrides()
-
-    # Determine default enabled state from any builtin pattern file
-    original_enabled = True
-    for builtin_name in ("patterns.json", "ios_patterns.json", "jar_patterns.json", "exe_patterns.json"):
-        builtin = DATA_DIR / "builtin" / builtin_name
-        if not builtin.exists():
-            continue
-        try:
-            data = json.loads(builtin.read_text())
-            match = next((p for p in data.get("patterns", []) if p.get("id") == rule_id), None)
-            if match is not None:
-                original_enabled = match.get("enabled", True)
-                break
-        except Exception:
-            pass
-
-    # Determine current state
-    if rule_id in overrides.get("disabled", []):
-        current = False
-    elif rule_id in overrides.get("enabled", []):
-        current = True
-    else:
-        current = original_enabled
-
-    new_state = not current
-
-    disabled = [r for r in overrides.get("disabled", []) if r != rule_id]
-    enabled  = [r for r in overrides.get("enabled",  []) if r != rule_id]
-
-    if new_state != original_enabled:
-        (enabled if new_state else disabled).append(rule_id)
-
-    overrides["disabled"] = disabled
-    overrides["enabled"]  = enabled
-    _save_overrides(overrides)
-    _invalidate_cache()
-    return {"id": rule_id, "enabled": new_state}
+    current = _current_enabled(rule_id, overrides, _original_enabled(rule_id))
+    return set_rule_enabled(rule_id, not current)
 
 
 def create_custom_rule(data: dict) -> dict:
@@ -291,7 +335,8 @@ def create_custom_rule(data: dict) -> dict:
     rules   = _load_user_rules()
     rule_id = (data.get("id") or "").strip() or ("custom-" + uuid.uuid4().hex[:8])
 
-    if any(r.get("id") == rule_id for r in rules):
+    if any(r.get("id") == rule_id for r in rules) or rule_id in {r["id"] for r in _compute_all_rules()}:
+        # Includes built-in iOS/JAR/EXE rules: a custom rule must never shadow a shipped detection
         raise ValueError(f"Rule ID '{rule_id}' already exists")
 
     rule = _build_rule_dict(rule_id, data)
@@ -303,11 +348,17 @@ def create_custom_rule(data: dict) -> dict:
 
 def update_custom_rule(rule_id: str, data: dict) -> Optional[dict]:
     """Update a custom rule. Returns None if not found. Raises ValueError on invalid regex."""
-    _validate_patterns(data)
     rules = _load_user_rules()
     idx   = next((i for i, r in enumerate(rules) if r.get("id") == rule_id), None)
     if idx is None:
         return None
+    # Validate what will actually be stored: a type change must not smuggle
+    # previously-validated-under-a-different-type patterns past the check.
+    cur_det = rules[idx].get("detection", {}) or {}
+    _validate_patterns({
+        **{"detection_type": cur_det.get("type", "regex"), "patterns": cur_det.get("patterns", [])},
+        **data,
+    })
 
     rule = rules[idx]
     for f in ["title", "severity", "category", "description", "attack_path", "remediation", "tags", "adb_category"]:
@@ -382,7 +433,7 @@ def _build_rule_dict(rule_id: str, data: dict) -> dict:
         "attack_path": data.get("attack_path", ""),
         "remediation": data.get("remediation", ""),
         "adb_category":data.get("adb_category", "general"),
-        "enabled":     True,
+        "enabled":     bool(data.get("enabled", True)),
         "tags":        data.get("tags", []),
         "created_at":  int(time.time()),
         "detection": {

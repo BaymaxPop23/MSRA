@@ -1,0 +1,237 @@
+from pathlib import Path
+
+from msra.analysis.taint_engine import TaintEngine
+
+MAIN = """package com.t;
+import android.app.Activity;
+import android.os.Bundle;
+
+public class Main extends Activity {
+    private Helper helper = new Helper();
+
+    protected void onCreate(Bundle b) {
+        String u = getIntent().getStringExtra("url");
+        helper.load(u);
+    }
+}
+"""
+
+HELPER = """package com.t;
+import android.webkit.WebView;
+
+public class Helper {
+    WebView web;
+    public void load(String target) {
+        web.loadUrl(target);
+    }
+}
+"""
+
+LOCAL = """package com.t;
+import android.app.Activity;
+import android.os.Bundle;
+import android.database.sqlite.SQLiteDatabase;
+
+public class Local extends Activity {
+    SQLiteDatabase db;
+
+    protected void onCreate(Bundle b) {
+        String q = getIntent().getStringExtra("q");
+        String where = "name = '" + q + "'";
+        db.rawQuery("select * from t where " + where, null);
+    }
+}
+"""
+
+UNQUAL = """package com.t;
+import android.app.Activity;
+import android.os.Bundle;
+import android.database.sqlite.SQLiteDatabase;
+
+public class Unqual extends Activity {
+    SQLiteDatabase db;
+
+    protected void onCreate(Bundle b) {
+        String v = getIntent().getStringExtra("v");
+        run(v);
+    }
+
+    private void run(String s) {
+        db.execSQL(s);
+    }
+}
+"""
+
+UNRELATED = """package com.t;
+import android.app.Activity;
+import android.os.Bundle;
+import android.database.sqlite.SQLiteDatabase;
+
+public class Unrelated extends Activity {
+    SQLiteDatabase db;
+
+    protected void onCreate(Bundle b) {
+        String ignored = getIntent().getStringExtra("x");
+        String fixed = "select 1";
+        db.rawQuery(fixed, null);
+    }
+}
+"""
+
+SAFE = """package com.t;
+import android.app.Activity;
+import android.os.Bundle;
+import android.database.sqlite.SQLiteDatabase;
+
+public class Safe extends Activity {
+    SQLiteDatabase db;
+
+    protected void onCreate(Bundle b) {
+        String q = getIntent().getStringExtra("q");
+        db.rawQuery("select * from t where name = ?", new String[]{q}, selectionArgs);
+    }
+}
+"""
+
+MANIFEST = {
+    "_package": "com.t",
+    "activities": [{"name": "com.t.%s" % n, "exported": True}
+                   for n in ("Main", "Local", "Unqual", "Unrelated", "Safe")],
+}
+
+
+def _flows(tmp_path: Path):
+    src = tmp_path / "sources" / "com" / "t"
+    src.mkdir(parents=True, exist_ok=True)
+    for name, text in (("Main", MAIN), ("Helper", HELPER), ("Local", LOCAL),
+                       ("Unqual", UNQUAL), ("Unrelated", UNRELATED), ("Safe", SAFE)):
+        (src / f"{name}.java").write_text(text)
+    return TaintEngine(str(tmp_path), MANIFEST).analyze()
+
+
+def _by_comp(flows, comp):
+    return [f for f in flows if f.source.component_class == f"com.t.{comp}"]
+
+
+def test_typed_field_call_resolves_across_classes(tmp_path):
+    flows = _by_comp(_flows(tmp_path), "Main")
+    assert flows, "Main -> helper.load -> loadUrl should be found"
+    f = flows[0]
+    assert f.sink.sink_type == "webview"
+    assert f.hop_path[-1] == "com.t.Helper.load"
+    assert f.data_flow == "call-chain-verified"     # u -> arg 0 -> param 'target' -> loadUrl(target)
+    assert f.severity == "Critical"
+
+
+def test_same_method_flow_verified_through_assignments(tmp_path):
+    flows = _by_comp(_flows(tmp_path), "Local")
+    assert flows and flows[0].data_flow == "intra-method"
+    assert flows[0].severity == "Critical"
+
+
+def test_unqualified_intra_class_call(tmp_path):
+    flows = _by_comp(_flows(tmp_path), "Unqual")
+    assert flows, "onCreate -> run() -> execSQL should be found"
+    assert flows[0].hop_path[-1] == "com.t.Unqual.run"
+
+
+def test_source_not_reaching_sink_is_not_verified(tmp_path):
+    flows = _by_comp(_flows(tmp_path), "Unrelated")
+    assert flows and all(f.data_flow == "unverified-same-method" for f in flows)
+    assert all(f.severity == "Medium" for f in flows)
+
+
+def test_sql_sanitizer_is_type_specific(tmp_path):
+    flows = _by_comp(_flows(tmp_path), "Safe")
+    assert flows and all(f.is_sanitized for f in flows)
+    # ...but weak checks are no longer treated as sanitizers
+    flows_local = _by_comp(_flows(tmp_path), "Local")
+    assert flows_local and not flows_local[0].is_sanitized
+
+
+def test_hostile_input_does_not_blow_up(tmp_path):
+    import time
+    src = tmp_path / "sources" / "com" / "t"
+    src.mkdir(parents=True)
+    (src / "Evil.java").write_text(
+        "package com.t;\npublic class Evil {\n"
+        + "A<" * 20000 + "\n"
+        + "void f() {" + "x " * 50000 + "\n}\n}\n")
+    t0 = time.time()
+    TaintEngine(str(tmp_path), {"_package": "com.t"}).analyze()
+    assert time.time() - t0 < 5
+
+
+HOP_SRC = """package com.t;
+import android.app.Activity;
+import android.os.Bundle;
+
+public class Hop extends Activity {
+    Mid mid = new Mid();
+    protected void onCreate(Bundle b) {
+        String evil = getIntent().getStringExtra("e");
+        mid.go("const", evil, "const2");
+    }
+}
+"""
+MID = """package com.t;
+public class Mid {
+    Leaf leaf = new Leaf();
+    public void go(String a, String b, String c) {
+        String x = b + "/x";
+        leaf.run(a, x);
+    }
+}
+"""
+LEAF = """package com.t;
+import android.webkit.WebView;
+public class Leaf {
+    WebView web;
+    public void run(String safe, String url) {
+        web.loadUrl(url);
+    }
+}
+"""
+CONST_SRC = HOP_SRC.replace("Hop", "Const").replace('mid.go("const", evil, "const2")', 'mid.go(evil, "const", "const2")')
+
+
+def _hop_flows(tmp_path, hop_src, name):
+    src = tmp_path / "sources" / "com" / "t"
+    src.mkdir(parents=True)
+    (src / f"{name}.java").write_text(hop_src)
+    (src / "Mid.java").write_text(MID)
+    (src / "Leaf.java").write_text(LEAF)
+    m = {"_package": "com.t", "activities": [{"name": f"com.t.{name}", "exported": True}]}
+    return [f for f in TaintEngine(str(tmp_path), m).analyze() if f.sink.sink_type == "webview"]
+
+
+def test_two_hop_argument_mapping_verified(tmp_path):
+    fl = _hop_flows(tmp_path, HOP_SRC, "Hop")
+    assert fl and fl[0].data_flow == "call-chain-verified" and len(fl[0].hop_path) == 3
+
+
+def test_tainted_arg_in_wrong_position_is_not_verified(tmp_path):
+    # evil lands in Mid.go's param 'a', which is passed to Leaf's UNUSED 'safe' param
+    fl = _hop_flows(tmp_path, CONST_SRC, "Const")
+    assert fl and fl[0].data_flow == "call-chain"
+    assert fl[0].severity != "Critical"
+
+
+def test_method_extraction_handles_jadx_style_constructors_and_comments(tmp_path):
+    src = '''package com.t;
+public final /* synthetic */ class R implements Runnable {
+    public /* synthetic */ R(String a, int b) {
+        this.a = a;
+    }
+
+    @Override // java.lang.Runnable
+    public final void run() {
+        if (x) { y(); }
+    }
+}
+'''
+    e = TaintEngine(str(tmp_path), {})
+    got = {n: ln for n, _b, ln in e._extract_methods(src, src.splitlines(), "com.t.R", "R.java")}
+    assert {"R", "run"} <= set(got)
+    assert got["R"] == 3 and got["run"] == 8          # line numbers point at the declaration
+    assert e._method_params[("com.t.R", "R")] == ["a", "b"]

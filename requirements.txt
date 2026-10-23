@@ -4,6 +4,15 @@
 # Web server: Flask
 flask>=3.0.0
 
+# Windows PE (.exe/.dll) scanning - without it only string patterns run
+pefile>=2023.2.7
+
+# Time-bounded regex engine: custom/crawled/AI rules run with a hard timeout (ReDoS defence)
+regex>=2023.0.0
+
+# Claude-powered features (PoC generation, AI dynamic verdicts, rule extraction)
+anthropic>=0.40.0
+
 # External tools required:
 #   - jadx: APK decompilation (https://github.com/skylot/jadx)
 #   - adb: Android Debug Bridge (Android SDK)

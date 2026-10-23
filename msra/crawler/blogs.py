@@ -16,6 +16,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Any
 
+from ..security import UnsafeURLError, safe_fetch
 from .cache import CrawlerCache
 
 logger = logging.getLogger(__name__)
@@ -234,21 +235,22 @@ class BlogCrawler:
 
         self._rate_limit()
 
-        request = urllib.request.Request(
-            url,
-            headers={
-                'User-Agent': 'APKAnalyzer Security Research Bot/1.0 (+https://github.com/apkanalyzer)',
+        _headers = {
+            'User-Agent': 'APKAnalyzer Security Research Bot/1.0 (+https://github.com/apkanalyzer)',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.5',
             }
-        )
 
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                content = response.read().decode('utf-8', errors='ignore')
-                if use_cache:
-                    self._cache.set(cache_key, content, "blog_fetch")
-                return content
+            # SSRF-safe: http(s) only, public addresses only, redirects re-checked
+            _body, _ctype = safe_fetch(url, timeout=30, max_bytes=3_000_000, headers=_headers)
+            content = _body.decode('utf-8', errors='ignore')
+            if use_cache:
+                self._cache.set(cache_key, content, "blog_fetch")
+            return content
+        except UnsafeURLError as e:
+            logger.warning(f"Blocked unsafe URL {url}: {e}")
+            return None
         except urllib.error.HTTPError as e:
             logger.warning(f"HTTP {e.code} fetching {url}")
             return None

@@ -80,14 +80,76 @@ class PatternManager:
         if self.config.custom_patterns_dir:
             self._load_custom(self.config.custom_patterns_dir)
 
+        # 5. The analyst's own rules from the Intelligence Hub, then their
+        #    enable/disable choices - previously neither reached the scanner.
+        self._load_user_rules()
+        self._apply_overrides()
+
         self._loaded = True
         logger.info(f"Loaded {len(self._patterns)} patterns from {len(self._loaded_sources)} sources")
+
+    def _load_user_rules(self) -> None:
+        import json as _json
+        from .safety import ALLOWED_CUSTOM_TYPES, default_enabled, regex_problem
+        user_file = self.config.data_dir / "custom" / "user_rules.json"
+        if not user_file.exists():
+            return
+        try:
+            raw_rules = _json.loads(user_file.read_text()).get("patterns", [])
+        except Exception as e:                      # one bad file must not break scans
+            logger.warning(f"Skipping user rules {user_file.name}: {e}")
+            return
+
+        builtin_ids = set(self._patterns)
+        loaded = 0
+        for raw in raw_rules:
+            rid = raw.get("id", "?") if isinstance(raw, dict) else "?"
+            det = (raw.get("detection") or {}) if isinstance(raw, dict) else {}
+            # The loader would silently treat an unknown detection type as regex, so
+            # vet the raw rule first (this also covers hand-edited / older files).
+            if det.get("type", "regex") not in ALLOWED_CUSTOM_TYPES:
+                logger.warning(f"Ignoring user rule '{rid}': unsupported detection type")
+                continue
+            bad = next((p for p in (regex_problem(d.get("pattern", "")) for d in det.get("patterns", [])
+                                    if isinstance(d, dict) and d.get("pattern")) if p), None)
+            if bad:
+                logger.warning(f"Ignoring user rule '{rid}': {bad}")
+                continue
+            if rid in builtin_ids:
+                # A custom rule may never silently replace a built-in detection
+                logger.warning(f"Ignoring user rule '{rid}': id collides with a built-in rule")
+                continue
+            try:
+                pattern = self._loader._parse_pattern(raw)
+            except Exception as e:
+                logger.warning(f"Failed to parse user rule '{rid}': {e}")
+                continue
+            # Crawler/AI-derived rules stay off until an analyst enables them
+            pattern.enabled = default_enabled(pattern.tags, pattern.enabled)
+            self._mark_untrusted(pattern)
+            self._patterns[pattern.id] = pattern
+            loaded += 1
+        if loaded:
+            self._loaded_sources.append(f"custom:{user_file.name}")
+
+    def _apply_overrides(self) -> None:
+        from .overrides import load_overrides
+        ov = load_overrides(self.config.data_dir)
+        for pid in ov["disabled"]:
+            if pid in self._patterns:
+                self._patterns[pid].enabled = False
+        for pid in ov["enabled"]:
+            if pid in self._patterns:
+                self._patterns[pid].enabled = True
 
     def _load_builtin(self) -> None:
         """Load built-in patterns from package data directory."""
         builtin_dir = self.config.data_dir / "builtin"
         if builtin_dir.exists():
-            self._load_from_directory(builtin_dir, "builtin")
+            # ios_/jar_/exe_ rule files use detection types the Android scanner
+            # does not understand; each platform scanner loads its own file.
+            self._load_from_directory(builtin_dir, "builtin",
+                                      exclude_prefixes=("ios_", "jar_", "exe_"))
         else:
             logger.warning(f"Built-in patterns directory not found: {builtin_dir}")
 
@@ -131,10 +193,19 @@ class PatternManager:
         if custom_dir.exists():
             self._load_from_directory(custom_dir, "custom")
 
-    def _load_from_directory(self, directory: Path, source_name: str) -> None:
+    @staticmethod
+    def _mark_untrusted(pattern) -> None:
+        """Route this rule's regexes through the time-bounded engine."""
+        for det in pattern.detection.patterns:
+            det.untrusted = True
+
+    def _load_from_directory(self, directory: Path, source_name: str,
+                             exclude_prefixes: tuple = ()) -> None:
         """Load all pattern files from a directory."""
-        patterns = self._loader.load_directory(directory)
+        patterns = self._loader.load_directory(directory, exclude_prefixes)
         for pattern in patterns:
+            if source_name != "builtin":            # community / crawled / custom dirs
+                self._mark_untrusted(pattern)
             # Later sources override earlier ones (by ID)
             self._patterns[pattern.id] = pattern
 

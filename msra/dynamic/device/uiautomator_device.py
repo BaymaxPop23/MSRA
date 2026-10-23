@@ -1,5 +1,6 @@
 """uiautomator2-based device implementation for advanced UI automation."""
 
+import shlex
 import time
 import logging
 from typing import Optional, List, Dict, Any, Tuple
@@ -572,25 +573,25 @@ class UIAutomatorDevice(DeviceInterface):
                        flags: Optional[List[str]] = None,
                        data_uri: Optional[str] = None) -> bool:
         """Start activity with intent."""
-        cmd = f"am start -n {package}/{activity}"
+        cmd = f"am start -n {shlex.quote(f'{package}/{activity}')}"
 
         if data_uri:
-            cmd += f" -d '{data_uri}'"
+            cmd += f" -d {shlex.quote(str(data_uri))}"
 
         if flags:
             for flag in flags:
-                cmd += f" -f {flag}"
+                cmd += f" -f {shlex.quote(str(flag))}"
 
         if extras:
             for key, value in extras.items():
                 if isinstance(value, bool):
-                    cmd += f" --ez {key} {str(value).lower()}"
+                    cmd += f" --ez {shlex.quote(str(key))} {str(value).lower()}"
                 elif isinstance(value, int):
-                    cmd += f" --ei {key} {value}"
+                    cmd += f" --ei {shlex.quote(str(key))} {value}"
                 elif isinstance(value, float):
-                    cmd += f" --ef {key} {value}"
+                    cmd += f" --ef {shlex.quote(str(key))} {value}"
                 else:
-                    cmd += f" --es {key} '{value}'"
+                    cmd += f" --es {shlex.quote(str(key))} {shlex.quote(str(value))}"
 
         success, _ = self.execute_shell(cmd)
         return success
@@ -598,19 +599,19 @@ class UIAutomatorDevice(DeviceInterface):
     def send_broadcast(self, action: str, package: Optional[str] = None,
                        extras: Optional[Dict[str, Any]] = None) -> bool:
         """Send broadcast intent."""
-        cmd = f"am broadcast -a {action}"
+        cmd = f"am broadcast -a {shlex.quote(str(action))}"
 
         if package:
-            cmd += f" -p {package}"
+            cmd += f" -p {shlex.quote(str(package))}"
 
         if extras:
             for key, value in extras.items():
                 if isinstance(value, bool):
-                    cmd += f" --ez {key} {str(value).lower()}"
+                    cmd += f" --ez {shlex.quote(str(key))} {str(value).lower()}"
                 elif isinstance(value, int):
-                    cmd += f" --ei {key} {value}"
+                    cmd += f" --ei {shlex.quote(str(key))} {value}"
                 else:
-                    cmd += f" --es {key} '{value}'"
+                    cmd += f" --es {shlex.quote(str(key))} {shlex.quote(str(value))}"
 
         success, _ = self.execute_shell(cmd)
         return success
@@ -618,14 +619,14 @@ class UIAutomatorDevice(DeviceInterface):
     def start_service(self, package: str, service: str,
                       extras: Optional[Dict[str, Any]] = None) -> bool:
         """Start service."""
-        cmd = f"am startservice -n {package}/{service}"
+        cmd = f"am startservice -n {shlex.quote(f'{package}/{service}')}"
 
         if extras:
             for key, value in extras.items():
                 if isinstance(value, str):
-                    cmd += f" --es {key} '{value}'"
+                    cmd += f" --es {shlex.quote(str(key))} {shlex.quote(str(value))}"
                 elif isinstance(value, int):
-                    cmd += f" --ei {key} {value}"
+                    cmd += f" --ei {shlex.quote(str(key))} {value}"
 
         success, _ = self.execute_shell(cmd)
         return success
@@ -634,13 +635,13 @@ class UIAutomatorDevice(DeviceInterface):
                                projection: Optional[List[str]] = None,
                                selection: Optional[str] = None) -> Tuple[bool, str]:
         """Query content provider."""
-        cmd = f"content query --uri {uri}"
+        cmd = f"content query --uri {shlex.quote(str(uri))}"
 
         if projection:
-            cmd += f" --projection {':'.join(projection)}"
+            cmd += f" --projection {shlex.quote(':'.join(map(str, projection)))}"
 
         if selection:
-            cmd += f' --where "{selection}"'
+            cmd += f" --where {shlex.quote(str(selection))}"
 
         return self.execute_shell(cmd)
 

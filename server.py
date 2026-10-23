@@ -23,6 +23,7 @@ import sys
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+import html as _html
 import uuid
 import zipfile
 import tempfile
@@ -40,6 +41,12 @@ from msra.utils import iter_source_files
 from msra import rules_api
 from msra.corellium import CorelliumClient
 import msra.db as _db
+from msra import security as _sec
+from msra.dynamic import adb_util as _adb_util
+from msra.ai import routes as _ai_routes, settings as _ai_settings
+from msra.ai.safety import SYSTEM_NOTE as _AI_UNTRUSTED_NOTE, wrap_untrusted as _wrap_untrusted
+from msra.ai.client import (LLMError as _LLMError, get_client as _get_ai_client,
+                            parse_json_array as _parse_json_array, parse_json_block as _parse_json_block)
 
 # ── Config ───────────────────────────────────────────────────────────────
 UPLOAD_FOLDER   = Path(__file__).parent / "uploads"
@@ -52,7 +59,17 @@ CUSTOM_DIR      = DATA_DIR / "custom"
 DYNAMIC_CFG_F   = CUSTOM_DIR / "dynamic_config.json"
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-CLAUDE_MODEL      = "claude-sonnet-4-6"
+# Models are chosen per feature in AI Settings (msra/ai/settings.py); the provider
+# (Anthropic key or Bedrock-style gateway) comes from the environment.
+
+# Optional shared-secret auth. When MSRA_AUTH_TOKEN is set, every request must
+# present it as "Authorization: Bearer <token>" / "X-MSRA-Token", or hold the
+# session cookie issued by POST /login.
+AUTH_TOKEN = os.environ.get("MSRA_AUTH_TOKEN", "")
+_LOOPBACK_ONLY = False          # set by __main__; only used for startup warnings
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_ALLOWED_HOSTS = _LOOPBACK_HOSTS | {
+    h.strip().lower() for h in os.environ.get("MSRA_ALLOWED_HOSTS", "").split(",") if h.strip()}
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
@@ -61,6 +78,95 @@ app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
 import time as _time
 
 _log = logging.getLogger(__name__)
+
+
+# ── Request guards: scan_id validation, auth, CSRF / DNS-rebinding, headers ──
+
+@app.before_request
+def _request_guards():
+    import hmac
+    # 1. Host-header allowlist (DNS rebinding). Enforced whenever no auth token
+    # is configured - independent of the bind address, so a container bound to
+    # 0.0.0.0 behind a loopback-published port is still protected. Add other
+    # hostnames with MSRA_ALLOWED_HOSTS=host1,host2.
+    if not AUTH_TOKEN:
+        from urllib.parse import urlparse
+        host = urlparse("//" + (request.host or "")).hostname or ""
+        if host.lower() not in _ALLOWED_HOSTS:
+            return jsonify({"error": "Forbidden host (set MSRA_ALLOWED_HOSTS or MSRA_AUTH_TOKEN)"}), 403
+
+    # 2. Optional token auth. Programmatic clients send the raw token in a
+    # header; browsers log in once via POST /login and keep a derived session
+    # cookie (the master token never appears in a URL, so it can't reach logs).
+    if AUTH_TOKEN and request.endpoint not in ("login", "healthz"):
+        hdr = (request.headers.get("X-MSRA-Token")
+               or request.headers.get("Authorization", "").removeprefix("Bearer ").strip())
+        cookie = request.cookies.get("msra_session", "")
+        ok = (hdr and hmac.compare_digest(hdr, AUTH_TOKEN)) or \
+             (cookie and hmac.compare_digest(cookie, _session_value()))
+        if not ok:
+            if request.method == "GET" and "text/html" in request.headers.get("Accept", ""):
+                return redirect("/login")
+            return jsonify({"error": "Unauthorized"}), 401
+
+    # 3. CSRF: state-changing requests from a foreign Origin are rejected.
+    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        origin = request.headers.get("Origin")
+        if origin and origin != "null":
+            from urllib.parse import urlparse
+            if urlparse(origin).netloc != request.host:
+                return jsonify({"error": "Cross-origin request blocked"}), 403
+        elif origin == "null":
+            return jsonify({"error": "Cross-origin request blocked"}), 403
+
+    # 4. Any scan_id / job_id path component must be a plain token.
+    for key in ("scan_id", "job_id"):
+        val = (request.view_args or {}).get(key)
+        if val is not None and not _sec.is_valid_scan_id(val):
+            return jsonify({"error": f"Invalid {key}"}), 400
+
+
+@app.after_request
+def _security_headers(resp):
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    resp.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    return resp
+
+
+def _session_value() -> str:
+    import hmac as _h, hashlib
+    return _h.new(AUTH_TOKEN.encode(), b"msra-session", hashlib.sha256).hexdigest()
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    import hmac
+    if not AUTH_TOKEN:
+        return redirect("/")
+    if request.method == "POST":
+        supplied = request.form.get("token") or (request.get_json(silent=True) or {}).get("token", "")
+        if supplied and hmac.compare_digest(str(supplied), AUTH_TOKEN):
+            resp = redirect("/")
+            resp.set_cookie("msra_session", _session_value(), httponly=True,
+                            samesite="Strict", secure=request.is_secure)
+            return resp
+        return Response("Invalid token", status=401)
+    return Response(
+        '<!doctype html><title>MSRA login</title>'
+        '<form method="post" style="font-family:sans-serif;max-width:320px;margin:15vh auto">'
+        '<h3>MSRA</h3><input type="password" name="token" placeholder="Access token" '
+        'autofocus style="width:100%;padding:8px"><button style="margin-top:8px;padding:8px 14px">'
+        'Sign in</button></form>', mimetype="text/html")
+
+
+@app.after_request
+def _security_headers(resp):
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    resp.headers.setdefault("Referrer-Policy", "same-origin")
+    return resp
 
 
 def _load_dynamic_cfg() -> dict:
@@ -83,17 +189,11 @@ def _update_job(job_id: str, **kwargs):
 
 
 def _run_adb(cmd: list, timeout: int = 15) -> tuple[int, str, str]:
-    """Run an ADB command, return (returncode, stdout, stderr)."""
-    import subprocess as _sp
-    try:
-        r = _sp.run(["adb"] + cmd, capture_output=True, text=True, timeout=timeout)
-        return r.returncode, r.stdout, r.stderr
-    except FileNotFoundError:
-        return -1, "", "adb not found in PATH"
-    except _sp.TimeoutExpired:
-        return -1, "", "adb command timed out"
-    except Exception as e:
-        return -1, "", str(e)
+    """Run an ADB command, return (returncode, stdout, stderr).
+
+    Honours the calling dynamic job's deadline (see msra.dynamic.adb_util).
+    """
+    return _adb_util.run_adb(cmd, timeout=timeout)
 
 
 def _get_logcat(device_serial: str | None = None, lines: int = 300,
@@ -177,21 +277,20 @@ FALSE POSITIVE signals: files properly permission-restricted, encryption in use"
 FALSE POSITIVE signals: access denied, feature disabled at runtime, test environment differences"""
 
     security_logcat = _extract_security_logcat(logcat)
+    # Everything below came from the app under test (or a scan of it): wrap it in a
+    # randomly-delimited untrusted block the app cannot forge or close.
+    _untrusted, _ = _wrap_untrusted(
+        f"FINDING UNDER REVIEW:\n"
+        f"- Title: {finding_title}\n- Severity: {severity}\n- Category: {category}\n"
+        f"- Description: {finding_desc}\n\n"
+        f"--- SECURITY-RELEVANT LOGCAT ---\n{security_logcat[:4000]}\n\n"
+        f"--- ADB PROBE OUTPUT & ADDITIONAL EVIDENCE ---\n{extra_evidence[:3000]}")
 
     prompt = f"""You are a senior Android security engineer performing runtime verification of a static analysis finding.
 
-FINDING UNDER REVIEW:
-- Title: {finding_title}
-- Severity: {severity}
-- Category: {category}
-- Description: {finding_desc}
+{_AI_UNTRUSTED_NOTE}
 
-RUNTIME EVIDENCE:
---- SECURITY-RELEVANT LOGCAT LINES ---
-{security_logcat[:4000]}
-
---- ADB PROBE OUTPUT & ADDITIONAL EVIDENCE ---
-{extra_evidence[:3000]}
+{_untrusted}
 
 VERIFICATION GUIDANCE FOR THIS CATEGORY:
 {specific_guidance}
@@ -220,27 +319,15 @@ Return ONLY valid JSON:
 }}"""
 
     try:
-        payload = json.dumps({
-            "model": CLAUDE_MODEL,
-            "max_tokens": 1024,
-            "messages": [{"role": "user", "content": prompt}]
-        }).encode()
-        req = urllib.request.Request(
-            "https://api.anthropic.com/v1/messages",
-            data=payload,
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            result = json.loads(resp.read())
-        raw = result["content"][0]["text"].strip()
-        raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.MULTILINE)
-        raw = re.sub(r'\s*```$', '', raw, flags=re.MULTILINE)
-        verdict = json.loads(raw)
+        res = _get_ai_client().complete(
+            prompt=prompt, model=_ai_settings.model_for("dynamic_verdict"), max_tokens=1024,
+            feature="dynamic_verdict", timeout=60, api_key=api_key or None)
+        verdict = _parse_json_block(res.text)
+        if not isinstance(verdict, dict):
+            raise ValueError("verifier did not return an object")
+        if verdict.get("verdict") not in ("true_positive", "false_positive", "uncertain"):
+            verdict["verdict"] = "uncertain"
+        verdict["model"] = res.model_returned or res.model
         return verdict
     except Exception as e:
         return {
@@ -537,8 +624,60 @@ def _frida_load_all_hooks(serial_args: list, package: str) -> list:
     return logs
 
 
+# One job at a time per device: concurrent jobs would otherwise clear each
+# other's logcat and fight over install/launch/proxy state.
+_DEVICE_LOCKS: dict = {}
+_DEVICE_LOCKS_GUARD = threading.Lock()
+
+
+def _device_lock(serial: str) -> threading.Lock:
+    with _DEVICE_LOCKS_GUARD:
+        return _DEVICE_LOCKS.setdefault(serial or "default", threading.Lock())
+
+
+def _dynamic_device_cleanup(cfg: dict, finding: dict) -> None:
+    """Best-effort: stop the app under test and clear any proxy we set."""
+    try:
+        serial = cfg.get("adb_serial", "") if (cfg.get("mode") or "adb") == "adb" else ""
+        args = ["-s", serial] if serial else []
+        package = (finding or {}).get("package", "")
+        if _sec.is_valid_package(package):
+            _run_adb(args + ["shell", "am", "force-stop", package], timeout=8)
+        _run_adb(args + ["shell", "settings", "put", "global", "http_proxy", ":0"], timeout=8)
+    except Exception:
+        _log.debug("dynamic cleanup failed", exc_info=True)
+
+
+def _job_budget(cfg: dict) -> int:
+    """Per-job time limit in seconds, clamped to a sane range (60s - 1h)."""
+    try:
+        raw = int(cfg.get("job_timeout") or os.environ.get("MSRA_DYN_JOB_TIMEOUT", 900))
+    except (TypeError, ValueError):
+        raw = 900
+    return max(60, min(raw, 3600))
+
+
 def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
                             finding: dict, cfg: dict, use_ai: bool = True):
+    """Serialise per device, run the pipeline under a deadline, always clean up."""
+    budget = _job_budget(cfg)
+    with _device_lock(cfg.get("adb_serial", "")):
+        # The clock starts once we hold the device, not while queued behind it.
+        _adb_util.set_deadline(budget)
+        try:
+            _dynamic_verify_pipeline(job_id, scan_id, finding_idx, finding, cfg, use_ai)
+        except _adb_util.JobDeadline:
+            _log.warning("dynamic job %s timed out after %ss", job_id, budget)
+            _update_job(job_id, status="error", progress=100,
+                        message=f"Timed out after {budget}s (set MSRA_DYN_JOB_TIMEOUT to change)",
+                        verdict=None)
+        finally:
+            _adb_util.clear_deadline()        # cleanup must still be able to run
+            _dynamic_device_cleanup(cfg, finding)
+
+
+def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
+                              finding: dict, cfg: dict, use_ai: bool = True):
     """
     Enterprise-grade dynamic analysis pipeline:
       Phase 1 — Device setup & hardening bypass
@@ -576,7 +715,7 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
                 client.start_instance(instance_id)
                 # Wait up to 60 s for it to come online
                 for _ in range(12):
-                    _time.sleep(5)
+                    _adb_util.sleep(5)
                     inst = client.get_instance(instance_id)
                     if inst.is_on:
                         break
@@ -590,6 +729,8 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
 
         # ── 2. Clear logcat BEFORE install/launch so we capture all startup logs ──
         package = finding.get("package", "")
+        if not _sec.is_valid_package(package):
+            raise ValueError(f"Refusing to run: invalid package name {package!r}")
         _update_job(job_id, progress=18, message="Clearing logcat buffer…")
         _run_adb((["-s", device_serial] if device_serial else []) + ["logcat", "-c"], timeout=5)
 
@@ -603,20 +744,21 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
             # like parentheses or commas (e.g. apkmirror filenames).
             # Also unwrap XAPK/APKM bundles to extract base.apk first.
             import tempfile as _tempfile
+            _job_tmp = Path(_tempfile.mkdtemp(prefix=f"msra_{job_id}_"))
             _src_apk = apk_candidates[0]
             # If the file is a zip bundle containing base.apk, extract it
             try:
                 if zipfile.is_zipfile(str(_src_apk)):
                     with zipfile.ZipFile(str(_src_apk)) as _zf:
                         if "base.apk" in _zf.namelist():
-                            _tmp_base = Path(_tempfile.gettempdir()) / "msra_base.apk"
+                            _tmp_base = _job_tmp / "base.apk"
                             _tmp_base.write_bytes(_zf.read("base.apk"))
                             _src_apk = _tmp_base
                             _update_job(job_id, progress=21,
                                         message="XAPK bundle detected — extracting base.apk…")
             except Exception:
                 pass
-            _tmp_apk = Path(_tempfile.gettempdir()) / "msra_install.apk"
+            _tmp_apk = _job_tmp / "install.apk"
             shutil.copy2(str(_src_apk), str(_tmp_apk))
             apk_path = str(_tmp_apk)
             _serial_args = ["-s", device_serial] if device_serial else []
@@ -627,12 +769,17 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
                                      "package_verifier_enable", "0"], timeout=5)
             adb_args = _serial_args + ["install", "-r", "-t", apk_path]
             _update_job(job_id, progress=22, message="Installing APK on device…")
-            rc, out, err = _run_adb(adb_args, timeout=120)
-            # Re-enable verifier after install attempt
-            _run_adb(_serial_args + ["shell", "settings", "put", "global",
-                                     "verifier_verify_adb_installs", "1"], timeout=5)
-            _run_adb(_serial_args + ["shell", "settings", "put", "global",
-                                     "package_verifier_enable", "1"], timeout=5)
+            try:
+                rc, out, err = _run_adb(adb_args, timeout=120)
+            finally:
+                # Always re-enable the verifier, even if the install raised or the
+                # job deadline has already passed (restore must not be skippable).
+                with _adb_util.no_deadline():
+                    _run_adb(_serial_args + ["shell", "settings", "put", "global",
+                                             "verifier_verify_adb_installs", "1"], timeout=10)
+                    _run_adb(_serial_args + ["shell", "settings", "put", "global",
+                                             "package_verifier_enable", "1"], timeout=10)
+                shutil.rmtree(_job_tmp, ignore_errors=True)
             install_combined = (out + err).lower()
             if rc != 0 and "already installed" not in install_combined:
                 raw = (err or out).strip()
@@ -662,7 +809,7 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
             app_registered = False
             if package:
                 for _ in range(6):
-                    _time.sleep(2)
+                    _adb_util.sleep(2)
                     _, pm_out, _ = _run_adb(
                         (["-s", device_serial] if device_serial else []) + ["shell", "pm", "path", package],
                         timeout=5)
@@ -707,7 +854,7 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
             else:
                 _device_ok = True
             if _device_ok:
-                _time.sleep(6)   # wait for app to fully initialize
+                _adb_util.sleep(6)   # wait for app to fully initialize
 
         # Take filesystem snapshot before probing
         fs_before: set = set()
@@ -716,7 +863,7 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
 
         _update_job(job_id, progress=38, message="App running — observing startup behavior…")
         if _device_ok:
-            _time.sleep(6)   # observe startup network/logcat
+            _adb_util.sleep(6)   # observe startup network/logcat
 
         # ── Phase 3b: Login attempt ───────────────────────────────────────
         # Try filling login form with common test credentials so BFS
@@ -737,7 +884,7 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
                     _run_adb(adb_prefix + ["shell", "input", "text", "Password123!"], timeout=5)
                     _run_adb(adb_prefix + ["shell", "input", "keyevent", "66"], timeout=3)
                     login_attempted = True
-                    _time.sleep(3)
+                    _adb_util.sleep(3)
             except Exception:
                 pass
 
@@ -760,7 +907,8 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
             extra_evidence += f"\n=== Package Dump (exported components) ===\n{dumpsys_out[:1200]}\n"
 
         # Extract authorities from dumpsys
-        authorities = re.findall(r'authority=([^\s;]+)', dumpsys_out)
+        authorities = [a for a in re.findall(r'authority=([^\s;]+)', dumpsys_out)
+                       if _AUTHORITY_RE.match(a)]
 
         # ── 4a: ContentProvider / SQL probes ──────────────────────────────
         authority = _extract_authority(finding, package)
@@ -778,14 +926,14 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
                 ("Stacked",       "'; SELECT * FROM sqlite_master;--"),
                 ("Blind true",    "1' AND '1'='1"),
                 ("Comment bypass","1'--"),
-                ("Null byte",     "1\x00' OR '1'='1"),
+                ("Null byte",     "1%00' OR '1'='1"),   # literal NUL cannot be passed in argv
             ]
             for auth in all_authorities[:3]:
                 for payload_name, payload in sqli_payloads:
                     rc, out, err = _run_adb(
                         adb_prefix + ["shell", "content", "query",
                                       "--uri", f"content://{auth}/",
-                                      "--where", payload], timeout=10)
+                                      "--where", _sec.sh_quote(payload)], timeout=10)
                     combined = (out + err).strip()
                     if combined:
                         extra_evidence += (
@@ -800,7 +948,7 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
                                   "%2F..%2F..%2Fetc%2Fpasswd"]:
                     _, out2, _ = _run_adb(
                         adb_prefix + ["shell", "content", "query",
-                                      "--uri", f"content://{auth}/{traversal}"], timeout=8)
+                                      "--uri", _sec.sh_quote(f"content://{auth}/{traversal}")], timeout=8)
                     if out2.strip():
                         extra_evidence += f"\nPath traversal [{traversal}] on {auth}:\n{out2[:400]}\n"
                         break
@@ -831,20 +979,22 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
 
             # data:// URI
             _run_adb(adb_prefix + ["shell", "am", "start", "-a", "android.intent.action.VIEW",
-                                   "-d", "data:text/html,<script>alert(1)</script>"], timeout=10)
+                                   "-d", _sec.sh_quote("data:text/html,<script>alert(1)</script>")], timeout=10)
 
             # Intent extras injection against all exported activities
-            exported_acts = re.findall(r'activity\s+([^\s]+)\s+filter', dumpsys_out)
+            exported_acts = _only_components(
+                re.findall(r'activity\s+([^\s]+)\s+filter', dumpsys_out))
             for act in exported_acts[:5]:
                 for extra_key in ["url", "uri", "path", "link", "redirect", "file"]:
                     _run_adb(adb_prefix + ["shell", "am", "start", "-n",
-                                          f"{package}/{act}",
-                                          "--es", extra_key, "javascript:alert(document.cookie)",
-                                          "--es", "path", "../../../../etc/passwd"],
+                                          _sec.sh_quote(f"{package}/{act}"),
+                                          "--es", extra_key,
+                                          _sec.sh_quote("javascript:alert(document.cookie)"),
+                                          "--es", "path", _sec.sh_quote("../../../../etc/passwd")],
                              timeout=8)
 
             # Post-probe logcat check
-            _time.sleep(4)
+            _adb_util.sleep(4)
             post_lc = _get_logcat(device_serial or None, lines=80, package=package)
             if re.search(r'javascript|webview|loadurl|evaluat|file://', post_lc, re.I):
                 extra_evidence += f"\nPost-probe WebView logcat:\n{post_lc[:600]}\n"
@@ -852,16 +1002,16 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
         # ── 4c: Exported Activity / Service / Receiver probing ────────────
         _update_job(job_id, progress=60, message="Probing exported components directly…")
         # Null-intent crash test on all exported activities
-        exported_components = re.findall(
+        exported_components = _only_components(re.findall(
             r'([A-Za-z][A-Za-z0-9_.]+Activity|[A-Za-z][A-Za-z0-9_.]+Service|'
-            r'[A-Za-z][A-Za-z0-9_.]+Receiver)', dumpsys_out)
+            r'[A-Za-z][A-Za-z0-9_.]+Receiver)', dumpsys_out))
         crash_evidence = []
         for comp in exported_components[:8]:
             rc_c, out_c, _ = _run_adb(
-                adb_prefix + ["shell", "am", "start", "-n", f"{package}/{comp}"],
+                adb_prefix + ["shell", "am", "start", "-n", _sec.sh_quote(f"{package}/{comp}")],
                 timeout=8)
             if rc_c == 0 and "error" not in out_c.lower():
-                _time.sleep(1)
+                _adb_util.sleep(1)
                 # Check for crash
                 _, crash_out, _ = _run_adb(
                     adb_prefix + ["shell", "dumpsys", "activity", "|",
@@ -873,15 +1023,16 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
             extra_evidence += f"\n=== Component Crashes ===\n" + "\n".join(crash_evidence) + "\n"
 
         # Exported broadcast receivers
-        exported_rcvs = re.findall(
-            r'Receiver\s+\{[^}]*\}\s+([A-Za-z][A-Za-z0-9_.]+)', dumpsys_out)
+        exported_rcvs = _only_components(re.findall(
+            r'Receiver\s+\{[^}]*\}\s+([A-Za-z][A-Za-z0-9_.]+)', dumpsys_out))
         for rcv in exported_rcvs[:4]:
             # Try all registered actions
-            actions = re.findall(
-                rf'{re.escape(rcv)}.*?action=([^\s]+)', dumpsys_out[:2000])
+            actions = _only_actions(re.findall(
+                rf'{re.escape(rcv)}.*?action=([^\s]+)', dumpsys_out[:2000]))
             for action in actions[:2]:
                 _run_adb(adb_prefix + ["shell", "am", "broadcast",
-                                      "-a", action, "-n", f"{package}/{rcv}"], timeout=8)
+                                      "-a", _sec.sh_quote(action),
+                                      "-n", _sec.sh_quote(f"{package}/{rcv}")], timeout=8)
 
         # ── 4c-ext: ComponentProber systematic scan ───────────────────────
         if package:
@@ -890,23 +1041,23 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
                 # Build manifest_components from dumpsys output
                 _cp_acts = [
                     {"name": a, "intent_filters": []}
-                    for a in re.findall(
-                        r'([A-Za-z][A-Za-z0-9_.]+Activity)\s+filter', dumpsys_out)[:10]
+                    for a in _only_components(re.findall(
+                        r'([A-Za-z][A-Za-z0-9_.]+Activity)\s+filter', dumpsys_out))[:10]
                 ]
                 _cp_provs = [
                     {"authority": auth, "paths": []}
                     for auth in authorities[:5]
                 ]
                 _cp_rcvs = [
-                    {"name": r, "actions": re.findall(
-                        rf'{re.escape(r)}.*?action=([^\s]+)', dumpsys_out[:3000])[:3]}
-                    for r in re.findall(
-                        r'([A-Za-z][A-Za-z0-9_.]+Receiver)', dumpsys_out)[:5]
+                    {"name": r, "actions": _only_actions(re.findall(
+                        rf'{re.escape(r)}.*?action=([^\s]+)', dumpsys_out[:3000]))[:3]}
+                    for r in _only_components(re.findall(
+                        r'([A-Za-z][A-Za-z0-9_.]+Receiver)', dumpsys_out))[:5]
                 ]
                 _cp_svcs = [
                     {"name": s}
-                    for s in re.findall(
-                        r'([A-Za-z][A-Za-z0-9_.]+Service)\s+filter', dumpsys_out)[:5]
+                    for s in _only_components(re.findall(
+                        r'([A-Za-z][A-Za-z0-9_.]+Service)\s+filter', dumpsys_out))[:5]
                 ]
                 _comp_manifest = {
                     "activities": _cp_acts,
@@ -951,14 +1102,14 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
             # SharedPreferences file list + content
             _, sp_out, _ = _run_adb(
                 adb_prefix + ["shell", "run-as", package,
-                              "find", f"/data/data/{package}/shared_prefs", "-name", "*.xml"],
+                              "find", f"/data/data/{package}/shared_prefs", "-name", "'*.xml'"],
                 timeout=8)
             if sp_out.strip():
                 extra_evidence += f"\n=== SharedPreferences files ===\n{sp_out[:400]}\n"
                 # Read first prefs file content
                 for pref_file in sp_out.splitlines()[:2]:
                     _, pref_content, _ = _run_adb(
-                        adb_prefix + ["shell", "run-as", package, "cat", pref_file.strip()],
+                        adb_prefix + ["shell", "run-as", package, "cat", _sec.sh_quote(pref_file.strip())],
                         timeout=6)
                     if pref_content.strip():
                         extra_evidence += f"\n{pref_file} content:\n{pref_content[:600]}\n"
@@ -968,14 +1119,14 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
             # SQLite databases — list and dump schema
             _, db_out, _ = _run_adb(
                 adb_prefix + ["shell", "run-as", package,
-                              "find", f"/data/data/{package}/databases", "-name", "*.db"],
+                              "find", f"/data/data/{package}/databases", "-name", "'*.db'"],
                 timeout=8)
             if db_out.strip():
                 extra_evidence += f"\n=== SQLite databases ===\n{db_out[:300]}\n"
                 for db_file in db_out.splitlines()[:2]:
                     _, schema_out, _ = _run_adb(
                         adb_prefix + ["shell", "run-as", package,
-                                     "sqlite3", db_file.strip(), ".schema"],
+                                     "sqlite3", _sec.sh_quote(db_file.strip()), ".schema"],
                         timeout=8)
                     if schema_out.strip():
                         extra_evidence += f"\n{db_file} schema:\n{schema_out[:500]}\n"
@@ -990,7 +1141,7 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
             # External storage
             _, ext_out, _ = _run_adb(
                 adb_prefix + ["shell", "find", "/sdcard/Android/data",
-                              "-path", f"*{package}*"], timeout=10)
+                              "-path", f"'*{package}*'"], timeout=10)
             if ext_out.strip():
                 extra_evidence += f"\n=== External storage files ===\n{ext_out[:400]}\n"
 
@@ -1041,8 +1192,7 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
         # ── Phase 5b: Verdict ─────────────────────────────────────────────
         if use_ai:
             _update_job(job_id, progress=82, message="AI analysing all evidence…")
-            api_key = ANTHROPIC_API_KEY or cfg.get("anthropic_key", "")
-            if api_key:
+            if _get_ai_client().provider.configured:
                 verdict = _ai_verify_finding(
                     finding_title=finding.get("title", ""),
                     finding_desc=finding.get("description", ""),
@@ -1050,15 +1200,15 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
                     category=category,
                     logcat=_extract_security_logcat(logcat),
                     extra_evidence=extra_evidence,
-                    api_key=api_key,
+                    api_key="",
                 )
             else:
                 verdict = {
                     "verdict": "uncertain",
                     "confidence": 0,
-                    "reasoning": "No API key — set ANTHROPIC_API_KEY or use Basic Scan.",
+                    "reasoning": "No AI provider configured - set ANTHROPIC_API_KEY (or an LLM gateway) or use Basic Scan.",
                     "key_evidence": [],
-                    "risk_context": "AI analysis unavailable — configure ANTHROPIC_API_KEY.",
+                    "risk_context": "AI analysis unavailable - configure an AI provider.",
                     "suggested_action": "Configure API key or run Basic Scan",
                     "mode": "no_key",
                 }
@@ -1073,13 +1223,31 @@ def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
                     verdict=verdict)
 
     except Exception as exc:
+        _log.exception("dynamic job %s failed", job_id)
         _update_job(job_id, status="error", progress=100,
                     message=str(exc), verdict=None)
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 def _scan_dir(scan_id: str) -> Path:
-    return REPORTS_FOLDER / scan_id
+    if not _sec.is_valid_scan_id(scan_id):
+        raise ValueError(f"invalid scan_id: {scan_id!r}")
+    return _sec.safe_join(REPORTS_FOLDER, scan_id)
+
+
+_AUTHORITY_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,200}$")
+_COMPONENT_RE = re.compile(r"^[A-Za-z0-9_.$]{1,300}$")
+_ACTION_RE    = re.compile(r"^[A-Za-z0-9_.:\-]{1,200}$")
+
+
+def _only_components(values) -> list:
+    """Drop dumpsys-derived component names that are not plain class identifiers
+    (they end up inside `adb shell` command strings run by the device shell)."""
+    return [v for v in values if _COMPONENT_RE.match(v)]
+
+
+def _only_actions(values) -> list:
+    return [v for v in values if _ACTION_RE.match(v)]
 
 
 def _extract_authority(finding: dict, package: str) -> str:
@@ -1090,12 +1258,12 @@ def _extract_authority(finding: dict, package: str) -> str:
     # Try adb_commands first — they usually contain the real authority
     for cmd in finding.get("adb_commands") or []:
         m = re.search(r'content://([^/\s"\']+)', str(cmd))
-        if m:
+        if m and _AUTHORITY_RE.match(m.group(1)):
             return m.group(1)
     # Try extra dict
     extra = finding.get("extra") or {}
     if isinstance(extra, dict):
-        if extra.get("authority"):
+        if extra.get("authority") and _AUTHORITY_RE.match(str(extra["authority"])):
             return str(extra["authority"])
     # Fall back
     return f"{package}.provider" if package else "unknown.provider"
@@ -1105,15 +1273,25 @@ def _set_status(scan_id: str, **kw):
     _db.upsert_scan(scan_id, **kw)
 
 
+def _env_workers(name: str, default: int) -> int:
+    """Worker count from the environment, clamped to 1..32."""
+    try:
+        return max(1, min(32, int(os.environ.get(name, default))))
+    except ValueError:
+        return default
+
+
 # ── Concurrency pools ─────────────────────────────────────────────────────────
 # Scan pool: max 2 scans running at once (decompile + static analysis is CPU-heavy).
 # Excess uploads are queued by the executor and start automatically when a slot frees.
-_SCAN_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="scan")
+_SCAN_WORKERS = _env_workers("MSRA_SCAN_WORKERS", 2)
+_SCAN_POOL = ThreadPoolExecutor(max_workers=_SCAN_WORKERS, thread_name_prefix="scan")
 
 # Dynamic pool: max 3 concurrent finding-verification jobs.
 # Each job probes one finding via ADB; I/O-bound so 3 workers gives ~3x throughput.
 # Per-device serialisation is handled by ADB's own command queuing.
-_DYN_POOL  = ThreadPoolExecutor(max_workers=3, thread_name_prefix="dyn")
+_DYN_WORKERS = _env_workers("MSRA_DYN_WORKERS", 3)
+_DYN_POOL  = ThreadPoolExecutor(max_workers=_DYN_WORKERS, thread_name_prefix="dyn")
 
 # ── Simple in-memory rate limiter ────────────────────────────────────────────
 _rate_store: dict = {}  # ip -> (count, window_start)
@@ -1124,6 +1302,9 @@ def _rate_limit(ip: str, max_per_minute: int = 10) -> bool:
     """Return True if the request is allowed, False if rate limit exceeded."""
     now = _time.time()
     with _RATE_LOCK:
+        if len(_rate_store) > 1000:
+            for k in [k for k, v in _rate_store.items() if now - v[1] > 60]:
+                _rate_store.pop(k, None)
         entry = _rate_store.get(ip)
         if entry is None or (now - entry[1]) > 60:
             _rate_store[ip] = (1, now)
@@ -1211,7 +1392,7 @@ def _build_dashboard(scan_id: str | None, all_summaries: list, view: str | None 
             report_css, report_body, report_scripts = _extract_report_body(raw)
             current = next((s for s in all_summaries if s.get('scan_id') == scan_id), None)
 
-    api_configured  = bool(ANTHROPIC_API_KEY)
+    api_configured  = bool(_get_ai_client().provider.configured)
     hosted_inject   = (
         f'<script>window.__MSRA_HOSTED=true;'
         f'window.__API_KEY_CONFIGURED={json.dumps(api_configured)};</script>'
@@ -1230,8 +1411,8 @@ def _build_dashboard(scan_id: str | None, all_summaries: list, view: str | None 
     sidebar_items = ''
     for s in all_summaries:
         sid        = s.get('scan_id', '')
-        pkg        = s.get('package', 'unknown')
-        apk        = s.get('apk', '')
+        pkg        = _html.escape(str(s.get('package', 'unknown')))
+        apk        = _html.escape(str(s.get('apk', '')))
         total      = s.get('total_findings', 0)
         sev        = s.get('severity_counts', {})
         active     = 'active' if sid == scan_id else ''
@@ -1287,7 +1468,7 @@ def _build_dashboard(scan_id: str | None, all_summaries: list, view: str | None 
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>MSRA{" — " + (current.get("package") or current.get("apk") or "Scan") if current else ""}</title>
+<title>MSRA{" — " + _html.escape(str(current.get("package") or current.get("apk") or "Scan")) if current else ""}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -1297,6 +1478,7 @@ def _build_dashboard(scan_id: str | None, all_summaries: list, view: str | None 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+<script src="/ai-assets/panel.js" defer></script>
 {hosted_inject}
 <style>
 /* ── RESET & BASE ── */
@@ -3026,20 +3208,34 @@ function cancelProgressPoll() {{
   clearTimeout(_pollTimer); hideProgress();
 }}
 
+let _pollFails = 0;
 function pollScan(scanId) {{
   fetch('/api/scan/' + scanId + '/status')
-    .then(r => r.json())
+    .then(r => {{ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }})
     .then(d => {{
+      _pollFails = 0;
       showProgress(d.progress || 0, d.message || '…');
       if (d.status === 'done') {{
         // Navigate to clean URL for completed scan
         window.location.href = '/scans/' + scanId;
-      }} else if (d.status === 'error') {{
+      }} else if (d.status === 'error' || d.status === 'unknown') {{
         hideProgress();
         showToast('Scan failed: ' + (d.message || 'Unknown error'), 'error');
       }} else {{
-        _pollTimer = setTimeout(() => pollScan(scanId), 1500);
+        // Poll less often while the tab is hidden; a long queue should not hammer the server.
+        _pollTimer = setTimeout(() => pollScan(scanId), document.hidden ? 5000 : 1500);
       }}
+    }})
+    .catch(() => {{
+      // Server restarting or a network blip: back off and retry instead of freezing silently.
+      _pollFails += 1;
+      if (_pollFails > 8) {{
+        hideProgress();
+        showToast('Lost contact with the server. Reload the page to resume.', 'error');
+        return;
+      }}
+      showProgress(0, 'Reconnecting… (' + _pollFails + ')');
+      _pollTimer = setTimeout(() => pollScan(scanId), Math.min(1500 * Math.pow(2, _pollFails), 15000));
     }});
 }}
 
@@ -3122,7 +3318,7 @@ function runPocGeneration() {{
     description:        finding.description       || '',
     severity:           finding.severity          || '',
     category:           finding.category          || '',
-    component:          ev.file ? ev.file.split('/').pop().replace(/\.(java|kt)$/, '') : '',
+    component:          ev.file ? ev.file.split('/').pop().replace(/\\.(java|kt)$/, '') : '',
     authority:          pkg + '.provider',
     snippet:            ev.snippet                || finding._liveSnippet || '',
     file_path:          ev.file                   || '',
@@ -3196,7 +3392,12 @@ function downloadPocZip() {{
 }}
 
 function escHtml(s) {{
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}}
+// For values placed inside a quoted JS string within an inline handler attribute.
+function escJsAttr(s) {{
+  const bs = String.fromCharCode(92);
+  return escHtml(String(s).split(bs).join(bs + bs).split("'").join(bs + "'"));
 }}
 
 document.addEventListener('click', e => {{
@@ -3324,7 +3525,7 @@ function populateCategoryFilter(rules) {{
   cats.forEach(c => {{
     const opt = document.createElement('option');
     opt.value = c;
-    opt.textContent = c.replace(/OWASP-M\d+-/,'').replace(/-/g,' ');
+    opt.textContent = c.replace(/OWASP-M\\d+-/,'').replace(/-/g,' ');
     sel.appendChild(opt);
   }});
 }}
@@ -3427,13 +3628,13 @@ function renderRulesTable() {{
         <div class="rule-title-cell">${{platBadge}}${{escHtml(rule.title)}}</div>
         <code class="rule-id-cell">${{escHtml(rule.id)}}</code>
       </td>
-      <td><span class="cat-pill" title="${{escHtml(rule.category)}}">${{escHtml(rule.category.replace(/OWASP-M\d+-/,''))}}</span></td>
+      <td><span class="cat-pill" title="${{escHtml(rule.category)}}">${{escHtml(rule.category.replace(/OWASP-M\\d+-/,''))}}</span></td>
       <td><span class="det-pill"><i class="fa-solid ${{detIcon}}"></i> ${{escHtml(rule.detection_type)}}</span></td>
       <td>${{cweHtml || '<span style="color:var(--text3);font-size:11px">—</span>'}}</td>
       <td><span class="src-pill ${{escHtml(rule.source)}}">${{escHtml(rule.source)}}</span></td>
       <td style="font-size:10px;color:var(--text3);white-space:nowrap">${{rule.created_at ? new Date(rule.created_at*1000).toLocaleDateString('en-US',{{month:'short',day:'numeric',year:'numeric'}}) : '<span style="color:var(--text3)">—</span>'}}</td>
       <td style="text-align:right">
-        ${{isCustom ? `<button class="btn btn-sm" style="padding:3px 8px;font-size:10px;color:var(--critical);border-color:rgba(239,68,68,.25)" onclick="event.stopPropagation();deleteRule('${{escHtml(rule.id)}}')" title="Delete"><i class="fa-solid fa-trash"></i></button>` : ''}}
+        ${{isCustom ? `<button class="btn btn-sm" style="padding:3px 8px;font-size:10px;color:var(--critical);border-color:rgba(239,68,68,.25)" onclick="event.stopPropagation();deleteRule('${{escJsAttr(rule.id)}}')" title="Delete"><i class="fa-solid fa-trash"></i></button>` : ''}}
         <i class="fa-solid fa-chevron-right" style="color:var(--text3);font-size:10px;margin-left:6px"></i>
       </td>`;
     tbody.appendChild(row);
@@ -3493,7 +3694,7 @@ function openRuleDetail(id) {{
   if (pills) {{
     pills.innerHTML = `
       <span class="sev-dot ${{escHtml(rule.severity)}}" style="font-size:12px">${{escHtml(rule.severity)}}</span>
-      <span class="cat-pill">${{escHtml(rule.category.replace(/OWASP-M\d+-/,''))}}</span>
+      <span class="cat-pill">${{escHtml(rule.category.replace(/OWASP-M\\d+-/,''))}}</span>
       <span class="src-pill ${{escHtml(rule.source)}}">${{escHtml(rule.source)}}</span>`;
   }}
 
@@ -3627,7 +3828,7 @@ function openRuleDetail(id) {{
   const refDiv = document.getElementById('rdpRefs');
   if (refDiv) {{
     refDiv.innerHTML = (rule.references||[]).map(r => {{
-      const lbl = r.replace(/^https?:\/\/(www\.)?/,'').split('/').slice(0,2).join('/');
+      const lbl = r.replace(/^https?:\\/\\/(www\\.)?/,'').split('/').slice(0,2).join('/');
       return `<a class="ref-link" href="${{escHtml(r)}}" target="_blank" rel="noopener"><i class="fa-solid fa-arrow-up-right-from-square" style="font-size:9px;flex-shrink:0"></i> ${{escHtml(lbl)}}</a>`;
     }}).join('') || '<span style="color:var(--text3);font-size:13px">No references</span>';
   }}
@@ -3989,7 +4190,7 @@ function injectDynVerifyButtons(scanId) {{
     if (!header) return;
     const sev   = card.dataset.sev || '';
     const title = card.querySelector('.card-title')?.textContent?.trim()
-                  .replace(/^#\d+\s*/, '') || `Finding ${{idx+1}}`;
+                  .replace(/^#\\d+\\s*/, '') || `Finding ${{idx+1}}`;
     const desc  = card.querySelector('.desc-text')?.textContent?.trim() || '';
     const cat   = card.dataset.cat || '';
     const btn   = document.createElement('button');
@@ -4087,7 +4288,7 @@ function renderDynJobHTML(job) {{
     job.status==='done' ? (v==='true_positive'?'done_tp':v==='false_positive'?'done_fp':'queued') : job.status] || 'queued';
   const iconI   = {{queued:'fa-clock',running:'fa-circle-notch fa-spin',done_tp:'fa-triangle-exclamation',done_fp:'fa-check-circle',error:'fa-xmark-circle'}}[iconCls] || 'fa-clock';
   const badgeCls = {{true_positive:'true-positive',false_positive:'false-positive',uncertain:'uncertain'}}[v] || 'running';
-  const badgeTxt = v ? v.replace('_',' ').replace(/\b\w/g,c=>c.toUpperCase()) : (job.status==='error'?'Error':'Running');
+  const badgeTxt = v ? v.replace('_',' ').replace(/\b\\w/g,c=>c.toUpperCase()) : (job.status==='error'?'Error':'Running');
   const pct     = job.progress || 0;
   const barCls  = v==='true_positive'?'done-tp':v==='false_positive'?'done-fp':'';
   return `
@@ -4542,7 +4743,7 @@ function renderNextPage() {{
     if (ev.snippet) {{
       const lines = ev.snippet.split('\\n');
       for (const ln of lines) {{
-        const stripped = ln.replace(/^\d+:\s*/, '').trim();
+        const stripped = ln.replace(/^\\d+:\\s*/, '').trim();
         if (stripped) {{ snippetLine = stripped; break; }}
       }}
     }}
@@ -4615,7 +4816,7 @@ function debounceFilter() {{
 }}
 
 function escHtml(s) {{
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }}
 
 // ── DETAIL DRAWER ─────────────────────────────────────────────────────────────
@@ -4638,7 +4839,7 @@ function openDrawer(f) {{
 
   const refLinks = (f.references||[]).slice(0,4).map(r =>
     `<a href="${{escHtml(r)}}" target="_blank" rel="noopener" class="drawer-ref-link">
-      <i class="fa-solid fa-link" style="font-size:10px"></i> ${{escHtml(r.replace(/^https?:\/\//,'').substring(0,60))}}
+      <i class="fa-solid fa-link" style="font-size:10px"></i> ${{escHtml(r.replace(/^https?:\\/\\//,'').substring(0,60))}}
     </a>`
   ).join('');
 
@@ -5257,8 +5458,8 @@ def _build_scan_content(scan_id: str | None, current: dict | None,
             pass
 
     # Build scan summary strip (server-side, no JS needed)
-    pkg        = current.get('package', 'unknown')
-    apk_name   = current.get('apk', '')
+    pkg        = _html.escape(str(current.get('package', 'unknown')))
+    apk_name   = _html.escape(str(current.get('apk', '')))
     total_f    = current.get('total_findings', 0)
     sev_counts = current.get('severity_counts', {})
     risk_score = current.get('risk_score')
@@ -5419,8 +5620,8 @@ def _build_home_dashboard(all_summaries: list) -> str:
     rows_html = ''
     for s in all_summaries[:10]:
         sid   = s.get('scan_id', '')
-        pkg   = s.get('package', 'unknown')
-        apk   = s.get('apk', '')
+        pkg   = _html.escape(str(s.get('package', 'unknown')))
+        apk   = _html.escape(str(s.get('apk', '')))
         total = s.get('total_findings', 0)
         rs    = s.get('risk_score')
         sev   = s.get('severity_counts', {})
@@ -5545,8 +5746,8 @@ def _build_topbar(current: dict | None, view: str | None = None) -> str:
           <div class="topbar-spacer"></div>
         </div>'''
 
-    pkg        = current.get('package', 'unknown')
-    apk        = current.get('apk', '')
+    pkg        = _html.escape(str(current.get('package', 'unknown')))
+    apk        = _html.escape(str(current.get('apk', '')))
     total      = current.get('total_findings', 0)
     sev        = current.get('severity_counts', {})
     sid        = current.get('scan_id', '')
@@ -6176,6 +6377,9 @@ def _auto_install_apk(scan_id: str, apk_path: Path, package: str) -> None:
     Preferred device: the one configured in dynamic_config.json.
     Falls back to the first device returned by `adb devices`.
     """
+    # Installing an untrusted sample on a real device is opt-in.
+    if os.environ.get("MSRA_AUTO_INSTALL") != "1":
+        return
     try:
         # Load preferred serial from dynamic config
         preferred_serial = ""
@@ -6209,8 +6413,8 @@ def _auto_install_apk(scan_id: str, apk_path: Path, package: str) -> None:
         _set_status(scan_id, status="done", progress=100,
                     message=f"Installing APK on device {serial or 'default'}…")
 
-        # Install with replace (-r keeps data), grant all permissions at install (-g)
-        rc, out, err = _run_adb(serial_args + ["install", "-r", "-g", str(apk_path)], timeout=120)
+        # Install with replace (-r keeps data); permissions are NOT auto-granted
+        rc, out, err = _run_adb(serial_args + ["install", "-r", str(apk_path)], timeout=120)
 
         if rc == 0 or "success" in (out + err).lower():
             msg = f"✓ APK installed on {serial or 'device'} ({package})"
@@ -6287,7 +6491,8 @@ def _run_scan(scan_id: str, apk_path: Path):
         jadx = shutil.which("jadx") or "jadx"
         import subprocess
         r = subprocess.run([jadx, "-d", str(decompiled), str(scan_apk)],
-                           capture_output=True, timeout=300)
+                           capture_output=True,
+                           timeout=int(os.environ.get("MSRA_JADX_TIMEOUT", "300")))
         if not (decompiled / "sources").exists() and not (decompiled / "resources").exists():
             raise RuntimeError(f"jadx failed: {r.stderr.decode()[:400]}")
 
@@ -6308,67 +6513,20 @@ def _run_scan(scan_id: str, apk_path: Path):
         _hb = threading.Thread(target=_scan_heartbeat, daemon=True)
         _hb.start()
 
-        findings = scanner.scan()
-        _scan_done_evt.set()
+        try:
+            findings = scanner.scan()
+        finally:
+            _scan_done_evt.set()
         pkg      = scanner.package_name or "unknown"
 
-        # ── Taint analysis (source-sink inter-procedural flows) ─────────────
+        # ── Taint analysis + ICC chains ──────────────────────────────────────
         _set_status(scan_id, status="scanning", progress=79,
                     message="Running inter-procedural taint analysis…")
-        try:
-            from msra.analysis.taint_engine import TaintEngine, to_finding as _taint_to_finding
-            _taint_manifest = scanner.manifest_data or {}
-            _taint_manifest.setdefault("_package", pkg)
-            _taint_engine = TaintEngine(str(decompiled), _taint_manifest)
-            _taint_flows = _taint_engine.analyze()
-            if _taint_flows:
-                findings = list(findings) + [_taint_to_finding(f) for f in _taint_flows]
-                _log.info("Taint engine: %d flows found for %s", len(_taint_flows), scan_id)
-        except Exception as _te:
-            _log.warning("Taint engine failed (non-fatal): %s", _te)
-            _taint_flows = []
-
-        # ── ICC graph (cross-component taint via Intent forwarding) ─────────
-        try:
-            from msra.analysis.icc_graph import ICCGraph
-            from msra.utils import Finding, Evidence
-            _icc = ICCGraph(str(decompiled), _taint_manifest).build()
-            _icc_chains = _icc.get_exploitable_chains(_taint_flows)
-            if _icc_chains:
-                def _icc_to_finding(chain):
-                    from msra.utils import Finding, Evidence
-                    return Finding(
-                        fid=f"ICC_{chain.sink.sink_type.upper()}_{chain.entry_point.split('.')[-1].upper()}",
-                        title=f"ICC taint chain: exported {chain.entry_point.split('.')[-1]} → {chain.icc_target.split('.')[-1]} → {chain.sink.sink_api}",
-                        severity=chain.severity,
-                        description=(
-                            f"An exported component forwards untrusted Intent extras to an internal "
-                            f"component via ICC. Key '{chain.extra_key}' reaches {chain.sink.sink_api} "
-                            f"({chain.sink.sink_type}) in {chain.icc_target}."
-                        ),
-                        attack_path=(
-                            f"Exported: {chain.entry_point}\n"
-                            f"→ ICC ({chain.extra_key!r})\n"
-                            f"→ Internal: {chain.icc_target}\n"
-                            f"→ Sink: {chain.sink.sink_api}"
-                        ),
-                        adb_commands=chain.poc_commands,
-                        evidence=Evidence(
-                            file_path=chain.sink.file_path,
-                            line_number=chain.sink.line_number,
-                            snippet=chain.sink.code_snippet,
-                            matched_text=chain.sink.sink_api,
-                        ),
-                        references=[
-                            "https://developer.android.com/topic/security/risks/intent-injection",
-                            "https://owasp.org/www-project-mobile-top-10/",
-                        ],
-                        extra={"icc_chain": True, "extra_key": chain.extra_key},
-                    )
-                findings = list(findings) + [_icc_to_finding(c) for c in _icc_chains]
-                _log.info("ICC graph: %d exploitable chains for %s", len(_icc_chains), scan_id)
-        except Exception as _ie:
-            _log.debug("ICC graph failed (non-fatal): %s", _ie)
+        from msra.analysis.deep import run_deep_analysis
+        _deep_extra, _taint_flows = run_deep_analysis(str(decompiled), scanner.manifest_data, pkg)
+        if _deep_extra:
+            findings = list(findings) + _deep_extra
+            _log.info("Deep analysis: %d extra findings for %s", len(_deep_extra), scan_id)
 
         _set_status(scan_id, status="reporting", progress=80,
                     message=f"Generating report ({len(findings)} findings)…")
@@ -6496,11 +6654,22 @@ def _load_findings_with_triage(scan_id: str) -> dict | None:
     if data is None:
         return None
     triage_map = _db.get_triage_map(scan_id)
-    for f in data.get("findings", []):
-        fid = f.get("id") or f.get("fid")
-        t = triage_map.get(fid, {}) if fid is not None else {}
+    ai_map = _db.get_ai_triage_map(scan_id)
+    try:
+        fb = _ai_routes.feedback_stats()
+    except Exception:
+        fb = {}
+    from msra.ai.learning import rule_key as _rule_key
+    for idx, f in enumerate(data.get("findings", []), start=1):
+        fid = f.get("id") or idx
+        t = triage_map.get(fid, {})
         f["triage_status"] = t.get("status", "New")
         f["suppression_note"] = t.get("suppression_note", "")
+        if fid in ai_map:
+            f["ai_triage"] = ai_map[fid]
+        stat = fb.get(_rule_key(f.get("fid"), f.get("title")))
+        if stat and stat["total"] >= 3:
+            f["rule_feedback"] = {"fp": stat["fp"], "total": stat["total"], "fp_rate": stat["fp_rate"]}
     return data
 
 
@@ -6523,6 +6692,7 @@ def api_triage_finding(scan_id: str, finding_id: int):
     if status not in valid:
         return jsonify({"error": f"Invalid status. Valid: {sorted(valid)}"}), 400
     _db.upsert_triage(scan_id, finding_id, status, note)
+    _ai_routes.invalidate_feedback()          # analyst decision changes rule statistics
     return jsonify({"ok": True, "scan_id": scan_id, "finding_id": finding_id, "status": status})
 
 
@@ -6649,8 +6819,8 @@ def api_export_sarif(scan_id: str):
                 },
             })
         ev = f.get("evidence") or {}
-        file_uri = ev.get("file") or ""
-        line_num = ev.get("line") or 1
+        file_uri = ev.get("file") or ev.get("file_path") or "unknown"
+        line_num = ev.get("line") or ev.get("line_number") or 1
         results.append({
             "ruleId": rule_id,
             "level": sev_map.get(f.get("severity", ""), "warning"),
@@ -6669,13 +6839,13 @@ def api_export_sarif(scan_id: str):
 
     sarif = {
         "version": "2.1.0",
-        "$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.5.json",
+        "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
         "runs": [{
             "tool": {
                 "driver": {
                     "name": "MSRA",
-                    "version": "1.0.0",
-                    "informationUri": "https://github.com/sai/msra",
+                    "version": "2.0.0",
+                    "informationUri": "https://github.com/BaymaxPop23/MSRA",
                     "rules": rules,
                 }
             },
@@ -6687,8 +6857,22 @@ def api_export_sarif(scan_id: str):
     return Response(
         sarif_json,
         mimetype="application/json",
-        headers={"Content-Disposition": f'attachment; filename="{pkg}_msra.sarif"'},
+        headers={"Content-Disposition": f'attachment; filename="{_sec.header_filename(pkg)}_msra.sarif"'},
     )
+
+
+@app.route("/api/scans/<scan_id>/sbom.json")
+def export_sbom(scan_id: str):
+    """CycloneDX 1.5 SBOM built from the scan's decompiled build metadata."""
+    from msra.analysis.sbom import collect_components, to_cyclonedx
+    dec = _scan_dir(scan_id) / "decompiled"
+    if not dec.is_dir():
+        return jsonify({"error": "No decompiled output for this scan (it may have been pruned)"}), 404
+    rec = _db.get_scan(scan_id) or {}
+    doc = to_cyclonedx(collect_components(str(dec)), rec.get("package") or scan_id)
+    resp = jsonify(doc)
+    resp.headers["Content-Disposition"] = f'attachment; filename="{_sec.header_filename(scan_id)}-sbom.json"'
+    return resp
 
 
 @app.route("/api/scans/<scan_id>/export/csv")
@@ -6705,23 +6889,23 @@ def api_export_csv(scan_id: str):
                      "Triage Status", "Description", "Remediation"])
     for f in data.get("findings", []):
         ev = f.get("evidence") or {}
-        writer.writerow([
+        writer.writerow([_sec.csv_safe(v) for v in (
             f.get("id", ""),
             f.get("title", ""),
             f.get("severity", ""),
             f.get("category", ""),
             "; ".join(f.get("cwe", [])),
-            ev.get("file", ""),
-            ev.get("line", ""),
+            ev.get("file") or ev.get("file_path", ""),
+            ev.get("line") or ev.get("line_number", ""),
             f.get("triage_status", "New"),
             f.get("description", ""),
             f.get("remediation", ""),
-        ])
+        )])
     pkg = data.get("package", scan_id)
     return Response(
         output.getvalue(),
         mimetype="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{pkg}_msra.csv"'},
+        headers={"Content-Disposition": f'attachment; filename="{_sec.header_filename(pkg)}_msra.csv"'},
     )
 
 
@@ -6937,7 +7121,8 @@ def upload():
         return jsonify({"error": "File must be APK/APKM/XAPK (Android), IPA (iOS), JAR (Java), or EXE/DLL (Windows)"}), 400
 
     scan_id   = uuid.uuid4().hex[:12]
-    file_path = UPLOAD_FOLDER / f"{scan_id}_{f.filename}"
+    safe_name = _sec.safe_filename(f.filename, "upload")
+    file_path = UPLOAD_FOLDER / f"{scan_id}_{safe_name}"
     f.save(str(file_path))
 
     if is_ios:
@@ -6951,7 +7136,7 @@ def upload():
 
     _db.upsert_scan(scan_id, status="queued", progress=0,
                     message="Queued…", platform=platform,
-                    package=f.filename, apk=f.filename)
+                    package=safe_name, apk=safe_name)
 
     # Queue depth before submission — tells the UI how many scans are waiting ahead
     queued_ahead = _SCAN_POOL._work_queue.qsize()
@@ -6975,61 +7160,49 @@ def scan_status(scan_id: str):
     return jsonify(data)
 
 
+@app.route("/healthz")
+def healthz():
+    """Liveness probe: unauthenticated, no data, no DB access (used by the Docker healthcheck)."""
+    return jsonify({"ok": True})
+
+
 @app.route("/api/queue/status")
 def api_queue_status():
-    """Return current scan pool and dynamic pool queue depths."""
-    scan_q = _SCAN_POOL._work_queue.qsize()   # pending in queue (not yet running)
-    dyn_q  = _DYN_POOL._work_queue.qsize()
+    """Queue depth and running counts for the scan and dynamic pools."""
+    def pool_info(pool, workers):
+        threads = getattr(pool, "_threads", ())
+        queued = pool._work_queue.qsize()
+        return {"max_workers": workers, "queued": queued,
+                "threads_started": len(threads)}
     return jsonify({
-        "scan_pool":  {"max_workers": 2, "queued": scan_q},
-        "dyn_pool":   {"max_workers": 3, "queued": dyn_q},
+        "scan_pool": pool_info(_SCAN_POOL, _SCAN_WORKERS),
+        "dyn_pool":  pool_info(_DYN_POOL, _DYN_WORKERS),
     })
 
 
 @app.route("/api/test-ai", methods=["POST"])
 def api_test_ai():
-    """Quick smoke-test: send a tiny message to Claude and return ok/error."""
-    data    = request.get_json(force=True, silent=True) or {}
-    api_key = data.get("api_key") or ANTHROPIC_API_KEY
-    if not api_key:
+    """Quick smoke-test of the configured provider (kept for the existing key dialog)."""
+    data   = request.get_json(force=True, silent=True) or {}
+    client = _get_ai_client()
+    key    = data.get("api_key") or None
+    if not (client.provider.configured or key):
         return jsonify({"ok": False, "error": "No API key provided"}), 400
     try:
-        payload = json.dumps({
-            "model":      "claude-haiku-4-5-20251001",
-            "max_tokens": 16,
-            "messages":   [{"role": "user", "content": "Reply with just: OK"}],
-        }).encode()
-        req = urllib.request.Request(
-            "https://api.anthropic.com/v1/messages",
-            data=payload,
-            headers={
-                "x-api-key":         api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type":      "application/json",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            body = json.loads(resp.read())
-        model = body.get("model", "claude")
-        return jsonify({"ok": True, "model": model})
-    except urllib.error.HTTPError as e:
-        try:
-            err_body = json.loads(e.read())
-            err = err_body.get("error", {}).get("message", str(e))
-        except Exception:
-            err = str(e)
-        return jsonify({"ok": False, "error": err})
-    except Exception as e:
+        r = client.complete(prompt="Reply with just: OK", model=_ai_settings.model_for("quick"),
+                            max_tokens=16, feature="quick", timeout=20, api_key=key, mask_input=False)
+        return jsonify({"ok": True, "model": r.model_returned or r.model})
+    except (_LLMError, _ai_settings.BudgetExceeded) as e:
         return jsonify({"ok": False, "error": str(e)})
 
 
 @app.route("/api/generate-poc", methods=["POST"])
 def generate_poc():
     data    = request.get_json(force=True, silent=True) or {}
-    api_key = data.get("api_key") or request.headers.get("X-API-Key") or ANTHROPIC_API_KEY
-    if not api_key:
-        return jsonify({"error": "No Anthropic API key. Set ANTHROPIC_API_KEY or pass api_key in the request."}), 401
+    api_key = data.get("api_key") or request.headers.get("X-API-Key") or None
+    if not (api_key or _get_ai_client().provider.configured):
+        return jsonify({"error": "No AI provider configured. Set ANTHROPIC_API_KEY (or an LLM gateway), "
+                                 "or pass api_key in the request."}), 401
 
     package     = data.get("package", "com.target.app")
     title       = data.get("title", "Unknown Vulnerability")
@@ -7044,20 +7217,19 @@ def generate_poc():
     attack_path = data.get("attack_path", "")
 
     try:
-        import anthropic as _ant
-        client  = _ant.Anthropic(api_key=api_key)
-        message = client.messages.create(
-            model=CLAUDE_MODEL, max_tokens=8000,
-            messages=[{"role": "user", "content": _build_poc_prompt(
+        res = _get_ai_client().complete(
+            model=_ai_settings.model_for("poc"), max_tokens=8000, feature="poc", timeout=180,
+            api_key=api_key, prompt=_build_poc_prompt(
                 package=package, title=title, description=description,
                 severity=severity, category=category, component=component,
                 authority=authority, snippet=snippet, file_path=file_path,
                 poc_text=poc_text, attack_path=attack_path,
-            )}],
-        )
-        raw   = message.content[0].text
+            ))
+        raw   = res.text
         files = _parse_poc_files(raw)
         return jsonify({"success": True, "files": files, "raw": raw})
+    except (_LLMError, _ai_settings.BudgetExceeded) as exc:
+        return jsonify({"error": str(exc)}), 502
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
@@ -7157,8 +7329,11 @@ def download_poc(scan_id: str):
     buf.close()
     try:
         with zipfile.ZipFile(buf_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for f in files:
-                zf.writestr(f["name"], f["content"])
+            for f in files[:50]:
+                if not isinstance(f, dict):
+                    continue
+                zf.writestr(_sec.safe_filename(f.get("name", ""), "poc.txt"),
+                            str(f.get("content", ""))[:500_000])
         response = send_file(buf_path, as_attachment=True,
                              download_name=f"poc_{scan_id}.zip",
                              mimetype="application/zip")
@@ -7313,15 +7488,22 @@ def api_dyn_start_verify():
     finding     = data.get("finding", {})
     use_ai      = bool(data.get("use_ai", True))
 
-    if not scan_id:
-        return jsonify({"error": "scan_id required"}), 400
+    if not isinstance(finding, dict):
+        return jsonify({"error": "finding must be an object"}), 400
+    if not _sec.is_valid_scan_id(scan_id):
+        return jsonify({"error": "valid scan_id required"}), 400
     if not _scan_dir(scan_id).exists():
         return jsonify({"error": "Scan not found"}), 404
+    if use_ai and not _rate_limit("ai:" + (request.remote_addr or "unknown"), max_per_minute=10):
+        return jsonify({"error": "Too many AI verification requests — please wait a minute"}), 429
 
-    # Enrich finding with scan metadata
-    summaries = _load_summaries()
-    meta      = next((s for s in summaries if s.get("scan_id") == scan_id), {})
-    finding.setdefault("package", meta.get("package", ""))
+    # The package always comes from the scan record, never from the client:
+    # it is interpolated into on-device shell commands by the worker.
+    meta    = _db.get_scan(scan_id) or {}
+    package = meta.get("package", "")
+    if not _sec.is_valid_package(package):
+        return jsonify({"error": "Scan has no valid Android package name"}), 400
+    finding["package"] = package
 
     job_id = uuid.uuid4().hex[:12]
     scan_mode = "ai-enhanced" if use_ai else "basic-adb"
@@ -7360,8 +7542,9 @@ def api_dyn_list_jobs():
 @app.route("/api/intel/extract-from-url", methods=["POST"])
 def api_intel_extract():
     """Fetch a URL, pass content to Claude, return suggested detection rules."""
-    if not ANTHROPIC_API_KEY:
-        return jsonify({"error": "ANTHROPIC_API_KEY not configured. Set it in the environment to use AI extraction."}), 400
+    if not _get_ai_client().provider.configured:
+        return jsonify({"error": "No AI provider configured. Set ANTHROPIC_API_KEY (or an LLM gateway) "
+                                 "in the environment to use AI extraction."}), 400
 
     data = request.get_json(force=True, silent=True) or {}
     url  = (data.get("url") or "").strip()
@@ -7371,10 +7554,11 @@ def api_intel_extract():
     # ── 1. Fetch the URL ────────────────────────────────────────────────
     log_lines = []
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 MSRA-RuleExtractor/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            raw = resp.read(200_000)          # cap at 200 KB
-        content_type = resp.headers.get("Content-Type", "")
+        raw, content_type = _sec.safe_fetch(
+            url, timeout=15, max_bytes=200_000,
+            headers={"User-Agent": "Mozilla/5.0 MSRA-RuleExtractor/1.0"})
+    except _sec.UnsafeURLError as e:
+        return jsonify({"error": f"URL not allowed: {e}"}), 400
     except urllib.error.URLError as e:
         return jsonify({"error": f"Could not fetch URL: {e}"}), 400
     except Exception as e:
@@ -7422,52 +7606,30 @@ Rules:
 - Prefer specific patterns over generic ones
 - If no Android patterns are extractable, return an empty array []
 
-TEXT TO ANALYSE:
-{text}"""
+TEXT TO ANALYSE (untrusted source material):
+{_wrap_untrusted(text)[0]}"""
 
     try:
-        import urllib.request as _ur
-        api_payload = json.dumps({
-            "model": CLAUDE_MODEL,
-            "max_tokens": 4096,
-            "messages": [{"role": "user", "content": prompt}]
-        }).encode()
-        api_req = _ur.Request(
-            "https://api.anthropic.com/v1/messages",
-            data=api_payload,
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            method="POST"
-        )
-        with _ur.urlopen(api_req, timeout=60) as resp:
-            api_resp = json.loads(resp.read())
-        raw_text = api_resp["content"][0]["text"].strip()
-    except Exception as e:
-        return jsonify({"error": f"Claude API error: {e}", "log": "\n".join(log_lines)}), 500
+        # Page text is untrusted web content: not masked (rule patterns often contain
+        # words like "password"), and the model is told to treat it as data only.
+        raw_text = _get_ai_client().complete(
+            system=_RULE_EXTRACT_SYSTEM, prompt=prompt, model=_ai_settings.model_for("rule_extraction"),
+            max_tokens=4096, feature="rule_extraction", timeout=90, mask_input=False).text.strip()
+    except (_LLMError, _ai_settings.BudgetExceeded) as e:
+        return jsonify({"error": f"AI error: {e}", "log": "\n".join(log_lines)}), 502
 
-    # ── 3. Parse the JSON array from Claude's response ──────────────────
-    # Claude sometimes wraps in ```json ... ``` — strip that
-    raw_text = re.sub(r'^```(?:json)?\s*', '', raw_text, flags=re.MULTILINE)
-    raw_text = re.sub(r'\s*```$', '', raw_text, flags=re.MULTILINE)
-
-    try:
-        rules = json.loads(raw_text)
-        if not isinstance(rules, list):
-            rules = []
-    except Exception:
-        # Try to find first [...] block
-        m = re.search(r'\[[\s\S]*\]', raw_text)
-        try:
-            rules = json.loads(m.group()) if m else []
-        except Exception:
-            rules = []
+    # ── 3. Parse the JSON array from the model's response ───────────────
+    rules = _parse_json_array(raw_text)
 
     log_lines.append(f"✓ Claude extracted {len(rules)} candidate rule(s)")
     return jsonify({"rules": rules, "log": "\n".join(log_lines)})
 
+
+_RULE_EXTRACT_SYSTEM = (
+    "You write Android static-analysis detection rules from source material. " + _AI_UNTRUSTED_NOTE +
+    " Answer only with the requested JSON array. Regexes must be simple and must not contain "
+    "nested unbounded quantifiers."
+)
 
 # ── Intelligence: Feed Sync ────────────────────────────────────────────────
 
@@ -7578,36 +7740,27 @@ def api_intel_sources_sync():
                     "confidence":   meta.get("confidence", "medium"),
                 }
 
-                title_key = title.strip().lower()
-
-                if rule_id in existing_ids:
-                    # Exact ID match — check if patterns changed and update if so
-                    existing = next((r for r in all_existing if r.get("id") == rule_id), None)
-                    if existing and existing.get("source") == "custom":
-                        old_pats = {p2.get("pattern", "") for p2 in existing.get("patterns", [])}
-                        new_pats = {p2.get("pattern", "") for p2 in patterns}
-                        if old_pats != new_pats:
-                            rules_api.update_custom_rule(rule_id, rule_data)
-                            updated += 1
+                # Crawled text is untrusted, so it gets the same policy as AI feed rules:
+                # server-generated deterministic id (never the file's own id, which could
+                # collide with or overwrite a built-in or a rule the analyst wrote), imported
+                # DISABLED for review, and never used to update an existing rule.
+                import hashlib as _hl
+                fingerprint = _hl.sha1(json.dumps([title, [x["pattern"] for x in patterns]],
+                                                  sort_keys=True).encode()).hexdigest()[:10]
+                slug = re.sub(r"[^a-z0-9]+", "-", str(title).lower()).strip("-")[:28] or "rule"
+                new_id = f"crawled-{slug}-{fingerprint}"
+                if new_id in existing_ids or title.strip().lower() in existing_by_title:
                     continue
-
-                if title_key in existing_by_title:
-                    # Same title, different ID — update patterns if rule is custom/crawled
-                    existing = existing_by_title[title_key]
-                    if existing.get("source") == "custom":
-                        old_pats = {p2.get("pattern", "") for p2 in existing.get("patterns", [])}
-                        new_pats = {p2.get("pattern", "") for p2 in patterns}
-                        if old_pats != new_pats:
-                            rules_api.update_custom_rule(existing["id"], rule_data)
-                            updated += 1
-                    # Either updated or it's a builtin with same title — don't create duplicate
-                    continue
-
-                # New rule — create it
-                rules_api.create_custom_rule(rule_data)
+                rule_data["id"] = new_id
+                rule_data["enabled"] = False
+                rule_data["tags"] = sorted({*(str(t)[:40] for t in (p.get("tags") or [])[:10]),
+                                            "crawled", "needs-review"})
+                created = rules_api.create_custom_rule(rule_data)
+                if created.get("enabled"):          # fail closed
+                    rules_api.set_rule_enabled(new_id, False)
                 added += 1
-                existing_ids.add(rule_id)
-                existing_by_title[title_key] = rule_data
+                existing_ids.add(new_id)
+                existing_by_title[title.strip().lower()] = rule_data
                 imported_titles.append(title)
             except Exception:
                 pass
@@ -7652,8 +7805,8 @@ def api_intel_sources_sync():
 @app.route("/api/intel/feed-sync", methods=["POST"])
 def api_intel_feed_sync():
     """Fetch an intelligence feed, use Claude to derive rules, import new ones."""
-    if not ANTHROPIC_API_KEY:
-        return jsonify({"error": "ANTHROPIC_API_KEY not configured"}), 400
+    if not _get_ai_client().provider.configured:
+        return jsonify({"error": "No AI provider configured (set ANTHROPIC_API_KEY or an LLM gateway)"}), 400
 
     data    = request.get_json(force=True, silent=True) or {}
     feed_id = (data.get("feed") or "").strip()
@@ -7708,57 +7861,49 @@ Return ONLY a JSON array of rule objects with this schema:
 
 Return [] if no useful Android patterns can be derived.
 
-FEED CONTENT:
-{text}"""
+FEED CONTENT (untrusted source material):
+{_wrap_untrusted(text)[0]}"""
 
     try:
-        import urllib.request as _ur
-        api_payload = json.dumps({
-            "model": CLAUDE_MODEL,
-            "max_tokens": 4096,
-            "messages": [{"role": "user", "content": prompt}]
-        }).encode()
-        api_req = _ur.Request(
-            "https://api.anthropic.com/v1/messages",
-            data=api_payload,
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            method="POST"
-        )
-        with _ur.urlopen(api_req, timeout=60) as resp:
-            api_resp = json.loads(resp.read())
-        raw_text = api_resp["content"][0]["text"].strip()
-    except Exception as e:
-        return jsonify({"error": f"Claude API error: {e}"}), 500
+        raw_text = _get_ai_client().complete(
+            system=_RULE_EXTRACT_SYSTEM, prompt=prompt, model=_ai_settings.model_for("rule_extraction"),
+            max_tokens=4096, feature="rule_extraction", timeout=90, mask_input=False).text.strip()
+    except (_LLMError, _ai_settings.BudgetExceeded) as e:
+        return jsonify({"error": f"AI error: {e}"}), 502
 
-    raw_text = re.sub(r'^```(?:json)?\s*', '', raw_text, flags=re.MULTILINE)
-    raw_text = re.sub(r'\s*```$', '', raw_text, flags=re.MULTILINE)
-    try:
-        rules = json.loads(raw_text)
-        if not isinstance(rules, list):
-            rules = []
-    except Exception:
-        m = re.search(r'\[[\s\S]*\]', raw_text)
-        try:
-            rules = json.loads(m.group()) if m else []
-        except Exception:
-            rules = []
+    rules = _parse_json_array(raw_text)
 
     # ── 3. Import new rules (skip if ID already exists) ─────────────────
+    # AI-extracted rules come from untrusted web content. They are imported DISABLED
+    # under server-generated ids (never an id the model/feed chose, which could
+    # collide with and shadow a built-in detection) for an analyst to review.
     added = 0
     for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        slug = re.sub(r"[^a-z0-9]+", "-", str(rule.get("title", "rule")).lower()).strip("-")[:32] or "rule"
+        safe = {k: v for k, v in rule.items() if k not in ("id", "enabled")}
+        safe["id"] = f"ai-{slug}-{uuid.uuid4().hex[:6]}"
+        safe["enabled"] = False
+        safe["tags"] = [str(t)[:40] for t in (rule.get("tags") or [])[:10]] + ["ai-extracted", "needs-review"]
         try:
-            rules_api.create_custom_rule(rule)
-            added += 1
-        except ValueError:
-            pass  # duplicate ID — skip
+            created = rules_api.create_custom_rule(safe)
         except Exception:
-            pass
+            continue                      # invalid/duplicate rule - skip
+        if created.get("enabled"):        # fail closed: never leave an unreviewed rule active
+            try:
+                rules_api.set_rule_enabled(created["id"], False)
+                if rules_api.get_rule_by_id(created["id"]).get("enabled"):
+                    raise RuntimeError("still enabled")
+            except Exception:
+                try:
+                    rules_api.delete_custom_rule(created["id"])
+                except Exception:
+                    pass
+                continue
+        added += 1
 
-    return jsonify({"added": added, "total_suggested": len(rules)})
+    return jsonify({"added": added, "total_suggested": len(rules), "imported_disabled": True})
 
 
 # ── PDF Export ───────────────────────────────────────────────────────────
@@ -7804,7 +7949,7 @@ def export_pdf(scan_id: str):
             str(pdf_path),
             mimetype="application/pdf",
             as_attachment=True,
-            download_name=f"{pkg}_msra.pdf",
+            download_name=f"{_sec.header_filename(pkg)}_msra.pdf",
         )
     except ImportError as e:
         return jsonify({"error": str(e)}), 503
@@ -7848,23 +7993,47 @@ def api_delete_scan(scan_id: str):
 _db.init_db()
 _db.migrate_from_files(REPORTS_FOLDER)
 
+# AI settings / model catalog / triage / learning routes
+_AI_POOL = ThreadPoolExecutor(max_workers=_env_workers("MSRA_AI_WORKERS", 2), thread_name_prefix="ai")
+_ai_routes.register(
+    app,
+    load_findings=_load_findings_data,
+    scan_exists=lambda sid: _scan_dir(sid).exists() or bool(_db.get_scan(sid)),
+    get_scan=_db.get_scan,
+    db_module=_db,
+    pool=_AI_POOL,
+)
+
 # ── Reset stale dynamic jobs left in "running" state from a previous session ──
 try:
     import sqlite3 as _sqlite3
     with _sqlite3.connect(str(_db.DB_PATH)) as _conn:
         _conn.execute(
             "UPDATE dynamic_jobs SET status='error', message='Interrupted by server restart' "
-            "WHERE status='running'"
+            "WHERE status IN ('running','queued')"
+        )
+        _conn.execute(
+            "UPDATE scans SET status='error', message='Interrupted by server restart' "
+            "WHERE status IN ('queued','decompiling','scanning','reporting')"
         )
         _conn.commit()
 except Exception:
     pass
 
 
+def _active_scan_ids():
+    return [r["scan_id"] for r in _db.list_scans(limit=5000) if r.get("status") in ("queued", "decompiling", "scanning", "reporting")]
+
+
+from msra import maintenance as _maintenance
+_maintenance.start_janitor(UPLOAD_FOLDER, REPORTS_FOLDER, _active_scan_ids)
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="MSRA — Mobile Security Review Assistant")
     p.add_argument("--port", type=int, default=int(os.environ.get("PORT", 5001)))
-    p.add_argument("--host", default="0.0.0.0")
+    p.add_argument("--host", default=os.environ.get("MSRA_HOST", "127.0.0.1"),
+                   help="Bind address (default 127.0.0.1; use 0.0.0.0 only with MSRA_AUTH_TOKEN set)")
     p.add_argument("--debug", action="store_true")
     p.add_argument("--no-semgrep", action="store_true",
                    help="Disable optional Semgrep analysis pass")
@@ -7873,7 +8042,17 @@ if __name__ == "__main__":
     if args.no_semgrep:
         os.environ["MSRA_NO_SEMGREP"] = "1"
 
-    if not ANTHROPIC_API_KEY:
-        print("[!] ANTHROPIC_API_KEY not set — Claude PoC generation will prompt for key per request.")
+    _prov = _get_ai_client().provider.public()
+    if _prov["configured"]:
+        print(f"[+] AI provider: {_prov['kind']} ({_prov['host']}) - choose models in AI Settings")
+    else:
+        print("[!] No AI provider configured (ANTHROPIC_API_KEY or MSRA_LLM_BASE_URL+MSRA_LLM_TOKEN) "
+              "- AI features are disabled; everything else works offline.")
+    _LOOPBACK_ONLY = args.host in ("127.0.0.1", "localhost", "::1")
+    if args.debug and not _LOOPBACK_ONLY:
+        p.error("--debug exposes the Werkzeug debugger and is only allowed on a loopback --host")
+    if not _LOOPBACK_ONLY and not AUTH_TOKEN:
+        print("[!] Binding to a non-loopback address without MSRA_AUTH_TOKEN: "
+              "anyone on the network can upload files and drive attached devices.")
     print(f"[+] MSRA dashboard → http://localhost:{args.port}")
     app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)

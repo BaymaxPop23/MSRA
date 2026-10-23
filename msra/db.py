@@ -4,6 +4,7 @@ Replaces in-memory _scans / _dynamic_jobs dicts so state survives restarts.
 """
 
 from __future__ import annotations
+import os
 
 import json
 import sqlite3
@@ -25,14 +26,25 @@ _JOB_COLS: frozenset = frozenset({
     "verdict_json", "created_at", "updated_at",
 })
 
-DB_PATH = Path(__file__).parent.parent / "msra.db"
+DB_PATH = Path(os.environ.get("MSRA_DB_PATH") or (Path(__file__).parent.parent / "msra.db"))
 _lock   = threading.Lock()
 
 
+class _Conn(sqlite3.Connection):
+    """`with _conn() as c:` commits AND closes (stdlib only commits, leaking handles under load)."""
+    def __exit__(self, *exc):
+        try:
+            return super().__exit__(*exc)
+        finally:
+            self.close()
+
+
 def _conn() -> sqlite3.Connection:
-    c = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    c = sqlite3.connect(str(DB_PATH), check_same_thread=False, factory=_Conn)
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA busy_timeout=10000")      # wait on writer contention instead of 'database is locked'
+    c.execute("PRAGMA synchronous=NORMAL")      # safe with WAL; far fewer fsyncs under write load
     return c
 
 
@@ -68,6 +80,17 @@ def init_db() -> None:
                     created_at    REAL,
                     updated_at    REAL
                 );
+                CREATE TABLE IF NOT EXISTS ai_triage (
+                    scan_id     TEXT NOT NULL,
+                    finding_id  INTEGER NOT NULL,
+                    verdict     TEXT NOT NULL,
+                    confidence  REAL,
+                    detail_json TEXT,
+                    model       TEXT,
+                    cost_usd    REAL DEFAULT 0,
+                    updated_at  REAL,
+                    PRIMARY KEY (scan_id, finding_id)
+                );
                 CREATE TABLE IF NOT EXISTS finding_triage (
                     scan_id          TEXT NOT NULL,
                     finding_id       INTEGER NOT NULL,
@@ -76,6 +99,12 @@ def init_db() -> None:
                     updated_at       REAL,
                     PRIMARY KEY (scan_id, finding_id)
                 );
+            """)
+            c.executescript("""
+                CREATE INDEX IF NOT EXISTS idx_scans_updated ON scans(updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_scans_status  ON scans(status);
+                CREATE INDEX IF NOT EXISTS idx_jobs_scan     ON dynamic_jobs(scan_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_jobs_status   ON dynamic_jobs(status);
             """)
             # Additive migrations — safe to run on every startup
             for _migration in [
@@ -176,6 +205,7 @@ def delete_scan(scan_id: str) -> None:
     with _lock:
         with _conn() as c:
             c.execute("DELETE FROM finding_triage WHERE scan_id = ?", (scan_id,))
+            c.execute("DELETE FROM ai_triage WHERE scan_id = ?", (scan_id,))
             c.execute("DELETE FROM dynamic_jobs WHERE scan_id = ?", (scan_id,))
             c.execute("DELETE FROM scans WHERE scan_id = ?", (scan_id,))
 
@@ -266,3 +296,48 @@ def get_triage_map(scan_id: str) -> Dict[int, Dict]:
         ).fetchall()
     return {r["finding_id"]: {"status": r["status"], "suppression_note": r["suppression_note"]}
             for r in rows}
+
+
+# ── AI triage + analyst-feedback helpers ───────────────────────────────────────
+
+def upsert_ai_triage(scan_id: str, finding_id: int, verdict: str, confidence: float,
+                     detail: dict, model: str, cost_usd: float = 0.0) -> None:
+    """Store the AI verifier's aggregated verdict for one finding."""
+    with _lock:
+        with _conn() as c:
+            c.execute(
+                """INSERT INTO ai_triage (scan_id, finding_id, verdict, confidence, detail_json,
+                                          model, cost_usd, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(scan_id, finding_id)
+                   DO UPDATE SET verdict=excluded.verdict, confidence=excluded.confidence,
+                                 detail_json=excluded.detail_json, model=excluded.model,
+                                 cost_usd=excluded.cost_usd, updated_at=excluded.updated_at""",
+                (scan_id, finding_id, verdict, confidence, json.dumps(detail), model,
+                 cost_usd, time.time()),
+            )
+
+
+def get_ai_triage_map(scan_id: str) -> Dict[int, Dict]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT finding_id, verdict, confidence, detail_json, model, cost_usd, updated_at "
+            "FROM ai_triage WHERE scan_id = ?", (scan_id,)).fetchall()
+    out: Dict[int, Dict] = {}
+    for r in rows:
+        try:
+            detail = json.loads(r["detail_json"] or "{}")
+        except ValueError:
+            detail = {}
+        out[r["finding_id"]] = {"verdict": r["verdict"], "confidence": r["confidence"],
+                                "detail": detail, "model": r["model"],
+                                "cost_usd": r["cost_usd"], "updated_at": r["updated_at"]}
+    return out
+
+
+def list_triage_rows() -> List[Dict]:
+    """All analyst triage decisions across scans (for per-rule feedback stats)."""
+    with _conn() as c:
+        rows = c.execute("SELECT scan_id, finding_id, status FROM finding_triage "
+                         "WHERE status != 'New'").fetchall()
+    return [dict(r) for r in rows]

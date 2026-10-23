@@ -114,7 +114,7 @@ class Scanner:
         use_semgrep: bool = True,
     ):
         self.decompiled_dir = decompiled_dir
-        self.adb_path = adb_path
+        self.adb_path = adb_path or "adb"
         self.package_name: Optional[str] = None
         self._pattern_manager = PatternManager(pattern_config)
         self.deep_analysis_enabled = deep_analysis
@@ -189,6 +189,26 @@ class Scanner:
         # Filter false positives and enrich with concrete attack paths
         if self._exploitability_validator:
             findings = filter_false_positives(findings, self._exploitability_validator)
+
+        # Resource files (res/xml, res/values/strings.xml, network_security_config)
+        # live under decompiled/resources, not decompiled/sources, so XML-targeted
+        # patterns never saw them. They have no class to validate reachability for,
+        # so they are scanned after the class-based exploitability filter.
+        findings.extend(self._scan_resources())
+
+        # Hardcoded secrets (known key formats + entropy) across code, resources
+        # and bundled assets.
+        findings.extend(self._scan_secrets(sources_root))
+        try:
+            from .analysis.hybrid import scan_hybrid
+            findings.extend(scan_hybrid(self.decompiled_dir))
+        except Exception as exc:                    # never let this kill a scan
+            print(f"[!] Hybrid-framework scan warning: {exc}")
+        try:
+            from .analysis.sbom import scan_sbom
+            findings.extend(scan_sbom(self.decompiled_dir))
+        except Exception as exc:
+            print(f"[!] SBOM scan warning: {exc}")
 
         # Deduplicate by (rule_id, file, line)
         findings = self._deduplicate_findings(findings)
@@ -532,6 +552,8 @@ class Scanner:
         app = root.find("application")
         if app is not None:
             findings.extend(self._manifest_app_flags(app, manifest_path))
+            findings.extend(self._manifest_platform_checks(root, app, manifest_path))
+            findings.extend(self._manifest_permission_checks(root, manifest_path))
             findings.extend(self._manifest_components(root, manifest_path))
 
         return findings
@@ -693,6 +715,180 @@ class Scanner:
                 )
             )
 
+        return findings
+
+    # Rule ids shared with data/builtin/patterns.json (type "manifest"), whose XPath checks
+    # ElementTree cannot evaluate. They are implemented here so the Hub toggles still apply.
+    # id -> (title, severity, default_enabled, permission names, component tags guarded by them, CWE)
+    _PERMISSION_RULES = {
+        "permission-install-packages": (
+            "App can install other packages", "High", True,
+            ("android.permission.INSTALL_PACKAGES", "android.permission.REQUEST_INSTALL_PACKAGES"), (),
+            "CWE-250"),
+        "permission-system-alert-window": (
+            "SYSTEM_ALERT_WINDOW (draw over other apps)", "High", True,
+            ("android.permission.SYSTEM_ALERT_WINDOW",), (), "CWE-1021"),
+        "permission-bind-accessibility": (
+            "Accessibility service binding", "High", True,
+            ("android.permission.BIND_ACCESSIBILITY_SERVICE",), ("service",), "CWE-250"),
+        "permission-device-admin": (
+            "Device administrator binding", "High", True,
+            ("android.permission.BIND_DEVICE_ADMIN",), ("receiver",), "CWE-250"),
+    }
+
+    def _manifest_permission_checks(self, root: ET.Element, manifest_path: str) -> List[Finding]:
+        from .patterns.overrides import is_enabled, load_overrides
+        ov = load_overrides()
+        declared = {self._get_android_attr(e, "name") for e in root.findall("uses-permission")}
+        declared |= {self._get_android_attr(e, "name") for e in root.findall("uses-permission-sdk-23")}
+        app = root.find("application")
+        findings: List[Finding] = []
+        for rid, (title, sev, default, perms, tags, cwe) in self._PERMISSION_RULES.items():
+            if not is_enabled(rid, default, ov):
+                continue
+            hit = next((p for p in perms if p in declared), None)
+            if hit is None and app is not None:
+                for tag in tags:
+                    for comp in app.findall(tag):
+                        if self._get_android_attr(comp, "permission") in perms:
+                            hit = self._get_android_attr(comp, "permission")
+                            break
+                    if hit:
+                        break
+            if hit is None:
+                continue
+            findings.append(Finding(
+                fid=rid, title=title, severity=sev,
+                description=(f"The manifest uses {hit}. This is a high-impact capability: review whether the "
+                             "app genuinely needs it and how it is protected from misuse."),
+                attack_path="Abuse of the capability by a compromised component or a malicious caller.",
+                adb_commands=[], evidence=self._manifest_evidence(manifest_path, hit),
+                references=["https://developer.android.com/reference/android/Manifest.permission"],
+                extra={"cwe": [cwe], "category": "Permissions"}))
+        return findings
+
+    # ── Platform / policy checks (SDK levels, backup defaults, network security config)
+
+    @staticmethod
+    def _int_attr(value: Optional[str]) -> Optional[int]:
+        try:
+            return int(value) if value is not None else None
+        except ValueError:
+            return None
+
+    def _manifest_platform_checks(self, root: ET.Element, app: ET.Element,
+                                  manifest_path: str) -> List[Finding]:
+        findings: List[Finding] = []
+        sdk = root.find("uses-sdk")
+        min_sdk = self._int_attr(self._get_android_attr(sdk, "minSdkVersion")) if sdk is not None else None
+        target_sdk = self._int_attr(self._get_android_attr(sdk, "targetSdkVersion")) if sdk is not None else None
+
+        def add(fid, title, sev, desc, attack, token, cwe, refs=None, remediation=""):
+            findings.append(Finding(
+                fid=fid, title=title, severity=sev, description=desc, attack_path=attack,
+                adb_commands=[], evidence=self._manifest_evidence(manifest_path, token),
+                references=refs or [], extra={"cwe": [cwe], "category": "Platform Security",
+                                              "remediation": remediation}))
+
+        if self._get_android_attr(app, "testOnly") == "true":
+            add("manifest-test-only", "Test-only build (android:testOnly=true)", "Medium",
+                "The package is marked testOnly. Such builds can be installed with 'adb install -t' "
+                "and are not meant for distribution; they often ship debug functionality.",
+                "A testOnly app can be sideloaded and instrumented without a release signature.",
+                "testOnly", "CWE-489", remediation="Build release variants without android:testOnly.")
+
+        backup = self._get_android_attr(app, "allowBackup")
+        has_policy = (self._get_android_attr(app, "fullBackupContent") is not None or
+                      self._get_android_attr(app, "dataExtractionRules") is not None)
+        if backup is None and not has_policy:
+            add("manifest-backup-default", "allowBackup not set (defaults to enabled)", "Low",
+                "android:allowBackup is not specified, so it defaults to true and no "
+                "fullBackupContent/dataExtractionRules limit what is backed up.",
+                "A user or attacker with USB access can pull app data with 'adb backup'.",
+                "<application", "CWE-530",
+                ["https://developer.android.com/guide/topics/data/autobackup"],
+                "Set android:allowBackup=\"false\" or define dataExtractionRules excluding sensitive files.")
+
+        if target_sdk is not None and target_sdk < 31:
+            add("manifest-low-target-sdk", f"Outdated targetSdkVersion ({target_sdk})", "Medium" if target_sdk < 28 else "Low",
+                f"targetSdkVersion={target_sdk} opts the app out of newer platform protections "
+                "(scoped storage, implicit-export rules, background limits, cleartext-off-by-default for API 28+).",
+                "The app runs with legacy, weaker security behaviour on current Android versions.",
+                "targetSdkVersion", "CWE-1104",
+                ["https://developer.android.com/distribute/best-practices/develop/target-sdk"],
+                "Raise targetSdkVersion to a current API level and fix resulting behaviour changes.")
+        if min_sdk is not None and min_sdk < 24:
+            add("manifest-low-min-sdk", f"Low minSdkVersion ({min_sdk})", "Low",
+                f"minSdkVersion={min_sdk} keeps the app installable on Android versions that lack "
+                "modern security features (network security config defaults, file-based encryption, etc.).",
+                "Users on very old devices run the app without platform mitigations.",
+                "minSdkVersion", "CWE-1104")
+
+        findings.extend(self._network_security_config_findings(app, manifest_path, target_sdk))
+        return findings
+
+    def _find_resource_xml(self, ref: str) -> Optional[str]:
+        """Resolve '@xml/name' to a decompiled resources file."""
+        name = ref.split("/")[-1]
+        for base in (os.path.join(self.decompiled_dir, "resources", "res", "xml"),
+                     os.path.join(self.decompiled_dir, "res", "xml")):
+            candidate = os.path.join(base, name + ".xml")
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+
+    def _network_security_config_findings(self, app: ET.Element, manifest_path: str,
+                                          target_sdk: Optional[int]) -> List[Finding]:
+        findings: List[Finding] = []
+        ref = self._get_android_attr(app, "networkSecurityConfig")
+        cleartext_attr = self._get_android_attr(app, "usesCleartextTraffic")
+
+        def add(fid, title, sev, desc, attack, path, token, cwe="CWE-295"):
+            ev = self._manifest_evidence(path, token) if path else None
+            findings.append(Finding(
+                fid=fid, title=title, severity=sev, description=desc, attack_path=attack,
+                adb_commands=[], evidence=ev, extra={"cwe": [cwe], "category": "Network Security"},
+                references=["https://developer.android.com/privacy-and-security/security-config"]))
+
+        if not ref:
+            if target_sdk is not None and target_sdk < 28 and cleartext_attr is None:
+                add("nsc-cleartext-default", "Cleartext traffic allowed by default (targetSdk < 28)", "Medium",
+                    "No network security config and targetSdkVersion < 28: HTTP is permitted by default.",
+                    "Network attacker intercepts or modifies HTTP traffic.", manifest_path, "targetSdkVersion", "CWE-319")
+            return findings
+
+        path = self._find_resource_xml(ref)
+        if not path:
+            return findings
+        try:
+            nsc = ET.parse(path).getroot()
+        except ET.ParseError:
+            return findings
+
+        base = nsc.find("base-config")
+        if base is not None and base.attrib.get("cleartextTrafficPermitted", "").lower() == "true":
+            add("nsc-base-cleartext", "Network security config permits cleartext globally", "Medium",
+                "base-config sets cleartextTrafficPermitted=\"true\" for every domain.",
+                "Network attacker intercepts or modifies HTTP traffic.", path, "cleartextTrafficPermitted", "CWE-319")
+        for cfg in nsc.iter():
+            if cfg.tag in ("base-config", "domain-config") and \
+               any(c.tag == "trust-anchors" and any(a.attrib.get("src") == "user" for a in c)
+                   for c in cfg):
+                add("nsc-trusts-user-ca", "App trusts user-installed CA certificates", "Medium",
+                    "The network security config trusts the 'user' certificate store, so a CA the "
+                    "user (or malware) installs can MITM the app's TLS traffic.",
+                    "Install a proxy CA on the device and intercept HTTPS without any bypass.", path, "user")
+                break
+        for dc in nsc.findall("domain-config"):
+            if dc.attrib.get("cleartextTrafficPermitted", "").lower() == "true":
+                domains = ", ".join((d.text or "").strip() for d in dc.findall("domain"))[:200]
+                add("nsc-domain-cleartext", f"Cleartext permitted for domain(s): {domains}", "Low",
+                    "A domain-config allows HTTP for the listed domains.",
+                    "Traffic to those hosts can be intercepted on the network.", path, "cleartextTrafficPermitted", "CWE-319")
+        if nsc.find("debug-overrides") is not None:
+            add("nsc-debug-overrides", "debug-overrides present in network security config", "Info",
+                "debug-overrides only apply to debuggable builds, but confirm they cannot ship in release.",
+                "A debuggable build trusts extra CAs.", path, "debug-overrides")
         return findings
 
     def _manifest_components(self, root: ET.Element, manifest_path: str) -> List[Finding]:
@@ -892,6 +1088,35 @@ class Scanner:
         evidence.file_path = manifest_path
         return evidence
 
+    def _scan_secrets(self, sources_root: Optional[str]) -> List[Finding]:
+        """Secret detection; third-party library code is skipped to avoid noise."""
+        try:
+            from .analysis.secrets import scan_paths
+            roots = [r for r in (sources_root, os.path.join(self.decompiled_dir, "resources")) if r]
+            found = scan_paths(roots)
+        except Exception as exc:  # never let secret scanning kill a scan
+            print(f"[!] Secret scan warning: {exc}")
+            return []
+        if not self.skip_library_code:
+            return found
+        return [f for f in found
+                if not (f.evidence and classify_path(f.evidence.file_path, self.package_name)
+                        in ("library", "obfuscated"))]
+
+    def _scan_resources(self) -> List[Finding]:
+        """Run XML-applicable patterns over jadx's decompiled resources tree."""
+        res_root = os.path.join(self.decompiled_dir, "resources")
+        if not os.path.isdir(res_root):
+            return []
+        try:
+            found = self._scan_sources(res_root)
+        except Exception as exc:  # never let resource scanning kill a scan
+            print(f"[!] Resource scan warning: {exc}")
+            return []
+        # The manifest is handled by _scan_manifest; don't double-report it.
+        return [f for f in found
+                if not (f.evidence and f.evidence.file_path.endswith("AndroidManifest.xml"))]
+
     def _scan_sources(self, sources_root: str) -> List[Finding]:
         """Scan source files for vulnerability patterns."""
         findings: List[Finding] = []
@@ -908,7 +1133,7 @@ class Scanner:
 
         for path in iter_source_files(sources_root):
             # Classify file & track stats
-            cat = classify_path(path)
+            cat = classify_path(path, self.package_name)
             self.scan_stats[f"{cat}_files"] = self.scan_stats.get(f"{cat}_files", 0) + 1
 
             # Skip library and obfuscated dependency code by default — these
@@ -920,7 +1145,13 @@ class Scanner:
             # Skip test source directories — findings there are not production code
             # and would be false positives (e.g. test helpers that deliberately use
             # raw SQL or insecure patterns to exercise vulnerability detection).
-            path_norm = path.replace("\\", "/").lower()
+            # Match against the path relative to the sources root: the absolute
+            # path may contain "/test/" (e.g. a workspace called "test").
+            try:
+                rel_path = os.path.relpath(path, sources_root)
+            except ValueError:
+                rel_path = path
+            path_norm = "/" + rel_path.replace("\\", "/").lower()
             if any(m.replace("\\", "/").lower() in path_norm for m in _TEST_PATH_MARKERS):
                 continue
 
@@ -1166,7 +1397,10 @@ class Scanner:
             # Use the base pattern id (strip the path/offset suffix) so that
             # two different regex sub-patterns for the same rule that fire on
             # the same line are still collapsed.
-            fid_base = finding.fid.split(':')[0] if finding.fid else finding.title
+            if finding.fid and finding.fid.startswith('semgrep:'):
+                fid_base = finding.fid          # per-rule id, not just "semgrep"
+            else:
+                fid_base = finding.fid.split(':')[0] if finding.fid else finding.title
             key = (fid_base, file_path, line)
 
             if key not in seen:

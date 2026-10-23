@@ -91,6 +91,14 @@ class AppMonitor:
     def stop(self) -> List[SecurityEvent]:
         """Stop monitoring and return collected events."""
         self._monitoring = False
+        # readline() blocks until logcat emits a line; terminating the process
+        # closes the pipe so the monitor thread exits promptly.
+        proc = getattr(self, "_logcat_proc", None)
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
         if self._monitor_thread:
             self._monitor_thread.join(timeout=2)
         return self.events
@@ -123,18 +131,23 @@ class AppMonitor:
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,   # unread PIPE can fill and stall logcat
             text=True,
             bufsize=1
         )
+        self._logcat_proc = process
 
         try:
             while self._monitoring and process.poll() is None:
                 line = process.stdout.readline()
-                if line:
-                    self._process_log_line(line.strip())
+                if not line:
+                    break   # EOF: logcat exited / was terminated by stop()
+                self._process_log_line(line.strip())
         finally:
-            process.terminate()
+            try:
+                process.terminate()
+            except Exception:
+                pass
 
     def _process_log_line(self, line: str):
         """Process a single log line for security events."""

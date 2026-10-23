@@ -1,6 +1,6 @@
 PORT ?= 5001
 
-.PHONY: start stop restart logs install update docker docker-stop help
+.PHONY: test start stop restart logs install update docker docker-stop help
 
 help:
 	@echo "MSRA — Mobile Security Review Assistant"
@@ -9,6 +9,7 @@ help:
 	@echo "  make stop         Stop the dashboard"
 	@echo "  make restart      Restart the dashboard"
 	@echo "  make update       Pull latest version and restart"
+	@echo "  make test         Run the test suite"
 	@echo "  make logs         Tail server logs"
 	@echo "  make install      Install Python dependencies"
 	@echo "  make docker       Start with Docker Compose"
@@ -27,6 +28,9 @@ update:
 
 logs:
 	@tail -f /tmp/msra_server.log
+
+test:
+	python3 -m pytest -q
 
 install:
 	pip3 install -r requirements.txt

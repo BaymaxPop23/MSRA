@@ -81,6 +81,12 @@ class SourcesManager:
         source_type: str = "blog"
     ) -> CustomSource:
         """Add a new custom source."""
+        # Reject non-http(s) schemes up front; the fetch layer additionally
+        # blocks private/loopback/link-local targets and re-checks redirects.
+        from urllib.parse import urlparse
+        for candidate in (url, feed_url):
+            if candidate and urlparse(candidate).scheme not in ("http", "https"):
+                raise ValueError(f"Only http/https source URLs are allowed: {candidate}")
         # Check for duplicate
         for existing in self._custom_sources:
             if existing.url == url or existing.name.lower() == name.lower():
