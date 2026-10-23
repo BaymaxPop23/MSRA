@@ -192,6 +192,8 @@ class TaintEngine:
         self._method_locations: Dict[Tuple[str, str], Tuple[str, int]] = {}
         # class -> set of imported fully-qualified names
         self._class_imports: Dict[str, Dict[str, str]] = {}
+        # (class, method) -> parameter names, for argument->parameter mapping across hops
+        self._method_params: Dict[Tuple[str, str], List[str]] = {}
         # simple class name -> fully qualified name
         self._class_fqn_map: Dict[str, str] = {}
         # simple class name -> every fqn with that name (filled by a pre-pass so
@@ -400,6 +402,8 @@ class TaintEngine:
 
             body = content[brace_pos:pos]
             results.append((method_name, body, start_line))
+            params = self._parse_params(content[m.start():brace_pos])
+            self._method_params.setdefault((class_fqn, method_name), params)
 
         return results
 
@@ -779,6 +783,8 @@ class TaintEngine:
                 data_flow = "unverified-same-method"
                 if severity in ("Critical", "High"):
                     severity = "Medium"
+        elif self._verify_call_chain(source, sink, path):
+            data_flow = "call-chain-verified"      # args mapped to parameters all the way to the sink
         elif severity == "Critical":
             # Reachability alone is not proof that attacker data reaches the sink
             severity = "High"
@@ -794,6 +800,133 @@ class TaintEngine:
             poc_command=poc,
             data_flow=data_flow,
         )
+
+
+    # ------------------------------------------------------------------
+    # Parameter-mapped call-chain verification
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _split_args(text: str) -> List[str]:
+        """Split a call's argument text on top-level commas."""
+        out, depth, cur = [], 0, []
+        for ch in text:
+            if ch in "([{<" and ch != "<":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+            if ch == "," and depth == 0:
+                out.append("".join(cur)); cur = []
+            else:
+                cur.append(ch)
+        if "".join(cur).strip():
+            out.append("".join(cur))
+        return [a.strip() for a in out]
+
+    @classmethod
+    def _parse_params(cls, header: str) -> List[str]:
+        i = header.find("(")
+        j = header.rfind(")")
+        if i == -1 or j <= i:
+            return []
+        names = []
+        for part in cls._split_args(header[i + 1:j]):
+            part = re.sub(r'@\w+(?:\([^)]*\))?\s*', '', part).replace("final ", "").strip()
+            mm = re.search(r'(\w+)\s*$', part)
+            names.append(mm.group(1) if mm else "")
+        return names
+
+    @staticmethod
+    def _uses(expr: str, tainted: Set[str]) -> bool:
+        return any(re.search(rf'(?<![\w.]){re.escape(t)}\b', expr) for t in tainted)
+
+    def _propagate(self, lines: List[str], tainted: Set[str]) -> Set[str]:
+        """Grow *tainted* through ``x = <expr using tainted>`` assignments (small fixpoint)."""
+        tainted = set(tainted)
+        for _ in range(5):
+            grew = False
+            for text in lines:
+                am = self._ASSIGN_LHS_RE.search(text)
+                if am and am.group(1) not in tainted and self._uses(am.group(2), tainted):
+                    tainted.add(am.group(1))
+                    grew = True
+            if not grew:
+                break
+        return tainted
+
+    def _tainted_arg_positions(self, lines: List[str], callee: str, tainted: Set[str]) -> Set[int]:
+        text = "\n".join(lines)
+        positions: Set[int] = set()
+        for cm in re.finditer(rf'(?<![\w])(?:\w+\s*\.\s*)?{re.escape(callee)}\s*\(', text):
+            depth, k = 1, cm.end()
+            while k < len(text) and depth:
+                depth += (text[k] == "(") - (text[k] == ")")
+                k += 1
+            for idx, arg in enumerate(self._split_args(text[cm.end():k - 1])):
+                if self._uses(arg, tainted):
+                    positions.add(idx)
+        return positions
+
+    def _verify_call_chain(self, source: TaintSource, sink: TaintSink, path: List[str]) -> bool:
+        """True when attacker data demonstrably flows source -> hop args -> parameters -> sink.
+
+        Walks the hop path. In each method: propagate taint through assignments, find which
+        argument positions of the next call carry tainted data, and seed the callee's
+        corresponding parameters. At the sink method, the sink statement must use a tainted
+        variable. Conservative: any unresolvable step returns False (stays 'call-chain')."""
+        try:
+            with open(source.file_path, "r", encoding="utf-8", errors="ignore") as fh:
+                src_lines = fh.read().splitlines()
+        except OSError:
+            return False
+        if source.line_number < 1 or source.line_number > len(src_lines):
+            return False
+
+        keys = []
+        for hop in path:
+            cls, _, meth = hop.rpartition(".")
+            keys.append((cls, meth))
+        cg = self._call_graph
+        first = cg.method_bodies.get(keys[0])
+        if first is None:
+            return False
+
+        # seed: the source call result (assigned variable and/or nested in a call argument)
+        src_line = src_lines[source.line_number - 1]
+        tainted: Set[str] = {"__SRC__"}
+        first_lines = first.splitlines()
+        marker = src_line.strip()
+        am = self._ASSIGN_LHS_RE.search(src_line)
+        if am:
+            tainted.add(am.group(1))
+        # replace the source API call text on its own line with a token so nested use is visible
+        for pat, _api, _g in _SOURCE_PATTERNS:
+            src_line = re.sub(pat, "__SRC__", src_line)
+        first_lines = [src_line if l.strip() == marker else l for l in first_lines]
+        if source.source_api.startswith("provider"):
+            tainted |= {p for p in self._method_params.get(keys[0], []) if p}
+
+        tainted = self._propagate(first_lines, tainted)
+        lines = first_lines
+        for cur, nxt in zip(keys, keys[1:]):
+            positions = self._tainted_arg_positions(lines, nxt[1], tainted)
+            params = self._method_params.get(nxt, [])
+            seeds = {params[i] for i in positions if i < len(params) and params[i]}
+            body = cg.method_bodies.get(nxt)
+            if not seeds or body is None:
+                return False
+            lines = body.splitlines()
+            tainted = self._propagate(lines, seeds)
+
+        if keys[-1] != (sink.sink_class, sink.sink_method):
+            return False
+        try:
+            with open(sink.file_path, "r", encoding="utf-8", errors="ignore") as fh:
+                fl = fh.read().splitlines()
+            sink_text = " ".join(fl[sink.line_number - 1:sink.line_number + 2])
+        except OSError:
+            return False
+        return self._uses(sink_text, tainted)
 
     _ASSIGN_LHS_RE = re.compile(r'(?:[\w<>\[\],.?]+\s+)?(\w+)\s*=(?!=)\s*(.*)')
 
@@ -944,7 +1077,7 @@ def to_finding(flow: TaintFlow) -> Finding:
         "extra_name": flow.source.extra_name,
         "data_flow": flow.data_flow,
         "confidence": ("low" if (flow.is_sanitized or flow.data_flow.startswith("unverified"))
-                       else "high" if flow.data_flow == "intra-method" else "medium"),
+                       else "high" if flow.data_flow in ("intra-method", "call-chain-verified") else "medium"),
     }
 
     sanitized_note = " [SANITIZED – may be FP]" if flow.is_sanitized else ""

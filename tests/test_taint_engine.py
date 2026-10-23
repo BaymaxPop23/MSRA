@@ -119,8 +119,8 @@ def test_typed_field_call_resolves_across_classes(tmp_path):
     f = flows[0]
     assert f.sink.sink_type == "webview"
     assert f.hop_path[-1] == "com.t.Helper.load"
-    assert f.data_flow == "call-chain"
-    assert f.severity != "Critical"          # unverified reachability is capped
+    assert f.data_flow == "call-chain-verified"     # u -> arg 0 -> param 'target' -> loadUrl(target)
+    assert f.severity == "Critical"
 
 
 def test_same_method_flow_verified_through_assignments(tmp_path):
@@ -160,3 +160,58 @@ def test_hostile_input_does_not_blow_up(tmp_path):
     t0 = time.time()
     TaintEngine(str(tmp_path), {"_package": "com.t"}).analyze()
     assert time.time() - t0 < 5
+
+
+HOP_SRC = """package com.t;
+import android.app.Activity;
+import android.os.Bundle;
+
+public class Hop extends Activity {
+    Mid mid = new Mid();
+    protected void onCreate(Bundle b) {
+        String evil = getIntent().getStringExtra("e");
+        mid.go("const", evil, "const2");
+    }
+}
+"""
+MID = """package com.t;
+public class Mid {
+    Leaf leaf = new Leaf();
+    public void go(String a, String b, String c) {
+        String x = b + "/x";
+        leaf.run(a, x);
+    }
+}
+"""
+LEAF = """package com.t;
+import android.webkit.WebView;
+public class Leaf {
+    WebView web;
+    public void run(String safe, String url) {
+        web.loadUrl(url);
+    }
+}
+"""
+CONST_SRC = HOP_SRC.replace("Hop", "Const").replace('mid.go("const", evil, "const2")', 'mid.go(evil, "const", "const2")')
+
+
+def _hop_flows(tmp_path, hop_src, name):
+    src = tmp_path / "sources" / "com" / "t"
+    src.mkdir(parents=True)
+    (src / f"{name}.java").write_text(hop_src)
+    (src / "Mid.java").write_text(MID)
+    (src / "Leaf.java").write_text(LEAF)
+    m = {"_package": "com.t", "activities": [{"name": f"com.t.{name}", "exported": True}]}
+    return [f for f in TaintEngine(str(tmp_path), m).analyze() if f.sink.sink_type == "webview"]
+
+
+def test_two_hop_argument_mapping_verified(tmp_path):
+    fl = _hop_flows(tmp_path, HOP_SRC, "Hop")
+    assert fl and fl[0].data_flow == "call-chain-verified" and len(fl[0].hop_path) == 3
+
+
+def test_tainted_arg_in_wrong_position_is_not_verified(tmp_path):
+    # evil lands in Mid.go's param 'a', which is passed to Leaf's UNUSED 'safe' param
+    fl = _hop_flows(tmp_path, CONST_SRC, "Const")
+    assert fl and fl[0].data_flow == "call-chain"
+    assert fl[0].severity != "Critical"
