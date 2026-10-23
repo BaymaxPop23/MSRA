@@ -345,6 +345,7 @@ def generate_html_report(findings: List, output_path: str, metadata: dict, json_
         evidence = _get_attr(f, 'evidence')
         findings_json.append({
             'id':          fi + 1,
+            'fid':         _get_attr(f, 'fid'),
             'title':       _get_attr(f, 'title'),
             'severity':    _get_attr(f, 'severity'),
             'description': _get_attr(f, 'description'),
