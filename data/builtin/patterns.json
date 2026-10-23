@@ -1420,7 +1420,7 @@
         "type": "regex",
         "patterns": [
           {
-            "pattern": "rawQuery\\s*\\([^)]*\\+[^)]*(?:selection|uri|projection)",
+            "pattern": "rawQuery\\s*\\([^)]{0,300}\\+[^)]{0,300}(?:selection|uri|projection)",
             "flags": "i",
             "file_types": [
               ".java",
@@ -3179,7 +3179,7 @@
         "type": "regex",
         "patterns": [
           {
-            "pattern": "query\\s*\\([^)]*selection[^)]*\\)[^}]*rawQuery\\s*\\([^)]*selection",
+            "pattern": "query\\s*\\([^)]{0,300}selection[^)]{0,300}\\)[^}]{0,1500}rawQuery\\s*\\([^)]{0,300}selection",
             "flags": "ims",
             "file_types": [
               ".java",
@@ -3187,7 +3187,7 @@
             ]
           },
           {
-            "pattern": "rawQuery\\s*\\([^,]*\\+[^,]*selection",
+            "pattern": "rawQuery\\s*\\([^,]{0,300}\\+[^,]{0,300}selection",
             "flags": "i",
             "file_types": [
               ".java",
