@@ -42,6 +42,7 @@ from msra import rules_api
 from msra.corellium import CorelliumClient
 import msra.db as _db
 from msra import security as _sec
+from msra.dynamic import adb_util as _adb_util
 
 # ── Config ───────────────────────────────────────────────────────────────
 UPLOAD_FOLDER   = Path(__file__).parent / "uploads"
@@ -175,17 +176,11 @@ def _update_job(job_id: str, **kwargs):
 
 
 def _run_adb(cmd: list, timeout: int = 15) -> tuple[int, str, str]:
-    """Run an ADB command, return (returncode, stdout, stderr)."""
-    import subprocess as _sp
-    try:
-        r = _sp.run(["adb"] + cmd, capture_output=True, text=True, timeout=timeout)
-        return r.returncode, r.stdout, r.stderr
-    except FileNotFoundError:
-        return -1, "", "adb not found in PATH"
-    except _sp.TimeoutExpired:
-        return -1, "", "adb command timed out"
-    except Exception as e:
-        return -1, "", str(e)
+    """Run an ADB command, return (returncode, stdout, stderr).
+
+    Honours the calling dynamic job's deadline (see msra.dynamic.adb_util).
+    """
+    return _adb_util.run_adb(cmd, timeout=timeout)
 
 
 def _get_logcat(device_serial: str | None = None, lines: int = 300,
@@ -680,11 +675,23 @@ def _dynamic_device_cleanup(cfg: dict, finding: dict) -> None:
 
 def _dynamic_verify_worker(job_id: str, scan_id: str, finding_idx: int,
                             finding: dict, cfg: dict, use_ai: bool = True):
-    """Serialise per device, run the pipeline, always clean up."""
+    """Serialise per device, run the pipeline under a deadline, always clean up."""
+    try:
+        budget = int(cfg.get("job_timeout") or os.environ.get("MSRA_DYN_JOB_TIMEOUT", 900))
+    except (TypeError, ValueError):
+        budget = 900
     with _device_lock(cfg.get("adb_serial", "")):
+        # The clock starts once we hold the device, not while queued behind it.
+        _adb_util.set_deadline(budget)
         try:
             _dynamic_verify_pipeline(job_id, scan_id, finding_idx, finding, cfg, use_ai)
+        except _adb_util.JobDeadline:
+            _log.warning("dynamic job %s timed out after %ss", job_id, budget)
+            _update_job(job_id, status="error", progress=100,
+                        message=f"Timed out after {budget}s (set MSRA_DYN_JOB_TIMEOUT to change)",
+                        verdict=None)
         finally:
+            _adb_util.clear_deadline()        # cleanup must still be able to run
             _dynamic_device_cleanup(cfg, finding)
 
 
@@ -727,7 +734,7 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
                 client.start_instance(instance_id)
                 # Wait up to 60 s for it to come online
                 for _ in range(12):
-                    _time.sleep(5)
+                    _adb_util.sleep(5)
                     inst = client.get_instance(instance_id)
                     if inst.is_on:
                         break
@@ -819,7 +826,7 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
             app_registered = False
             if package:
                 for _ in range(6):
-                    _time.sleep(2)
+                    _adb_util.sleep(2)
                     _, pm_out, _ = _run_adb(
                         (["-s", device_serial] if device_serial else []) + ["shell", "pm", "path", package],
                         timeout=5)
@@ -864,7 +871,7 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
             else:
                 _device_ok = True
             if _device_ok:
-                _time.sleep(6)   # wait for app to fully initialize
+                _adb_util.sleep(6)   # wait for app to fully initialize
 
         # Take filesystem snapshot before probing
         fs_before: set = set()
@@ -873,7 +880,7 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
 
         _update_job(job_id, progress=38, message="App running — observing startup behavior…")
         if _device_ok:
-            _time.sleep(6)   # observe startup network/logcat
+            _adb_util.sleep(6)   # observe startup network/logcat
 
         # ── Phase 3b: Login attempt ───────────────────────────────────────
         # Try filling login form with common test credentials so BFS
@@ -894,7 +901,7 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
                     _run_adb(adb_prefix + ["shell", "input", "text", "Password123!"], timeout=5)
                     _run_adb(adb_prefix + ["shell", "input", "keyevent", "66"], timeout=3)
                     login_attempted = True
-                    _time.sleep(3)
+                    _adb_util.sleep(3)
             except Exception:
                 pass
 
@@ -1004,7 +1011,7 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
                              timeout=8)
 
             # Post-probe logcat check
-            _time.sleep(4)
+            _adb_util.sleep(4)
             post_lc = _get_logcat(device_serial or None, lines=80, package=package)
             if re.search(r'javascript|webview|loadurl|evaluat|file://', post_lc, re.I):
                 extra_evidence += f"\nPost-probe WebView logcat:\n{post_lc[:600]}\n"
@@ -1021,7 +1028,7 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
                 adb_prefix + ["shell", "am", "start", "-n", _sec.sh_quote(f"{package}/{comp}")],
                 timeout=8)
             if rc_c == 0 and "error" not in out_c.lower():
-                _time.sleep(1)
+                _adb_util.sleep(1)
                 # Check for crash
                 _, crash_out, _ = _run_adb(
                     adb_prefix + ["shell", "dumpsys", "activity", "|",

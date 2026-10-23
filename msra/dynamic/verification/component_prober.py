@@ -505,29 +505,9 @@ class ComponentProber:
         return self._adb_runner(args, timeout)
 
     def _default_adb_runner(self, args: List[str], timeout: int = 10) -> Tuple[int, str, str]:
-        """Default subprocess-based ADB runner."""
-        cmd = ["adb"]
-        if self._device_serial:
-            cmd += ["-s", self._device_serial]
-        cmd += args
-
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-            return result.returncode, result.stdout, result.stderr
-        except subprocess.TimeoutExpired:
-            logger.debug("ADB command timed out: %s", cmd)
-            return -1, "", "timeout"
-        except FileNotFoundError:
-            logger.error("'adb' not found on PATH")
-            return -1, "", "adb not found"
-        except Exception as exc:
-            logger.debug("ADB command failed: %s – %s", cmd, exc)
-            return -1, "", str(exc)
+        """Default ADB runner (shared implementation)."""
+        from ..adb_util import run_adb
+        return run_adb(args, timeout=timeout, serial=self._device_serial or None)
 
     # ------------------------------------------------------------------ #
     # Crash detection                                                     #

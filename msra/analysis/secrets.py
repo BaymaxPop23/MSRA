@@ -52,7 +52,8 @@ RULES: Tuple[SecretRule, ...] = (
     SecretRule("secret-gcp-service-account", "Embedded GCP service-account private key", "Critical",
                _r(r'"private_key_id"\s*:\s*"([0-9a-f]{40})"'), 1),
     SecretRule("secret-private-key-block", "Embedded private key (PEM)", "Critical",
-               _r(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY(?: BLOCK)?-----")),
+               _r(r"(-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----"
+                  r"(?:[\s\S]{0,8000}?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----)?)"), 1),
     SecretRule("secret-stripe-live-key", "Hardcoded Stripe live secret key", "Critical",
                _r(r"\b((?:sk|rk)_live_[0-9a-zA-Z]{24,})\b"), 1),
     SecretRule("secret-slack-token", "Hardcoded Slack token", "High",
@@ -75,7 +76,7 @@ RULES: Tuple[SecretRule, ...] = (
                _r(r"\b(eyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,})\b"), 1,
                "CWE-798"),
     SecretRule("secret-basic-auth-url", "Credentials embedded in URL", "High",
-               _r(r"\bhttps?://([A-Za-z0-9._~%\-]{2,}:[^\s/@'\"<>]{3,}@[A-Za-z0-9.\-]+)"), 1,
+               _r(r"\bhttps?://([A-Za-z0-9._~%\-]{2,64}:[^\s/@'\"<>]{3,128}@[A-Za-z0-9.\-]{1,255})"), 1,
                "CWE-522"),
     SecretRule("secret-firebase-server-key", "Hardcoded Firebase Cloud Messaging server key", "High",
                _r(r"\b(AAAA[A-Za-z0-9_\-]{7}:[A-Za-z0-9_\-]{140,})\b"), 1),
@@ -83,10 +84,14 @@ RULES: Tuple[SecretRule, ...] = (
 
 # Generic: name looks secret-ish and value is a long high-entropy literal.
 _NAME_RE = r"(?:secret|passwd|password|pwd|api[_\-]?key|apikey|access[_\-]?token|auth[_\-]?token|client[_\-]?secret|private[_\-]?key|token|credential)"
+# Identifier affixes are bounded and generic matching is done per line (see
+# _MAX_GENERIC_LINE) so minified one-line bundles cannot trigger polynomial
+# backtracking on attacker-controlled input.
 _ASSIGN_RE = re.compile(
-    r"(?i)\b[\w.\-]*" + _NAME_RE + r"[\w.\-]*['\"]?\s*(?:=|:|=>|,)\s*['\"]([^'\"\s]{12,200})['\"]")
+    r"(?i)\b[\w.\-]{0,40}" + _NAME_RE + r"[\w.\-]{0,40}['\"]?\s{0,4}(?:=>|=|:|,)\s{0,4}['\"]([^'\"\s]{12,200})['\"]")
 _XML_ASSIGN_RE = re.compile(
-    r"(?i)<string\s+name=\"[\w.\-]*" + _NAME_RE + r"[\w.\-]*\"[^>]*>([^<\s]{12,200})</string>")
+    r"(?i)<string\s{1,4}name=\"[\w.\-]{0,40}" + _NAME_RE + r"[\w.\-]{0,40}\"[^>\n]{0,80}>([^<\s]{12,200})</string>")
+_MAX_GENERIC_LINE = 2000
 
 _PLACEHOLDER_RE = re.compile(
     r"(?i)^(?:x{4,}|\*{4,}|<.*>|\$\{.*\}|%s|%\d|your[_\-]|insert|change[_\-]?me|"
@@ -129,7 +134,12 @@ def _line_of(text: str, pos: int) -> int:
     return text.count("\n", 0, pos) + 1
 
 
-def _snippet(text: str, line: int, redact: str) -> str:
+_LONG_TOKEN_RE = re.compile(r"[A-Za-z0-9+/=_\-]{40,}")
+
+
+def _snippet(text: str, line: int, redact: str, full_redact: bool = False) -> str:
+    if full_redact:
+        return f"{line:04d}: [key material redacted]"
     lines = text.splitlines()
     if not lines:
         return ""
@@ -138,7 +148,10 @@ def _snippet(text: str, line: int, redact: str) -> str:
     for i in range(max(1, line - 1), min(len(lines), line + 1) + 1):
         out.append(f"{i:04d}: {lines[i - 1].strip()[:200]}")
     snippet = "\n".join(out)
-    return snippet.replace(redact, mask(redact)) if redact else snippet
+    if redact:
+        snippet = snippet.replace(redact, mask(redact))
+    # Belt and braces: any long token-like run is masked, whatever rule matched
+    return _LONG_TOKEN_RE.sub(lambda m: mask(m.group(0)), snippet)
 
 
 def _iter_files(roots: Iterable[str]):
@@ -163,8 +176,8 @@ def _iter_files(roots: Iterable[str]):
 
 def _make_finding(rid: str, title: str, severity: str, cwe: str, path: str,
                   line: int, text: str, secret: str, kind: str,
-                  confidence: str = "high") -> Finding:
-    masked = mask(secret) if secret else ""
+                  confidence: str = "high", full_redact: bool = False) -> Finding:
+    masked = "[redacted]" if full_redact else (mask(secret) if secret else "")
     return Finding(
         fid=f"{rid}:{path}:{line}",
         title=title,
@@ -175,7 +188,7 @@ def _make_finding(rid: str, title: str, severity: str, cwe: str, path: str,
                      "and use it directly against the backing service."),
         adb_commands=[],
         evidence=Evidence(file_path=path, line_number=line,
-                          snippet=_snippet(text, line, secret), matched_text=masked),
+                          snippet=_snippet(text, line, secret, full_redact), matched_text=masked),
         references=["https://owasp.org/www-project-mobile-top-10/2023-risks/m1-improper-credential-usage",
                     "https://mas.owasp.org/MASTG/tests/android/MASVS-STORAGE/MASTG-TEST-0001/"],
         extra={"cwe": [cwe], "category": "Hardcoded Secrets", "confidence": confidence,
@@ -196,21 +209,25 @@ def scan_text(path: str, text: str) -> List[Finding]:
             seen.add(key)
             findings.append(_make_finding(
                 rule.rid, rule.title, rule.severity, rule.cwe, path,
-                _line_of(text, m.start()), text, secret if rule.group else "", rule.title.lower()))
+                _line_of(text, m.start()), text, secret if rule.group else "", rule.title.lower(),
+                full_redact=(rule.rid == "secret-private-key-block")))
 
-    for rx in (_ASSIGN_RE, _XML_ASSIGN_RE):
-        for m in rx.finditer(text):
-            value = m.group(1)
-            if (rx is _ASSIGN_RE and ("${" in value or "%" in value)) or not _looks_secret(value):
-                continue
-            key = ("secret-generic", value)
-            if key in seen or any(value in s for _, s in seen if isinstance(s, str) and s != value):
-                continue                  # already reported by a specific rule
-            seen.add(key)
-            findings.append(_make_finding(
-                "secret-high-entropy-literal", "Hardcoded credential-like value",
-                "Medium", "CWE-798", path, _line_of(text, m.start()), text, value,
-                "high-entropy credential-like string", confidence="medium"))
+    for lineno, line_text in enumerate(text.splitlines(), start=1):
+        if len(line_text) > _MAX_GENERIC_LINE:
+            continue                      # minified blobs: known-format rules only
+        for rx in (_ASSIGN_RE, _XML_ASSIGN_RE):
+            for m in rx.finditer(line_text):
+                value = m.group(1)
+                if (rx is _ASSIGN_RE and ("${" in value or "%" in value)) or not _looks_secret(value):
+                    continue
+                key = ("secret-generic", value)
+                if key in seen or any(value in sv for _, sv in seen if isinstance(sv, str) and sv != value):
+                    continue              # already reported by a specific rule
+                seen.add(key)
+                findings.append(_make_finding(
+                    "secret-high-entropy-literal", "Hardcoded credential-like value",
+                    "Medium", "CWE-798", path, lineno, text, value,
+                    "high-entropy credential-like string", confidence="medium"))
 
     # A snippet shows neighbouring lines, which may hold *other* secrets from
     # this file - mask every secret we found in every snippet.

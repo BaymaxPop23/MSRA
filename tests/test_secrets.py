@@ -50,3 +50,29 @@ def test_mask_and_entropy():
     assert m.startswith("AKIA") and m.endswith("MPLE") and "IOSFODNN" not in m
     assert shannon_entropy("aaaaaaaa") == 0
     assert shannon_entropy("abcdefgh") > 2.9
+
+
+def test_private_key_block_fully_redacted():
+    body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj"
+    text = f"// config\n-----BEGIN PRIVATE KEY-----\n{body}\n{body}\n-----END PRIVATE KEY-----\n"
+    findings = scan_text("k.pem.java", text)
+    pem = [f for f in findings if f.extra["rule_id"] == "secret-private-key-block"]
+    assert len(pem) == 1
+    assert body not in pem[0].evidence.snippet
+    assert body[:20] not in pem[0].evidence.snippet
+
+
+def test_long_tokens_masked_in_any_snippet():
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV"
+    text = f'String a = "{jwt}";\nString b = "AKIAIOSFODNN7EXAMPLE";\n'
+    for f in scan_text("A.java", text):
+        assert jwt not in f.evidence.snippet
+
+
+def test_generic_scan_is_not_quadratic_on_minified_input():
+    import time
+    blob = ("a" * 200_000) + 'password:"' + ("x" * 50)
+    t0 = time.time()
+    scan_text("min.js", blob)
+    scan_text("min.js", "token" * 40_000)
+    assert time.time() - t0 < 3
