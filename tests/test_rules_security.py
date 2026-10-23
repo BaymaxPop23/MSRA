@@ -327,3 +327,68 @@ def test_every_shipped_pattern_satisfies_the_policy():
                     yield from walk(v)
         offenders += [(f.name, p[:60]) for p in walk(json.loads(f.read_text())) if safety.regex_problem(p)]
     assert not offenders, offenders
+
+
+# ── review round 3: composition, case-folding, adjacent repeats, runtime timeout ──
+DANGEROUS_R3 = [
+    r"((a+){3}){3}$",            # bounded repeats compose: 9-fold nested
+    r"(a|a){0,30}$",             # overlapping alternation under a large bounded repeat
+    r"(ab|AB)+$", r"(?:xy|Xy|xY)+$",  # same text matched two ways once case-folded (rules run with IGNORECASE)
+    r"a*a*a*a*a*b", r".*.*.*.*x", r"\d+\d+\d+\d+x",   # directly adjacent overlapping repeats
+]
+SAFE_R3 = [r"(a|A)+$",       # parser merges single-char alternations into one set: linear
+           r"a*b*c*", r"\s*\w+\s*=\s*\w+\s*;", r"\bkey\s*=\s*\w+", r"(?:get|set)Item\(",
+           r"[^)]{0,300}\+[^)]{0,300}x", r"(a|b){0,30}$"]
+
+
+@pytest.mark.parametrize("pat", DANGEROUS_R3)
+def test_round3_bypasses_rejected(pat):
+    assert safety.regex_problem(pat), pat
+
+
+@pytest.mark.parametrize("pat", SAFE_R3)
+def test_round3_no_false_positives(pat):
+    assert safety.regex_problem(pat) is None, pat
+
+
+def test_untrusted_regex_is_abandoned_after_the_timeout():
+    """Even a pattern the static check cannot see is bounded at runtime."""
+    import time
+    from msra.patterns.models import RegexDetection, TimedRegex
+    monkey = TimedRegex.TIMEOUT_S
+    TimedRegex.TIMEOUT_S = 0.3
+    try:
+        det = RegexDetection(pattern=r"(a|aa)+$", flags="", untrusted=True)
+        rx = det.compile()
+        assert isinstance(rx, TimedRegex)
+        before = TimedRegex.timeouts
+        t0 = time.time()
+        assert list(rx.finditer("a" * 60 + "!")) == []          # exponential on stdlib re
+        assert time.time() - t0 < 5
+        assert TimedRegex.timeouts == before + 1
+        assert [m.group() for m in RegexDetection(pattern=r"foo\(", untrusted=True).compile().finditer("a foo( b")] == ["foo("]
+    finally:
+        TimedRegex.TIMEOUT_S = monkey
+
+
+def test_non_builtin_rules_use_the_bounded_engine_and_builtin_do_not(tmp_path):
+    from msra.patterns.models import TimedRegex
+    got = _scan_env(tmp_path, [_rule("mine")])
+    mine = got["mine"].get_regex_patterns()[0]
+    assert mine.untrusted and isinstance(mine.compile(), TimedRegex)
+    builtin = next(p for p in got.values() if p.id != "mine" and p.get_regex_patterns())
+    assert not builtin.get_regex_patterns()[0].untrusted
+
+
+def test_scan_survives_a_rule_that_slips_past_validation(tmp_path, monkeypatch):
+    """Defence in depth: bypass the validator, scan hostile text, scan must still finish."""
+    import time
+    from msra.patterns import safety as sf
+    from msra.patterns.models import TimedRegex
+    monkeypatch.setattr(sf, "regex_problem", lambda p: None)
+    monkeypatch.setattr(TimedRegex, "TIMEOUT_S", 0.3)
+    got = _scan_env(tmp_path, [_rule("evil", pattern=r"(a|aa)+$")])
+    det = got["evil"].get_regex_patterns()[0]
+    t0 = time.time()
+    assert list(det.compile().finditer("a" * 60 + "!")) == []
+    assert time.time() - t0 < 5
