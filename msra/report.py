@@ -2,6 +2,7 @@
 
 import datetime as dt
 import html
+import json
 import os
 import shutil
 import subprocess
@@ -308,6 +309,8 @@ def generate_html_report(findings: List, output_path: str, metadata: dict, json_
     created      = dt.datetime.now().strftime("%B %d, %Y  %H:%M")
     title        = metadata.get("title", "Mobile Security Assessment")
     pkg          = metadata.get("package", "unknown")
+    # JS string-literal form of the package name (safe inside <script>)
+    _js_pkg_literal = json.dumps(re.sub(r"[^A-Za-z0-9._-]", "_", str(pkg)))
     apk_name     = metadata.get("apk", "unknown")
     src_count    = metadata.get("source_files", "N/A")
 
@@ -1119,7 +1122,7 @@ function exportReport() {{
   const blob = new Blob([raw], {{type:'application/json'}});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = '{pkg}_msra_report.json';
+  a.download = {_js_pkg_literal}+'_msra_report.json';
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
 }}
 
@@ -1377,6 +1380,8 @@ document.addEventListener('keydown', e => {{ if (e.key === 'Escape') closePocMod
 
 def _render_finding(finding, index: int, package: str) -> str:
     severity  = (_get_attr(finding, 'severity') or "Medium").lower()
+    if severity not in ('critical', 'high', 'medium', 'low', 'info'):
+        severity = 'medium'   # custom/AI-generated rules may carry arbitrary values
     extra     = _get_attr(finding, 'extra') or {}
     if not isinstance(extra, dict):
         extra = {}
@@ -1390,8 +1395,8 @@ def _render_finding(finding, index: int, package: str) -> str:
     remediation = extra.get('remediation', '') or ''
 
     # Reviewer-context fields (added by finding_enrichment)
-    confidence    = extra.get('confidence', 'medium')
-    code_class    = extra.get('code_class', 'app')
+    confidence    = html.escape(str(extra.get('confidence', 'medium')), quote=True)
+    code_class    = html.escape(str(extra.get('code_class', 'app')), quote=True)
     why_matters   = extra.get('why_it_matters', '')
     how_verify    = extra.get('how_to_verify', []) or []
     code_analysis = extra.get('code_analysis', '')
@@ -1420,7 +1425,7 @@ def _render_finding(finding, index: int, package: str) -> str:
   <div class="evidence-file">
     <i class="fa-regular fa-file-code" style="color:var(--accent)"></i>
     <span>{html.escape(str(display_fp))}</span>
-    <span class="line-badge"><i class="fa-solid fa-hashtag"></i> Line {line_num}</span>
+    <span class="line-badge"><i class="fa-solid fa-hashtag"></i> Line {html.escape(str(line_num))}</span>
   </div>
   <div class="evidence-snippet">
     <pre><code class="language-java">{html.escape(str(snippet))}</code></pre>
@@ -1431,7 +1436,7 @@ def _render_finding(finding, index: int, package: str) -> str:
     occ_html = ''
     if len(occurrences) > 1:
         occ_items = ''.join(
-            f'<div class="occ-row"><span class="occ-line">Line {o.get("line",0)}</span></div>'
+            f'<div class="occ-row"><span class="occ-line">Line {html.escape(str(o.get("line",0)))}</span></div>'
             for o in occurrences[1:21]  # cap display at 20
         )
         more = ''
@@ -1508,7 +1513,10 @@ def _render_finding(finding, index: int, package: str) -> str:
         chips.append(f'<span class="cwe-chip"><i class="fa-solid fa-tag"></i>{html.escape(str(cwe))}</span>')
     for ref in refs:
         label = re.sub(r'https?://(www\.)?', '', str(ref)).split('/')[0]
-        chips.append(f'<a class="ref-link" href="{html.escape(str(ref))}" target="_blank" rel="noopener"><i class="fa-solid fa-arrow-up-right-from-square"></i>{html.escape(label)}</a>')
+        if not re.match(r'https?://', str(ref).strip(), re.I):
+            chips.append(f'<span class="cwe-chip">{html.escape(str(ref))}</span>')
+            continue
+        chips.append(f'<a class="ref-link" href="{html.escape(str(ref).strip())}" target="_blank" rel="noopener noreferrer"><i class="fa-solid fa-arrow-up-right-from-square"></i>{html.escape(label)}</a>')
     if chips:
         meta_html = f'<div class="ref-chips">{"".join(chips)}</div>'
 

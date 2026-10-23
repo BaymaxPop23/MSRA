@@ -4,6 +4,7 @@ Replaces in-memory _scans / _dynamic_jobs dicts so state survives restarts.
 """
 
 from __future__ import annotations
+import os
 
 import json
 import sqlite3
@@ -25,7 +26,7 @@ _JOB_COLS: frozenset = frozenset({
     "verdict_json", "created_at", "updated_at",
 })
 
-DB_PATH = Path(__file__).parent.parent / "msra.db"
+DB_PATH = Path(os.environ.get("MSRA_DB_PATH") or (Path(__file__).parent.parent / "msra.db"))
 _lock   = threading.Lock()
 
 

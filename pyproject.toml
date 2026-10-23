@@ -8,7 +8,7 @@ version = "2.0.0"
 description = "Android APK security vulnerability scanner - Slay vulnerabilities before they slay your users"
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 authors = [
     {name = "Sai Jagadeesh"}
 ]
@@ -21,7 +21,6 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -30,23 +29,30 @@ classifiers = [
     "Topic :: Software Development :: Testing",
 ]
 
+dependencies = [
+    "flask>=3.0.0",
+    "pefile>=2023.2.7",
+]
+
 [project.optional-dependencies]
+ai = ["anthropic>=0.40.0"]
+test = ["pytest>=8.0"]
 dynamic = [
     "uiautomator2>=3.0.0",
     "frida-tools>=12.0.0",
     "mitmproxy>=10.0.0",
 ]
 pdf = [
-    "weasyprint>=52.0",
+    "weasyprint>=60.0",
 ]
 
 [project.scripts]
 msra = "msra.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/Sai-Jagadeesh/apk-analyzer"
-Repository = "https://github.com/Sai-Jagadeesh/apk-analyzer"
-Issues = "https://github.com/Sai-Jagadeesh/apk-analyzer/issues"
+Homepage = "https://github.com/BaymaxPop23/MSRA"
+Repository = "https://github.com/BaymaxPop23/MSRA"
+Issues = "https://github.com/BaymaxPop23/MSRA/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -54,3 +60,7 @@ include = ["msra*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::SyntaxWarning"]

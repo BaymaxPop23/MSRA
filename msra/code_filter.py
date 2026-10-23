@@ -87,6 +87,11 @@ _R8_GENERATED_CLASS_RE = re.compile(r"/(AbstractC[0-9]+[a-z]?|[A-Z][0-9]{4,}[A-Z
 def _normalize(path: str) -> str:
     """Strip leading dirs to get the path starting at `sources/...`."""
     p = path.replace("\\", "/")
+    # Prefer the jadx output dir marker so a parent directory that happens to
+    # be called "sources" doesn't truncate the path in the wrong place.
+    idx = p.find("decompiled/sources/")
+    if idx >= 0:
+        return p[idx + len("decompiled/"):]
     idx = p.find("sources/")
     return p[idx:] if idx >= 0 else p
 
@@ -121,13 +126,31 @@ def is_obfuscated_code(file_path: str) -> bool:
     return False
 
 
-def classify_path(file_path: str) -> str:
-    """Return one of: 'library' | 'obfuscated' | 'app' | 'manifest' | 'resource'."""
+def is_app_package_code(file_path: str, app_package: str | None) -> bool:
+    """True if the file lives under the app's own manifest package."""
+    if not app_package:
+        return False
+    p = _normalize(file_path)
+    if "sources/" not in p:
+        return False
+    rel = p.split("sources/", 1)[1]
+    return rel.startswith(app_package.replace(".", "/") + "/")
+
+
+def classify_path(file_path: str, app_package: str | None = None) -> str:
+    """Return one of: 'library' | 'obfuscated' | 'app' | 'manifest' | 'resource'.
+
+    When *app_package* (the manifest package) is given, code under that package
+    is always 'app' even if its namespace is on the library-prefix list (apps
+    published under com/google/, com/github/, ... are otherwise skipped).
+    """
     p = _normalize(file_path)
     if "AndroidManifest.xml" in p:
         return "manifest"
     if p.endswith(".xml"):
         return "resource"
+    if is_app_package_code(p, app_package):
+        return "app"
     if is_library_code(p):
         return "library"
     if is_obfuscated_code(p):

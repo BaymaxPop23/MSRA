@@ -959,7 +959,10 @@ _extract_apkm_bundle = _extract_split_apk_bundle
 def _decompile(apk_path: str, out_dir: str, jadx_path: str) -> None:
     """Decompile APK using jadx."""
     cmd = [jadx_path, "-d", out_dir, apk_path]
-    subprocess.run(cmd, check=False)
+    try:
+        subprocess.run(cmd, check=False, timeout=int(os.environ.get("MSRA_JADX_TIMEOUT", "600")))
+    except subprocess.TimeoutExpired:
+        print("[!] jadx timed out - continuing with whatever was decompiled so far")
 
 
 def _update_threat_intel(force: bool = False, quiet: bool = False) -> None:

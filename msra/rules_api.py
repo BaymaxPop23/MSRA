@@ -7,7 +7,9 @@ Enable/disable overrides are persisted to data/custom/overrides.json.
 from __future__ import annotations
 
 import json
+import os
 import re
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -46,9 +48,20 @@ def _load_overrides() -> Dict[str, List[str]]:
     return {"disabled": [], "enabled": []}
 
 
+_WRITE_LOCK = threading.RLock()
+
+
+def _atomic_write(path, text: str) -> None:
+    """Write via temp file + rename so a crash/concurrent reader never sees a partial file."""
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
 def _save_overrides(data: Dict[str, List[str]]):
     _ensure_dirs()
-    OVERRIDES_F.write_text(json.dumps(data, indent=2))
+    with _WRITE_LOCK:
+        _atomic_write(OVERRIDES_F, json.dumps(data, indent=2))
 
 
 # ── Custom rules ────────────────────────────────────────────────────────────
@@ -65,11 +78,12 @@ def _load_user_rules() -> List[dict]:
 
 def _save_user_rules(rules: List[dict]):
     _ensure_dirs()
-    USER_RULES_F.write_text(json.dumps({
-        "schema_version": "1.0.0",
-        "name": "User Custom Rules",
-        "patterns": rules,
-    }, indent=2))
+    with _WRITE_LOCK:
+        _atomic_write(USER_RULES_F, json.dumps({
+            "schema_version": "1.0.0",
+            "name": "User Custom Rules",
+            "patterns": rules,
+        }, indent=2))
 
 
 # ── Serialization ───────────────────────────────────────────────────────────
@@ -228,19 +242,53 @@ def get_rule_by_id(rule_id: str) -> Optional[dict]:
     return next((r for r in get_all_rules() if r["id"] == rule_id), None)
 
 
+_VALID_SEVERITIES = {"critical": "Critical", "high": "High", "medium": "Medium",
+                     "low": "Low", "info": "Info"}
+_RULE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_MAX_PATTERNS = 50
+_MAX_PATTERN_LEN = 2000
+# A group that contains an unbounded quantifier and is itself repeated -
+# the classic catastrophic-backtracking shape, e.g. (a+)+ or (.*)*
+_NESTED_QUANT_RE = re.compile(r"\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)[+*]|\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)\{\d+,\}")
+
+
 def _validate_patterns(data: dict) -> None:
-    """Raise ValueError if any regex pattern in data fails to compile."""
+    """Raise ValueError if the rule's metadata or any regex is invalid/unsafe.
+
+    Rules can originate from AI extraction of untrusted web pages, so severity,
+    category and id are constrained and regexes are checked for ReDoS shapes.
+    """
+    if "severity" in data:
+        sev = _VALID_SEVERITIES.get(str(data["severity"]).strip().lower())
+        if not sev:
+            raise ValueError(f"Invalid severity '{data['severity']}' "
+                             f"(expected one of {', '.join(_VALID_SEVERITIES.values())})")
+        data["severity"] = sev
+    if data.get("id") and not _RULE_ID_RE.match(str(data["id"]).strip()):
+        raise ValueError("Invalid rule id: use letters, digits, '.', '_' or '-' (max 64 chars)")
+    if "category" in data and len(str(data["category"])) > 80:
+        raise ValueError("Category too long")
+
     det_type = data.get("detection_type", "regex")
     if det_type not in ("regex", "regex-multiline", "combined"):
         return
-    for p in data.get("patterns", []):
+    pats = data.get("patterns", [])
+    if len(pats) > _MAX_PATTERNS:
+        raise ValueError(f"Too many patterns (max {_MAX_PATTERNS})")
+    for p in pats:
         pat = p.get("pattern", "")
         if not pat:
             continue
+        if len(pat) > _MAX_PATTERN_LEN:
+            raise ValueError(f"Regex too long (max {_MAX_PATTERN_LEN} chars)")
         try:
             re.compile(pat)
         except re.error as exc:
             raise ValueError(f"Invalid regex pattern '{pat}': {exc}") from exc
+        if _NESTED_QUANT_RE.search(pat):
+            raise ValueError(
+                f"Regex '{pat}' has a nested unbounded quantifier that can cause "
+                "catastrophic backtracking (ReDoS); please rewrite it")
 
 
 def toggle_rule(rule_id: str) -> dict:

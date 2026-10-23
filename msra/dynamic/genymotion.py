@@ -12,6 +12,7 @@ import subprocess
 import time
 import os
 import re
+import shlex
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, TYPE_CHECKING
 from pathlib import Path
@@ -842,45 +843,45 @@ class GenymotionDeviceAdapter:
             activity=activity,
             package=package,
             elements=elements,
-            xml_dump=output if success else "",
+            hierarchy_xml=output if success else "",
         )
 
     def open_deep_link(self, uri: str) -> bool:
         """Open a deep link URI."""
-        success, _ = self.execute_shell(f'am start -a android.intent.action.VIEW -d "{uri}"')
+        success, _ = self.execute_shell(f'am start -a android.intent.action.VIEW -d {shlex.quote(str(uri))}')
         return success
 
     def send_broadcast(self, action: str, component: Optional[str] = None,
                       extras: Optional[dict] = None) -> Tuple[bool, str]:
         """Send broadcast intent."""
-        cmd = f'am broadcast -a {action}'
+        cmd = f'am broadcast -a {shlex.quote(str(action))}'
         if component:
-            cmd += f' -n {component}'
+            cmd += f' -n {shlex.quote(str(component))}'
         if extras:
             for key, value in extras.items():
                 if isinstance(value, str):
-                    cmd += f' --es {key} "{value}"'
+                    cmd += f' --es {shlex.quote(str(key))} {shlex.quote(value)}'
                 elif isinstance(value, int):
-                    cmd += f' --ei {key} {value}'
+                    cmd += f' --ei {shlex.quote(str(key))} {int(value)}'
                 elif isinstance(value, bool):
-                    cmd += f' --ez {key} {str(value).lower()}'
+                    cmd += f' --ez {shlex.quote(str(key))} {str(value).lower()}'
 
         return self.execute_shell(cmd)
 
     def start_service(self, component: str, extras: Optional[dict] = None) -> Tuple[bool, str]:
         """Start a service."""
-        cmd = f'am startservice -n {component}'
+        cmd = f'am startservice -n {shlex.quote(str(component))}'
         if extras:
             for key, value in extras.items():
                 if isinstance(value, str):
-                    cmd += f' --es {key} "{value}"'
+                    cmd += f' --es {shlex.quote(str(key))} {shlex.quote(value)}'
 
         return self.execute_shell(cmd)
 
     def query_content_provider(self, uri: str, projection: Optional[List[str]] = None,
                                selection: Optional[str] = None) -> Tuple[bool, str]:
         """Query a content provider."""
-        cmd = f'content query --uri {uri}'
+        cmd = f'content query --uri {shlex.quote(str(uri))}'
         if projection:
             cmd += f' --projection {":".join(projection)}'
         if selection:

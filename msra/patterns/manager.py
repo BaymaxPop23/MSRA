@@ -87,7 +87,10 @@ class PatternManager:
         """Load built-in patterns from package data directory."""
         builtin_dir = self.config.data_dir / "builtin"
         if builtin_dir.exists():
-            self._load_from_directory(builtin_dir, "builtin")
+            # ios_/jar_/exe_ rule files use detection types the Android scanner
+            # does not understand; each platform scanner loads its own file.
+            self._load_from_directory(builtin_dir, "builtin",
+                                      exclude_prefixes=("ios_", "jar_", "exe_"))
         else:
             logger.warning(f"Built-in patterns directory not found: {builtin_dir}")
 
@@ -131,9 +134,10 @@ class PatternManager:
         if custom_dir.exists():
             self._load_from_directory(custom_dir, "custom")
 
-    def _load_from_directory(self, directory: Path, source_name: str) -> None:
+    def _load_from_directory(self, directory: Path, source_name: str,
+                             exclude_prefixes: tuple = ()) -> None:
         """Load all pattern files from a directory."""
-        patterns = self._loader.load_directory(directory)
+        patterns = self._loader.load_directory(directory, exclude_prefixes)
         for pattern in patterns:
             # Later sources override earlier ones (by ID)
             self._patterns[pattern.id] = pattern

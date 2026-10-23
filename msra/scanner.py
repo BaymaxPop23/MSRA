@@ -114,7 +114,7 @@ class Scanner:
         use_semgrep: bool = True,
     ):
         self.decompiled_dir = decompiled_dir
-        self.adb_path = adb_path
+        self.adb_path = adb_path or "adb"
         self.package_name: Optional[str] = None
         self._pattern_manager = PatternManager(pattern_config)
         self.deep_analysis_enabled = deep_analysis
@@ -189,6 +189,12 @@ class Scanner:
         # Filter false positives and enrich with concrete attack paths
         if self._exploitability_validator:
             findings = filter_false_positives(findings, self._exploitability_validator)
+
+        # Resource files (res/xml, res/values/strings.xml, network_security_config)
+        # live under decompiled/resources, not decompiled/sources, so XML-targeted
+        # patterns never saw them. They have no class to validate reachability for,
+        # so they are scanned after the class-based exploitability filter.
+        findings.extend(self._scan_resources())
 
         # Deduplicate by (rule_id, file, line)
         findings = self._deduplicate_findings(findings)
@@ -892,6 +898,20 @@ class Scanner:
         evidence.file_path = manifest_path
         return evidence
 
+    def _scan_resources(self) -> List[Finding]:
+        """Run XML-applicable patterns over jadx's decompiled resources tree."""
+        res_root = os.path.join(self.decompiled_dir, "resources")
+        if not os.path.isdir(res_root):
+            return []
+        try:
+            found = self._scan_sources(res_root)
+        except Exception as exc:  # never let resource scanning kill a scan
+            print(f"[!] Resource scan warning: {exc}")
+            return []
+        # The manifest is handled by _scan_manifest; don't double-report it.
+        return [f for f in found
+                if not (f.evidence and f.evidence.file_path.endswith("AndroidManifest.xml"))]
+
     def _scan_sources(self, sources_root: str) -> List[Finding]:
         """Scan source files for vulnerability patterns."""
         findings: List[Finding] = []
@@ -908,7 +928,7 @@ class Scanner:
 
         for path in iter_source_files(sources_root):
             # Classify file & track stats
-            cat = classify_path(path)
+            cat = classify_path(path, self.package_name)
             self.scan_stats[f"{cat}_files"] = self.scan_stats.get(f"{cat}_files", 0) + 1
 
             # Skip library and obfuscated dependency code by default — these
@@ -920,7 +940,13 @@ class Scanner:
             # Skip test source directories — findings there are not production code
             # and would be false positives (e.g. test helpers that deliberately use
             # raw SQL or insecure patterns to exercise vulnerability detection).
-            path_norm = path.replace("\\", "/").lower()
+            # Match against the path relative to the sources root: the absolute
+            # path may contain "/test/" (e.g. a workspace called "test").
+            try:
+                rel_path = os.path.relpath(path, sources_root)
+            except ValueError:
+                rel_path = path
+            path_norm = "/" + rel_path.replace("\\", "/").lower()
             if any(m.replace("\\", "/").lower() in path_norm for m in _TEST_PATH_MARKERS):
                 continue
 
@@ -1166,7 +1192,10 @@ class Scanner:
             # Use the base pattern id (strip the path/offset suffix) so that
             # two different regex sub-patterns for the same rule that fire on
             # the same line are still collapsed.
-            fid_base = finding.fid.split(':')[0] if finding.fid else finding.title
+            if finding.fid and finding.fid.startswith('semgrep:'):
+                fid_base = finding.fid          # per-rule id, not just "semgrep"
+            else:
+                fid_base = finding.fid.split(':')[0] if finding.fid else finding.title
             key = (fid_base, file_path, line)
 
             if key not in seen:
