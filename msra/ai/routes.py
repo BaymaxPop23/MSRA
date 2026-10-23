@@ -54,7 +54,8 @@ def _client():
 
 def _not_configured():
     return jsonify({"error": "No AI provider configured. Set ANTHROPIC_API_KEY, or "
-                             "MSRA_LLM_BASE_URL + MSRA_LLM_TOKEN for a gateway, then restart."}), 400
+                             "MSRA_LLM_BASE_URL + MSRA_LLM_TOKEN for a gateway, or MSRA_LLM_PROVIDER=bedrock "
+                             "with an AWS region, then restart."}), 400
 
 
 # ── status / settings / catalog ─────────────────────────────────────────
@@ -75,7 +76,7 @@ def ai_models():
     except Exception as e:           # never 500 the settings dialog
         return jsonify({"models": [], "error": str(e)[:200]}), 200
     pricing = S.load().get("pricing")
-    enriched = [dict(m, **model_info(m["id"], pricing)) for m in models]
+    enriched = [dict(m, **model_info(m["id"], pricing, c.provider.kind)) for m in models]
     return jsonify({"models": enriched, "provider": c.provider.public(), "pricing_note": PRICING_NOTE})
 
 
@@ -85,7 +86,7 @@ def ai_model_info():
     if not valid_model_id(mid):
         return jsonify({"error": "invalid model id"}), 400
     resolved = c_resolve(mid)
-    return jsonify(dict(id=mid, resolved=resolved, **model_info(resolved, S.load().get("pricing"))))
+    return jsonify(dict(id=mid, resolved=resolved, **model_info(resolved, S.load().get("pricing"), _client().provider.kind)))
 
 
 def c_resolve(mid: str) -> str:

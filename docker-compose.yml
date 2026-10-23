@@ -13,6 +13,8 @@ services:
       - msra_data:/app/data/custom
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - MSRA_LLM_PROVIDER=${MSRA_LLM_PROVIDER:-}
+      - MSRA_BEDROCK_REGION=${MSRA_BEDROCK_REGION:-}
       - MSRA_AUTH_TOKEN=${MSRA_AUTH_TOKEN:-}
       - MSRA_LLM_BASE_URL=${MSRA_LLM_BASE_URL:-}
       - MSRA_LLM_TOKEN=${MSRA_LLM_TOKEN:-}

@@ -2,6 +2,10 @@
 
 Providers (chosen from the environment - tokens are never stored in files):
   * anthropic (default): api.anthropic.com Messages API, key from ANTHROPIC_API_KEY
+  * bedrock: native AWS Bedrock via boto3's Converse API (one request shape for every
+    vendor). Set MSRA_LLM_PROVIDER=bedrock and a region (MSRA_BEDROCK_REGION / AWS_REGION).
+    Credentials come from the standard AWS chain (env, AWS_PROFILE, SSO, instance role) -
+    MSRA never reads or stores them. Needs `pip install boto3` (optional dependency).
   * gateway: any Bedrock-style multi-vendor gateway. Set MSRA_LLM_BASE_URL and
     MSRA_LLM_TOKEN (plus optionally MSRA_LLM_AUTH_HEADER, MSRA_LLM_API_PATH,
     MSRA_LLM_CHAT_PATH, MSRA_LLM_MODELS_PATH). Claude ids use the Messages API;
@@ -24,7 +28,7 @@ from typing import Any, Dict, List, Optional
 
 from . import settings as _settings
 from .masking import mask
-from .models import (DIRECT_MODELS, family_of, is_chat_model, resolve_alias,
+from .models import (ALIASES, DIRECT_MODELS, family_of, is_chat_model, resolve_alias,
                      usd_for_usage, uses_chat_completions)
 
 logger = logging.getLogger(__name__)
@@ -41,16 +45,22 @@ class LLMError(RuntimeError):
 
 @dataclass
 class ProviderConfig:
-    kind: str                     # "anthropic" | "gateway"
+    kind: str                     # "anthropic" | "gateway" | "bedrock"
     base_url: str
     api_path: str = "/v1/messages"
     chat_path: str = "/v1/chat/completions"
     models_path: str = "/v1/models"
     token: str = field(default="", repr=False)
     auth_header: str = "Authorization"
+    region: str = ""                       # bedrock only
+    client_factory: Any = field(default=None, repr=False)   # bedrock only; tests inject a fake
 
     @classmethod
     def from_env(cls) -> "ProviderConfig":
+        if os.environ.get("MSRA_LLM_PROVIDER", "").strip().lower() == "bedrock":
+            region = (os.environ.get("MSRA_BEDROCK_REGION") or os.environ.get("AWS_REGION")
+                      or os.environ.get("AWS_DEFAULT_REGION") or "").strip()
+            return cls(kind="bedrock", base_url="", region=region)
         base = os.environ.get("MSRA_LLM_BASE_URL", "").strip()
         if base:
             return cls(
@@ -65,10 +75,16 @@ class ProviderConfig:
 
     @property
     def configured(self) -> bool:
+        if self.kind == "bedrock":
+            return bool(self.region) and (self.client_factory is not None or _boto3_available())
         return bool(self.token)
 
     def public(self) -> Dict[str, Any]:
         """Safe to show in the UI: never includes the token."""
+        if self.kind == "bedrock":
+            return {"kind": "bedrock", "host": f"bedrock-runtime.{self.region or '?'}.amazonaws.com",
+                    "configured": self.configured, "auth_header": "AWS credential chain",
+                    "region": self.region, "boto3": _boto3_available() or self.client_factory is not None}
         host = re.sub(r"^https?://", "", self.base_url).split("/")[0]
         return {"kind": self.kind, "host": host, "configured": self.configured,
                 "auth_header": self.auth_header if self.kind == "gateway" else "x-api-key"}
@@ -83,6 +99,19 @@ class LLMResult:
     usd: float = 0.0
     stop_reason: str = ""
     coerced: bool = False         # provider answered with a different model family
+
+
+def _boto3_available() -> bool:
+    try:
+        import importlib.util
+        return importlib.util.find_spec("boto3") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+_BEDROCK_THROTTLE = {"ThrottlingException", "TooManyRequestsException", "ServiceQuotaExceededException"}
+_BEDROCK_RETRY = _BEDROCK_THROTTLE | {"ModelTimeoutException", "ServiceUnavailableException",
+                                      "InternalServerException", "ModelNotReadyException"}
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -180,12 +209,131 @@ class LLMClient:
         except (urllib.error.URLError, TimeoutError, ValueError) as e:
             raise LLMError(f"request failed: {mask(str(e))[:200]}")
 
+    # ── bedrock (native, boto3 Converse) ──────────────────────────────────
+    def _bedrock(self, service: str):
+        """Cached boto3 client. Raises LLMError (never ImportError) when unavailable."""
+        with self._cache_lock:
+            cache = self.__dict__.setdefault("_bedrock_clients", {})
+            if service in cache:
+                return cache[service]
+        if not self.provider.region:
+            raise LLMError("Bedrock needs a region: set MSRA_BEDROCK_REGION or AWS_REGION.", 400)
+        if self.provider.client_factory is not None:
+            cli = self.provider.client_factory(service, self.provider.region)
+        else:
+            try:
+                import boto3
+                from botocore.config import Config
+            except ImportError:
+                raise LLMError("Native Bedrock needs boto3: pip install boto3", 400)
+            # MSRA does its own retry loop so the budget/deadline logic stays in one place.
+            cli = boto3.client(service, region_name=self.provider.region,
+                               config=Config(retries={"max_attempts": 1, "mode": "standard"},
+                                             read_timeout=120, connect_timeout=10))
+        with self._cache_lock:
+            self.__dict__.setdefault("_bedrock_clients", {})[service] = cli
+        return cli
+
+    @staticmethod
+    def _bedrock_error(exc: Exception) -> "LLMError":
+        resp = getattr(exc, "response", None) or {}
+        err = resp.get("Error") or {}
+        code = err.get("Code") or type(exc).__name__
+        status = (resp.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+        if code in _BEDROCK_THROTTLE:
+            status = 429
+        msg = mask(str(err.get("Message") or exc))[:300]
+        if code in ("ExpiredTokenException", "UnrecognizedClientException", "AccessDeniedException"):
+            msg += " (check your AWS credentials / model access for this region)"
+        e = LLMError(f"Bedrock {code}: {msg}", status)
+        e.retryable = code in _BEDROCK_RETRY or (isinstance(status, int) and status >= 500)
+        return e
+
+    def _converse(self, model: str, system: str, prompt: str, max_tokens: int,
+                  temperature: Optional[float], retries: int = 3) -> dict:
+        cli = self._bedrock("bedrock-runtime")
+        kwargs: Dict[str, Any] = {
+            "modelId": model,
+            "messages": [{"role": "user", "content": [{"text": prompt}]}],
+            "inferenceConfig": {"maxTokens": max_tokens},
+        }
+        if system:
+            kwargs["system"] = [{"text": system}]
+        if temperature is not None:
+            kwargs["inferenceConfig"]["temperature"] = temperature
+        last: Optional[LLMError] = None
+        for attempt in range(1, retries + 1):
+            try:
+                out = cli.converse(**kwargs)
+                if not isinstance(out, dict):
+                    raise LLMError("Bedrock returned a non-object response")
+                return out
+            except LLMError:
+                raise
+            except Exception as exc:                      # botocore ClientError / EndpointConnectionError ...
+                last = self._bedrock_error(exc)
+                if not getattr(last, "retryable", False) and type(exc).__name__ != "EndpointConnectionError":
+                    raise last
+            if attempt < retries:
+                time.sleep(2.0 * (2 ** (attempt - 1)))
+        raise last or LLMError("Bedrock request failed")
+
+    @staticmethod
+    def _parse_converse(data: dict, requested: str):
+        blocks = (((data.get("output") or {}).get("message") or {}).get("content")) or []
+        text = "".join(b["text"] for b in blocks if isinstance(b, dict) and isinstance(b.get("text"), str))
+        stop = data.get("stopReason") or ""
+        if stop == "guardrail_intervened" and not text:
+            raise LLMError("the model refused the request (guardrail)")
+        u = data.get("usage") or {}
+        usage = {"input_tokens": int(u.get("inputTokens") or 0),
+                 "output_tokens": int(u.get("outputTokens") or 0),
+                 "cache_read_input_tokens": int(u.get("cacheReadInputTokens") or 0),
+                 "cache_creation_input_tokens": int(u.get("cacheWriteInputTokens") or 0)}
+        # Converse does not echo the serving model; trust the id we asked for.
+        return _strip_control_markers(text), usage, requested, {"end_turn": "end_turn", "max_tokens": "max_tokens"}.get(stop, stop)
+
+    def _bedrock_models(self) -> List[Dict[str, str]]:
+        out: List[Dict[str, str]] = []
+        seen = set()
+        try:
+            cli = self._bedrock("bedrock")
+            # Inference profiles (us./eu./global.) are what newer models require; list them first.
+            for prof in (cli.list_inference_profiles().get("inferenceProfileSummaries") or []):
+                mid = prof.get("inferenceProfileId")
+                if mid and mid not in seen and is_chat_model(mid):
+                    out.append({"id": mid, "family": family_of(mid) or "", "label": prof.get("inferenceProfileName") or mid,
+                                "source": "live"})
+                    seen.add(mid)
+            for m in (cli.list_foundation_models(byOutputModality="TEXT").get("modelSummaries") or []):
+                mid = m.get("modelId")
+                if mid and mid not in seen and is_chat_model(mid) and "ON_DEMAND" in (m.get("inferenceTypesSupported") or ["ON_DEMAND"]):
+                    out.append({"id": mid, "family": family_of(mid) or "", "label": m.get("modelName") or mid,
+                                "source": "live"})
+                    seen.add(mid)
+        except LLMError:
+            raise
+        except Exception as exc:
+            raise self._bedrock_error(exc)
+        return out
+
     # ── model catalog ────────────────────────────────────────────────────
     def list_models(self, force: bool = False, token: Optional[str] = None) -> List[Dict[str, str]]:
         with self._cache_lock:
             c = self._models_cache
             if not force and c["data"] is not None and time.monotonic() - c["ts"] < _MODELS_TTL_S:
                 return c["data"]
+        if self.provider.kind == "bedrock":
+            models: List[Dict[str, str]] = []
+            if self.provider.configured:
+                try:
+                    models = self._bedrock_models()
+                except LLMError as e:
+                    logger.info("bedrock model catalog fetch failed: %s", e)
+            models.sort(key=lambda m: m["id"])
+            with self._cache_lock:
+                self._models_cache.update(ts=time.monotonic(), data=models)
+            return models
         tok = token or self.provider.token
         models = [dict(m, source="builtin") for m in DIRECT_MODELS] if self.provider.kind == "anthropic" else []
         if tok:
@@ -212,29 +360,40 @@ class LLMClient:
         return [m["id"] for m in (self._models_cache.get("data") or [])]
 
     def resolve(self, model: str) -> str:
-        return resolve_alias(model, self.catalog_ids() if self.provider.kind == "gateway" else None)
+        return resolve_alias(model, self.catalog_ids() if self.provider.kind in ("gateway", "bedrock") else None)
 
     # ── completion ───────────────────────────────────────────────────────
     def complete(self, *, system: str = "", prompt: str, model: str, max_tokens: int = 1024,
                  feature: str = "", temperature: Optional[float] = None, timeout: float = 90,
                  api_key: Optional[str] = None, mask_input: bool = True) -> LLMResult:
         token = api_key or self.provider.token
-        if not token:
+        bedrock = self.provider.kind == "bedrock"
+        if bedrock:
+            if not self.provider.configured:
+                raise LLMError("Bedrock is not usable: set a region (MSRA_BEDROCK_REGION / AWS_REGION) "
+                               "and install boto3.", 401)
+        elif not token:
             raise LLMError("No API credentials configured (set ANTHROPIC_API_KEY, or "
-                           "MSRA_LLM_BASE_URL + MSRA_LLM_TOKEN for a gateway).", 401)
+                           "MSRA_LLM_BASE_URL + MSRA_LLM_TOKEN for a gateway, or "
+                           "MSRA_LLM_PROVIDER=bedrock).", 401)
         cfg = _settings.load()
         self.ledger.check(cfg["budget"].get("usd_cap"))
 
+        if bedrock and (model or "").strip().lower() in ALIASES and not self._models_cache.get("data"):
+            self.list_models()                    # bare tier names need the live Bedrock catalog
         exact = self.resolve(model)
         if mask_input:
             system, prompt = mask(system), mask(prompt)
 
         chat = uses_chat_completions(exact)
-        if chat and self.provider.kind != "gateway":
+        if chat and self.provider.kind == "anthropic":
             raise LLMError(f"'{exact}' is not a Claude model; non-Claude models need a gateway "
                            "(set MSRA_LLM_BASE_URL).", 400)
 
-        if chat:
+        if bedrock:
+            data = self._converse(exact, system, prompt, max_tokens, temperature)
+            text, usage, returned, stop = self._parse_converse(data, exact)
+        elif chat:
             msgs = ([{"role": "system", "content": system}] if system else []) + \
                    [{"role": "user", "content": prompt}]
             body: Dict[str, Any] = {"model": exact, "max_tokens": max_tokens, "messages": msgs}

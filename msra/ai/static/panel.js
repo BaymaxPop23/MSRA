@@ -305,7 +305,7 @@
         } })));
     if (!prov.configured) {
       provCard.appendChild(h('div', { class: 'ai-note', style: 'margin-top:8px', text:
-        'Credentials come from the environment only (never stored by MSRA). Set ANTHROPIC_API_KEY, or for a Bedrock-style gateway ' +
+        'Credentials come from the environment only (never stored by MSRA). Set ANTHROPIC_API_KEY, or MSRA_LLM_PROVIDER=bedrock (native AWS Bedrock, standard AWS credential chain), or for a Bedrock-style gateway ' +
         'set MSRA_LLM_BASE_URL and MSRA_LLM_TOKEN (optional: MSRA_LLM_AUTH_HEADER, MSRA_LLM_API_PATH, MSRA_LLM_CHAT_PATH), then restart the server.' }));
     } else if (prov.kind === 'gateway') {
       provCard.appendChild(h('div', { class: 'ai-note', style: 'margin-top:8px', text:

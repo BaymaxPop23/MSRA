@@ -119,6 +119,7 @@ Everything AI is optional; scanning works fully offline without it. Open **AI** 
 | Provider | Set |
 |---|---|
 | Anthropic (default) | `ANTHROPIC_API_KEY` |
+| Native AWS Bedrock (boto3 Converse; `pip install boto3`) | `MSRA_LLM_PROVIDER=bedrock` + `MSRA_BEDROCK_REGION` (or `AWS_REGION`); credentials from the standard AWS chain (`AWS_PROFILE`, SSO, env keys, instance role) - MSRA never reads them |
 | Bedrock-style LLM gateway | `MSRA_LLM_BASE_URL` + `MSRA_LLM_TOKEN` (optional: `MSRA_LLM_AUTH_HEADER`, `MSRA_LLM_API_PATH`, `MSRA_LLM_CHAT_PATH`, `MSRA_LLM_MODELS_PATH`) |
 
 With a gateway, Claude models use the Messages API and every other vendor (DeepSeek, Qwen, Llama, Nova, ...) is routed to chat-completions automatically. The model list is fetched live from the gateway.

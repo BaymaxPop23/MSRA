@@ -37,6 +37,7 @@ dependencies = [
 
 [project.optional-dependencies]
 ai = ["anthropic>=0.40.0"]
+bedrock = ["boto3>=1.35.0"]
 test = ["pytest>=8.0"]
 dynamic = [
     "uiautomator2>=3.0.0",
