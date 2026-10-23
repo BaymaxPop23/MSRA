@@ -235,3 +235,11 @@ public final /* synthetic */ class R implements Runnable {
     assert {"R", "run"} <= set(got)
     assert got["R"] == 3 and got["run"] == 8          # line numbers point at the declaration
     assert e._method_params[("com.t.R", "R")] == ["a", "b"]
+
+
+def test_activity_component_type_is_not_mangled(tmp_path):
+    """'activities'.rstrip('s') used to give 'activitie', so Activity PoCs were never built."""
+    flows = _by_comp(_flows(tmp_path), "Local")
+    assert flows and flows[0].source.component_type == "activity"
+    assert "Activitie " not in flows[0].title and "Activity" in flows[0].title
+    assert flows[0].poc_command.startswith("adb shell am start ")
