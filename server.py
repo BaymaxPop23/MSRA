@@ -98,7 +98,7 @@ def _request_guards():
     # 2. Optional token auth. Programmatic clients send the raw token in a
     # header; browsers log in once via POST /login and keep a derived session
     # cookie (the master token never appears in a URL, so it can't reach logs).
-    if AUTH_TOKEN and request.endpoint != "login":
+    if AUTH_TOKEN and request.endpoint not in ("login", "healthz"):
         hdr = (request.headers.get("X-MSRA-Token")
                or request.headers.get("Authorization", "").removeprefix("Bearer ").strip())
         cookie = request.cookies.get("msra_session", "")
@@ -124,6 +124,15 @@ def _request_guards():
         val = (request.view_args or {}).get(key)
         if val is not None and not _sec.is_valid_scan_id(val):
             return jsonify({"error": f"Invalid {key}"}), 400
+
+
+@app.after_request
+def _security_headers(resp):
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    resp.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    return resp
 
 
 def _session_value() -> str:
@@ -1264,15 +1273,25 @@ def _set_status(scan_id: str, **kw):
     _db.upsert_scan(scan_id, **kw)
 
 
+def _env_workers(name: str, default: int) -> int:
+    """Worker count from the environment, clamped to 1..32."""
+    try:
+        return max(1, min(32, int(os.environ.get(name, default))))
+    except ValueError:
+        return default
+
+
 # ── Concurrency pools ─────────────────────────────────────────────────────────
 # Scan pool: max 2 scans running at once (decompile + static analysis is CPU-heavy).
 # Excess uploads are queued by the executor and start automatically when a slot frees.
-_SCAN_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="scan")
+_SCAN_WORKERS = _env_workers("MSRA_SCAN_WORKERS", 2)
+_SCAN_POOL = ThreadPoolExecutor(max_workers=_SCAN_WORKERS, thread_name_prefix="scan")
 
 # Dynamic pool: max 3 concurrent finding-verification jobs.
 # Each job probes one finding via ADB; I/O-bound so 3 workers gives ~3x throughput.
 # Per-device serialisation is handled by ADB's own command queuing.
-_DYN_POOL  = ThreadPoolExecutor(max_workers=3, thread_name_prefix="dyn")
+_DYN_WORKERS = _env_workers("MSRA_DYN_WORKERS", 3)
+_DYN_POOL  = ThreadPoolExecutor(max_workers=_DYN_WORKERS, thread_name_prefix="dyn")
 
 # ── Simple in-memory rate limiter ────────────────────────────────────────────
 _rate_store: dict = {}  # ip -> (count, window_start)
@@ -3189,20 +3208,34 @@ function cancelProgressPoll() {{
   clearTimeout(_pollTimer); hideProgress();
 }}
 
+let _pollFails = 0;
 function pollScan(scanId) {{
   fetch('/api/scan/' + scanId + '/status')
-    .then(r => r.json())
+    .then(r => {{ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }})
     .then(d => {{
+      _pollFails = 0;
       showProgress(d.progress || 0, d.message || '…');
       if (d.status === 'done') {{
         // Navigate to clean URL for completed scan
         window.location.href = '/scans/' + scanId;
-      }} else if (d.status === 'error') {{
+      }} else if (d.status === 'error' || d.status === 'unknown') {{
         hideProgress();
         showToast('Scan failed: ' + (d.message || 'Unknown error'), 'error');
       }} else {{
-        _pollTimer = setTimeout(() => pollScan(scanId), 1500);
+        // Poll less often while the tab is hidden; a long queue should not hammer the server.
+        _pollTimer = setTimeout(() => pollScan(scanId), document.hidden ? 5000 : 1500);
       }}
+    }})
+    .catch(() => {{
+      // Server restarting or a network blip: back off and retry instead of freezing silently.
+      _pollFails += 1;
+      if (_pollFails > 8) {{
+        hideProgress();
+        showToast('Lost contact with the server. Reload the page to resume.', 'error');
+        return;
+      }}
+      showProgress(0, 'Reconnecting… (' + _pollFails + ')');
+      _pollTimer = setTimeout(() => pollScan(scanId), Math.min(1500 * Math.pow(2, _pollFails), 15000));
     }});
 }}
 
@@ -7113,14 +7146,23 @@ def scan_status(scan_id: str):
     return jsonify(data)
 
 
+@app.route("/healthz")
+def healthz():
+    """Liveness probe: unauthenticated, no data, no DB access (used by the Docker healthcheck)."""
+    return jsonify({"ok": True})
+
+
 @app.route("/api/queue/status")
 def api_queue_status():
-    """Return current scan pool and dynamic pool queue depths."""
-    scan_q = _SCAN_POOL._work_queue.qsize()   # pending in queue (not yet running)
-    dyn_q  = _DYN_POOL._work_queue.qsize()
+    """Queue depth and running counts for the scan and dynamic pools."""
+    def pool_info(pool, workers):
+        threads = getattr(pool, "_threads", ())
+        queued = pool._work_queue.qsize()
+        return {"max_workers": workers, "queued": queued,
+                "threads_started": len(threads)}
     return jsonify({
-        "scan_pool":  {"max_workers": 2, "queued": scan_q},
-        "dyn_pool":   {"max_workers": 3, "queued": dyn_q},
+        "scan_pool": pool_info(_SCAN_POOL, _SCAN_WORKERS),
+        "dyn_pool":  pool_info(_DYN_POOL, _DYN_WORKERS),
     })
 
 
@@ -7938,7 +7980,7 @@ _db.init_db()
 _db.migrate_from_files(REPORTS_FOLDER)
 
 # AI settings / model catalog / triage / learning routes
-_AI_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ai")
+_AI_POOL = ThreadPoolExecutor(max_workers=_env_workers("MSRA_AI_WORKERS", 2), thread_name_prefix="ai")
 _ai_routes.register(
     app,
     load_findings=_load_findings_data,
@@ -7963,6 +8005,14 @@ try:
         _conn.commit()
 except Exception:
     pass
+
+
+def _active_scan_ids():
+    return [r["scan_id"] for r in _db.list_scans(limit=5000) if r.get("status") in ("queued", "decompiling", "scanning", "reporting")]
+
+
+from msra import maintenance as _maintenance
+_maintenance.start_janitor(UPLOAD_FOLDER, REPORTS_FOLDER, _active_scan_ids)
 
 
 if __name__ == "__main__":

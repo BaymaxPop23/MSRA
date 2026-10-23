@@ -45,7 +45,7 @@ ENV PORT=5001 \
     MSRA_DB_PATH=/app/data/custom/msra.db
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s \
-    CMD python3 -c "import urllib.request,os; urllib.request.urlopen('http://127.0.0.1:%s/api/queue/status' % os.environ.get('PORT','5001'), timeout=4)" || exit 1
+    CMD python3 -c "import urllib.request,os; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('PORT','5001'), timeout=4)" || exit 1
 
 # Binding 0.0.0.0 is required inside the container; docker-compose publishes
 # the port on 127.0.0.1 only. Set MSRA_AUTH_TOKEN before exposing it further.

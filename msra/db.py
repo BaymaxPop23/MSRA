@@ -30,10 +30,21 @@ DB_PATH = Path(os.environ.get("MSRA_DB_PATH") or (Path(__file__).parent.parent /
 _lock   = threading.Lock()
 
 
+class _Conn(sqlite3.Connection):
+    """`with _conn() as c:` commits AND closes (stdlib only commits, leaking handles under load)."""
+    def __exit__(self, *exc):
+        try:
+            return super().__exit__(*exc)
+        finally:
+            self.close()
+
+
 def _conn() -> sqlite3.Connection:
-    c = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    c = sqlite3.connect(str(DB_PATH), check_same_thread=False, factory=_Conn)
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA busy_timeout=10000")      # wait on writer contention instead of 'database is locked'
+    c.execute("PRAGMA synchronous=NORMAL")      # safe with WAL; far fewer fsyncs under write load
     return c
 
 
@@ -88,6 +99,12 @@ def init_db() -> None:
                     updated_at       REAL,
                     PRIMARY KEY (scan_id, finding_id)
                 );
+            """)
+            c.executescript("""
+                CREATE INDEX IF NOT EXISTS idx_scans_updated ON scans(updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_scans_status  ON scans(status);
+                CREATE INDEX IF NOT EXISTS idx_jobs_scan     ON dynamic_jobs(scan_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_jobs_status   ON dynamic_jobs(status);
             """)
             # Additive migrations — safe to run on every startup
             for _migration in [

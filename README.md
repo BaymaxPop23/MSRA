@@ -116,6 +116,19 @@ Run the tests with `make test` (needs `pip install pytest`).
 - **Taint + ICC:** the web scan and the CLI (`msra scan`, skip with `--no-taint`) both run the inter-procedural taint engine and the exported-component ICC chain analysis.
 - **Permission rules** (`permission-install-packages`, `-system-alert-window`, `-bind-accessibility`, `-device-admin`) are evaluated natively and respect the Intelligence Hub toggles.
 
+## Operations & scaling
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MSRA_SCAN_WORKERS` | 2 | Concurrent scans (decompile + analysis is CPU/RAM heavy; extra uploads queue). Clamped 1-32 |
+| `MSRA_DYN_WORKERS` | 3 | Concurrent dynamic verification jobs (still serialised per device) |
+| `MSRA_AI_WORKERS` | 2 | Concurrent AI triage jobs |
+| `MSRA_UPLOAD_TTL_HOURS` | off | Delete leftover uploads older than this (never for active scans) |
+| `MSRA_DECOMPILED_TTL_DAYS` | off | Delete old `decompiled/` trees; reports and findings are kept (dynamic/AI re-checks of that scan need a rescan) |
+| `MSRA_DB_PATH` | `./msra.db` | SQLite location (WAL, busy-timeout, indexed) |
+
+`GET /healthz` is an unauthenticated liveness probe (returns `{"ok": true}` only); the Docker healthcheck uses it, so it keeps working when `MSRA_AUTH_TOKEN` is set. `GET /api/queue/status` shows pool depths. Responses carry `nosniff`/frame/referrer headers. SQLite plus an in-process queue targets a single node; for multiple nodes put scans behind a shared queue and move the DB to a server database first.
+
 ## AI features
 
 Everything AI is optional; scanning works fully offline without it. Open **AI** in the top bar to configure.
