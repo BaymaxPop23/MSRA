@@ -3,12 +3,13 @@ import pytest
 from msra import security as sec
 
 
-@pytest.mark.parametrize("sid", ["abc123", "a-b_c", "0" * 12])
+@pytest.mark.parametrize("sid", ["abc123", "a-b_c", "0" * 12, "atws.app", "com.example.app", "insecureshop_dynamic"])
 def test_valid_scan_ids(sid):
     assert sec.is_valid_scan_id(sid)
 
 
-@pytest.mark.parametrize("sid", ["", "..", "../x", "a/b", "a b", "x" * 65, None, 5])
+@pytest.mark.parametrize("sid", ["", ".", "..", "../x", "a/b", "a b", "x" * 65, None, 5,
+                                 ".hidden", "a..b", "a.", "a/../b", "a\\b", "a%2fb", "..%2f"])
 def test_invalid_scan_ids(sid):
     assert not sec.is_valid_scan_id(sid)
 
@@ -94,3 +95,14 @@ def test_device_shell_args_are_quoted():
     assert "--where '1'\"'\"' OR '\"'\"'1'\"'\"'='\"'\"'1; reboot'" in joined
     assert "'content://a/x;reboot'" in joined and "'id;id:b'" in joined
     assert "'com.a/Main;reboot'" in joined and "'k;id'" in joined
+
+
+def test_existing_scan_directories_are_addressable():
+    """Regression: legacy scans named after the package (atws.app) must keep working."""
+    import os
+    reports = os.path.join(os.path.dirname(__file__), "..", "reports")
+    if not os.path.isdir(reports):
+        pytest.skip("no reports dir")
+    for d in os.listdir(reports):
+        if os.path.isdir(os.path.join(reports, d)):
+            assert sec.is_valid_scan_id(d), f"existing scan '{d}' would be rejected"

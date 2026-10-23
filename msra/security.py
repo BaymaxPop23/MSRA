@@ -16,13 +16,16 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-SCAN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# New scans use 12 hex chars, but legacy/migrated scans are named after the package
+# (e.g. "atws.app"), so dots are allowed - never leading, trailing or doubled.
+SCAN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 PACKAGE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 _FILENAME_BAD = re.compile(r"[^A-Za-z0-9._-]")
 
 
 def is_valid_scan_id(scan_id: object) -> bool:
-    return isinstance(scan_id, str) and bool(SCAN_ID_RE.match(scan_id))
+    return (isinstance(scan_id, str) and bool(SCAN_ID_RE.match(scan_id))
+            and ".." not in scan_id and not scan_id.endswith("."))
 
 
 def is_valid_package(pkg: object) -> bool:
