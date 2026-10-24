@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from . import settings as _settings
-from .masking import mask
+from .masking import MASK, SENSITIVE_KEY_RE, mask
 from .models import (ALIASES, DIRECT_MODELS, family_of, is_chat_model, resolve_alias,
                      usd_for_usage, uses_chat_completions)
 
@@ -172,16 +172,25 @@ def _shrink_prompt(prompt: str, keep: int = 24000) -> str:
     return prompt[:half] + "\n...[truncated to fit the model context]...\n" + prompt[-half:]
 
 
-def _mask_tree(v: Any) -> Any:
-    """Mask every string leaf (keys too) BEFORE serialising: masking the JSON text can miss
-    secrets that escaping splits up (multi-line keys, quotes)."""
-    if isinstance(v, str):
-        return mask(v)
+def _mask_tree(v: Any, key: str = "") -> Any:
+    """Mask a JSON-like structure BEFORE serialising (masking the JSON text can miss secrets that
+    escaping splits up). Values under credential-named keys are replaced outright; every other
+    scalar is masked as text."""
     if isinstance(v, dict):
-        return {mask(str(k)): _mask_tree(x) for k, x in v.items()}
+        return {mask(str(k)): _mask_tree(x, str(k)) for k, x in v.items()}
     if isinstance(v, (list, tuple)):
-        return [_mask_tree(x) for x in v]
-    return v
+        return [_mask_tree(x, key) for x in v]
+    if v is None or isinstance(v, bool):
+        return v
+    if key and SENSITIVE_KEY_RE.search(key) and not isinstance(v, (dict, list)):
+        return MASK
+    return mask(v) if isinstance(v, str) else mask(str(v)) if not isinstance(v, (int, float)) else v
+
+
+def _safe_dumps(v: Any, limit: Optional[int] = None) -> str:
+    """Tree-mask, serialise, then mask the final text once more (defence in depth)."""
+    out = mask(json.dumps(_mask_tree(v), default=str))
+    return out[:limit] if limit else out
 
 
 def _debug_log(entry: dict) -> None:
@@ -191,7 +200,7 @@ def _debug_log(entry: dict) -> None:
         return
     try:
         with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(_mask_tree(entry), default=str) + "\n")
+            f.write(_safe_dumps(entry) + "\n")
     except OSError:
         pass
 
@@ -556,7 +565,7 @@ class LLMClient:
     @staticmethod
     def _parse_messages(data: dict, requested: str):
         if data.get("type") == "error" or ("error" in data and "content" not in data):
-            raise LLMError(f"provider error: {json.dumps(_mask_tree(data.get('error', data)))[:300]}")
+            raise LLMError(f"provider error: {_safe_dumps(data.get('error', data), 300)}")
         text = "".join(b.get("text", "") for b in data.get("content") or []
                        if isinstance(b, dict) and b.get("type") == "text")
         u = data.get("usage") or {}
@@ -567,7 +576,7 @@ class LLMClient:
     @staticmethod
     def _parse_chat(data: dict, requested: str):
         if data.get("error") and not data.get("choices"):
-            raise LLMError(f"provider error: {json.dumps(_mask_tree(data['error']))[:300]}")
+            raise LLMError(f"provider error: {_safe_dumps(data['error'], 300)}")
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise LLMError("provider response had no choices")

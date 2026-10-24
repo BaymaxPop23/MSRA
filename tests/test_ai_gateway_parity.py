@@ -111,3 +111,11 @@ def test_debug_log_masks_multiline_secret_before_serialising(fake, tmp_path, mon
     pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAabcdefghijklmnop\n-----END RSA PRIVATE KEY-----"
     gw(fake).complete(prompt=pem, model="claude-sonnet-5-5", mask_input=False)
     assert "MIIEowIBAAKCAQEA" not in log.read_text()
+
+
+def test_mask_tree_masks_by_key_and_final_text():
+    from msra.ai.client import _safe_dumps
+    out = _safe_dumps({"password": "hunter2", "headers": {"X-Auth-Token": "abc"}, "n": 5,
+                       "list": [{"secret": 12345}], "note": "ok"})
+    assert "hunter2" not in out and '"abc"' not in out and "12345" not in out
+    assert '"n": 5' in out and '"note": "ok"' in out
