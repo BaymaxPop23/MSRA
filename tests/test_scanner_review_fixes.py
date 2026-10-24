@@ -268,3 +268,25 @@ def test_header_style_names_in_string_tables_are_not_secrets():
     snippets = " ".join((f.evidence.snippet if f.evidence else "") for f in found)
     assert "Acceptance-Encoding" not in snippets
     assert any("9f8a7b6c" in (f.evidence.snippet if f.evidence else "") for f in found)   # a real one still found
+
+
+# ── 12. iOS ──
+def test_ios_entitlement_equals_and_aps_production_is_not_flagged():
+    from msra.ios_scanner import IOSScanner
+    sc = IOSScanner.__new__(IOSScanner)
+    pat = {"id": "ios-aps-dev", "title": "t", "severity": "Medium",
+           "detection": {"type": "entitlement", "key": "aps-environment", "check": "equals", "value": "development"}}
+    assert sc._check_entitlement_pattern(pat, {"aps-environment": "production"}, 1) == []
+    assert len(sc._check_entitlement_pattern(pat, {"aps-environment": "development"}, 1)) == 1
+
+
+def test_ipa_zip_bomb_is_refused(tmp_path, monkeypatch):
+    import zipfile
+    from msra.ios_scanner import IOSScanner
+    monkeypatch.setenv("MSRA_MAX_IPA_MB", "1")
+    z = tmp_path / "a.ipa"
+    with zipfile.ZipFile(z, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("Payload/A.app/big", b"\0" * (3 * 1024 * 1024))
+    sc = IOSScanner.__new__(IOSScanner)
+    with pytest.raises(ValueError, match="extraction limit"):
+        sc._extract_ipa(str(z), str(tmp_path / "out"))

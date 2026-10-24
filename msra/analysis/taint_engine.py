@@ -130,10 +130,10 @@ _SINK_DISPLAY: Dict[str, str] = {
 
 # Source API patterns: (regex, api_name, group_index_for_extra_name)
 _MODS = r'(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|protected|private|static|final|synchronized|abstract|native)\s+)*'
-_TAIL = r'\s*\(([^;{}]*)\)\s*(?:throws\s+[\w., ]+)?\s*(?:\{.*)?$'
+_TAIL = r'\s*\(([^;{}]{0,400})\)\s*(?:throws\s+[\w., ]{1,200})?\s*(?:\{.*)?$'
 _NOT_DECL = r'(?!\s*(?:new|return|else|throw|case|do)\b)'
 # a method has a return type; a constructor is an Upper-case name. A bare `run(new X() {` call is neither.
-_DECL_TYPED = re.compile(r'^' + _NOT_DECL + _MODS + r'[\w<>\[\],.?][\w<>\[\],.? ]*?\s+(\w+)' + _TAIL)
+_DECL_TYPED = re.compile(r'^' + _NOT_DECL + _MODS + r'[\w<>\[\],.?][\w<>\[\],.? ]{0,120}?\s+(\w+)' + _TAIL)
 _DECL_CTOR = re.compile(r'^' + _NOT_DECL + _MODS + r'([A-Z]\w*)' + _TAIL)
 
 
@@ -145,6 +145,7 @@ class _DeclRE:
 
 
 _DECL_RE = _DeclRE()
+_MAX_DECL_LINE = 1000            # minified/generated lines are not scanned for declarations (still brace-counted)
 _NOT_METHODS = {"if", "while", "for", "catch", "new", "return", "switch", "synchronized"}
 _STR_LIT = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
 
@@ -157,8 +158,8 @@ def _methods_by_line(lines: List[str]) -> List[str]:
     stack: List[tuple] = []            # (method name, brace depth inside it)
     pending = None
     for raw in lines:
-        code = _STR_LIT.sub('""', raw).split("//")[0]
-        md = _DECL_RE.search(code)
+        code = _STR_LIT.sub('""', raw[:20000]).split("//")[0]
+        md = _DECL_RE.search(code) if len(code) <= _MAX_DECL_LINE else None
         if md and md.group(1) not in _NOT_METHODS:
             pending = md.group(1)
         name = pending or (stack[-1][0] if stack else "unknown")

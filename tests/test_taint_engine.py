@@ -325,3 +325,12 @@ def test_unproven_flows_are_capped_but_proven_ones_keep_their_severity(tmp_path)
             assert f.severity == "Info" and f.extra.get("original_severity") in (None, fl.severity)
         elif fl.data_flow == "call-chain" and fl.sink.sink_type not in ("sql", "webview", "exec"):
             assert order.index(f.severity) <= order.index("Low")
+
+
+def test_method_attribution_is_fast_on_hostile_lines():
+    import time
+    from msra.analysis.taint_engine import _methods_by_line
+    lines = ["a " * 50000 + "(", "public " + "x<" * 3000 + " f(" + "(" * 3000, "void m(" + "a," * 20000 + ") {", "}"]
+    t0 = time.time()
+    out = _methods_by_line(lines * 5)
+    assert len(out) == 20 and time.time() - t0 < 3

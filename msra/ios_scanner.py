@@ -57,6 +57,9 @@ class IOSScanner:
                 "encrypted": None,
             }
 
+            if any("libswiftCore" in s_ for s_ in binary_strings):
+                binary_flags["arc"] = None          # pure-Swift binary: no _objc_release to look for
+
             for pattern in self.patterns:
                 detection = pattern.get("detection", {})
                 det_type = detection.get("type", "")
@@ -78,6 +81,20 @@ class IOSScanner:
                     fid_counter += 1
                 findings.extend(new_findings)
 
+            # Say so when checks could not run, instead of silently reporting a cleaner app.
+            import shutil as _sh
+            missing = [t for t in ("otool", "codesign") if _sh.which(t) is None]
+            if missing and binary_path:
+                findings.append(self._make_finding(
+                    fid=fid_counter,
+                    pattern={"title": "Reduced iOS coverage: " + ", ".join(missing) + " not available",
+                             "severity": "Info", "category": "Scan coverage",
+                             "description": ("Binary hardening flags (PIE, stack canary, ARC, encryption) need `otool` and "
+                                             "entitlement checks need `codesign`. They are not installed here, so those "
+                                             "checks did not run. Scan on macOS (or install the Xcode command line tools) "
+                                             "for full coverage.")},
+                    file_path="scanner", line=0, snippet="missing tools: " + ", ".join(missing)))
+
         return findings
 
     # ── Internal helpers ────────────────────────────────────────────────────
@@ -85,6 +102,9 @@ class IOSScanner:
     def _extract_ipa(self, ipa_path: str, tmpdir: str) -> None:
         """Unzip IPA into tmpdir."""
         with zipfile.ZipFile(ipa_path, "r") as zf:
+            cap = int(os.environ.get("MSRA_MAX_IPA_MB", "2048")) * 1024 * 1024
+            if sum(i.file_size for i in zf.infolist()) > cap:
+                raise ValueError("IPA expands to more than the extraction limit (MSRA_MAX_IPA_MB)")
             zf.extractall(tmpdir)
 
     def _find_app_dir(self, base_path: str) -> Optional[str]:
@@ -344,6 +364,9 @@ class IOSScanner:
             snippet = repr(value) if triggered else ""
         elif check == "false":
             triggered = present and value is False
+            snippet = repr(value) if triggered else ""
+        elif check == "equals":
+            triggered = present and value == detection.get("value")
             snippet = repr(value) if triggered else ""
 
         if not triggered:
