@@ -42,18 +42,46 @@ def iter_source_files(root: str) -> Iterable[str]:
                 yield os.path.join(base, name)
 
 
+class LineIndex:
+    """Line offsets for one text, built once. `str.splitlines()` also splits on \f, \v, \x85 and
+    \u2028, which shifts every later line number, so lines are split on '\n' only."""
+
+    __slots__ = ("lines", "starts")
+
+    def __init__(self, text: str):
+        self.lines = text.split("\n")
+        self.starts = []
+        pos = 0
+        for line in self.lines:
+            self.starts.append(pos)
+            pos += len(line) + 1
+
+    def line_of(self, pos: int) -> int:
+        """0-based line index containing character offset *pos*."""
+        import bisect
+        return max(0, bisect.bisect_right(self.starts, pos) - 1)
+
+
+_INDEX_SLOT: list = [None, None]          # [text, LineIndex] - the file currently being scanned
+
+
+def index_for(text: str) -> LineIndex:
+    """Cached LineIndex for the text being scanned (a scan asks about the same file thousands of times)."""
+    if _INDEX_SLOT[0] is not text:
+        _INDEX_SLOT[0], _INDEX_SLOT[1] = text, LineIndex(text)
+    return _INDEX_SLOT[1]
+
+
 def find_line_snippet(text: str, match_start: int, context: int = 2) -> Evidence:
-    lines = text.splitlines()
-    running = 0
-    for idx, line in enumerate(lines, start=1):
-        next_running = running + len(line) + 1
-        if match_start < next_running:
-            start = max(1, idx - context)
-            end = min(len(lines), idx + context)
-            snippet = "\n".join(f"{i:04d}: {lines[i-1]}" for i in range(start, end + 1))
-            return Evidence(file_path="", line_number=idx, snippet=snippet)
-        running = next_running
-    return Evidence(file_path="", line_number=1, snippet="")
+    ix = index_for(text)
+    lines = ix.lines
+    if not text:
+        return Evidence(file_path="", line_number=1, snippet="")
+    idx = ix.line_of(match_start) + 1
+    start = max(1, idx - context)
+    end = min(len(lines), idx + context)
+    snippet = "\n".join(f"{i:04d}: {lines[i-1]}" for i in range(start, end + 1))
+    return Evidence(file_path="", line_number=idx, snippet=snippet)
 
 
 def regex_finditer(pattern: str, text: str, flags: int = 0):

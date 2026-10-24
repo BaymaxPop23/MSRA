@@ -140,9 +140,9 @@ _SOURCE_PATTERNS: List[Tuple[str, str, int]] = [
     (r'getPathSegments\s*\(\s*\)', "getPathSegments", 0),
     (r'getLastPathSegment\s*\(\s*\)', "getLastPathSegment", 0),
     # ContentProvider – selection / selectionArgs arrive as method parameters
-    (r'void\s+query\s*\([^)]*String\s+selection', "providerQuery", 0),
-    (r'void\s+insert\s*\([^)]*ContentValues', "providerInsert", 0),
-    (r'void\s+update\s*\([^)]*String\s+selection', "providerUpdate", 0),
+    (r'\b(?:Cursor|void)\s+query\s*\([^)]*String\s+selection', "providerQuery", 0),
+    (r'\b(?:Uri|void)\s+insert\s*\([^)]*ContentValues', "providerInsert", 0),
+    (r'\b(?:int|void)\s+update\s*\([^)]*String\s+selection', "providerUpdate", 0),
 ]
 
 # Sanitizer patterns by sink type. A flow is only marked sanitized when a

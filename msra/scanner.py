@@ -1,12 +1,13 @@
 """APK vulnerability scanner using pattern-based detection."""
 
 import os
+import re
 import xml.etree.ElementTree as ET
 from typing import List, Optional, Dict, Any
 
 from .patterns import PatternManager, PatternConfig
 from .patterns.models import VulnerabilityPattern, DetectionType, Severity
-from .utils import Evidence, Finding, find_line_snippet, iter_source_files, read_text
+from .utils import Evidence, Finding, find_line_snippet, index_for, iter_source_files, read_text
 
 # Deep analysis imports
 from .deep_analysis.engine import DeepAnalysisEngine, enrich_finding_with_deep_analysis
@@ -90,11 +91,8 @@ _STANDARD_SHARE_VIEW_ACTIONS: frozenset = frozenset({
 
 # Test-directory path markers — findings inside these dirs are not production.
 _TEST_PATH_MARKERS: tuple = (
-    "/test/", "\\test\\",
-    "/androidTest/", "\\androidTest\\",
-    "/androidtest/", "\\androidtest\\",
-    "/unitTest/", "\\unitTest\\",
-    "/integrationTest/", "\\integrationTest\\",
+    "/androidtest/", "/unittest/", "/integrationtest/", "/testfixtures/",
+    "/androidx/test/", "/org/junit/", "/junit/framework/", "/org/mockito/", "/org/robolectric/",
 )
 
 
@@ -365,7 +363,7 @@ class Scanner:
             processed_files.add(path)
 
             # Skip library / obfuscated dependency code
-            if self.skip_library_code and classify_path(path) in ("library", "obfuscated"):
+            if self.skip_library_code and classify_path(path, self.package_name or None) in ("library", "obfuscated"):
                 continue
 
             try:
@@ -918,16 +916,34 @@ class Scanner:
                 exported = self._component_exported(comp)
                 if not exported:
                     continue
+                if self._get_android_attr(comp, "enabled") == "false":
+                    continue                      # a disabled component cannot be started by anyone
                 permission = self._get_android_attr(comp, "permission")
                 read_perm = self._get_android_attr(comp, "readPermission")
                 write_perm = self._get_android_attr(comp, "writePermission")
 
-                if permission or (tag == "provider" and (read_perm or write_perm)):
-                    continue
-
                 comp_name = self._get_android_attr(comp, "name") or "(unknown)"
                 evidence = self._manifest_evidence(manifest_path, comp_name)
                 adb_commands = self._adb_commands_component(tag, comp)
+
+                if permission:
+                    continue
+                if tag == "provider" and (read_perm or write_perm):
+                    # protecting only one direction leaves the other open to every app
+                    if not (read_perm and write_perm):
+                        open_dir = "write" if read_perm else "read"
+                        findings.append(Finding(
+                            fid=f"manifest-exported-provider-{comp_name}-no-{open_dir}-permission",
+                            title=f"Exported ContentProvider without {open_dir} permission",
+                            severity="High" if open_dir == "write" else "Medium",
+                            description=(f"The provider sets a {'read' if open_dir == 'write' else 'write'}Permission but "
+                                         f"no {open_dir}Permission, so any app can {open_dir} its data."),
+                            attack_path=f"Any installed app calls ContentResolver {open_dir} operations on `{comp_name}`.",
+                            adb_commands=adb_commands, evidence=evidence,
+                            references=["https://developer.android.com/guide/topics/manifest/provider-element"],
+                            extra={"component": comp_name, "cwe": ["CWE-926"]},
+                        ))
+                    continue
 
                 # Collect all intent-filter actions and categories
                 intent_filters = comp.findall("intent-filter")
@@ -959,6 +975,19 @@ class Scanner:
                 all_standard_share_view = bool(non_system_actions) and all(
                     a in _STANDARD_SHARE_VIEW_ACTIONS for a in non_system_actions
                 )
+
+                if is_launcher and "android.intent.action.VIEW" in actions and "android.intent.category.BROWSABLE" in categories:
+                    findings.append(Finding(
+                        fid=f"manifest-exported-{tag}-{comp_name}-deeplink",
+                        title=f"Launcher {label} also handles browsable deep links - validate extras",
+                        severity="Medium",
+                        description=(f"The launcher {label} also registers a BROWSABLE VIEW intent filter, so any web page "
+                                     "or app can open it with attacker-chosen data. Validate the URI and extras before use."),
+                        attack_path=f"A link or app sends a crafted VIEW intent to `{comp_name}`.",
+                        adb_commands=adb_commands, evidence=evidence,
+                        references=["https://developer.android.com/training/app-links"],
+                        extra={"component": comp_name, "cwe": ["CWE-926", "CWE-20"]},
+                    ))
 
                 if is_launcher:
                     # Expected entry point — still worth noting for completeness
@@ -1081,7 +1110,8 @@ class Scanner:
             text = read_text(manifest_path)
         except OSError:
             return None
-        idx = text.find(token)
+        m = re.search(r'android:name\s*=\s*["\']' + re.escape(token) + r'["\']', text)
+        idx = m.start() if m else text.find(token)        # first bare occurrence may be a longer name
         if idx == -1:
             return None
         evidence = find_line_snippet(text, idx)
@@ -1152,7 +1182,9 @@ class Scanner:
             except ValueError:
                 rel_path = path
             path_norm = "/" + rel_path.replace("\\", "/").lower()
-            if any(m.replace("\\", "/").lower() in path_norm for m in _TEST_PATH_MARKERS):
+            # Only well-known test roots (androidx/test, org/junit, androidTest/...). A bare "/test/"
+            # segment is a legitimate app package name (com/acme/test/...) and must not hide code.
+            if any(m in path_norm for m in _TEST_PATH_MARKERS):
                 continue
 
             try:
@@ -1179,7 +1211,8 @@ class Scanner:
 
                             # SQL injection FP reduction: skip if selectionArgs or
                             # '?' placeholder is used nearby, indicating parameterized queries.
-                            if "sql" in pattern.id.lower() and self._has_selection_args_nearby(text, match.start()):
+                            if ("sql" in pattern.id.lower() and self._has_selection_args_nearby(text, match.start())
+                                    and not self._concatenates_provider_input(text, match.start())):
                                 continue
 
                             # Intent/deeplink redirect FP reduction: skip if a
@@ -1223,8 +1256,8 @@ class Scanner:
         within_lines=0 means only examine the matched line itself (useful for
         comment-exclusion rules where we only care about the current line).
         """
-        lines = text.splitlines()
-        line_num = text[:match_pos].count('\n')
+        ix = index_for(text)
+        lines, line_num = ix.lines, ix.line_of(match_pos)
         w = max(0, context.within_lines)
         start_line = max(0, line_num - w)
         end_line = min(len(lines), line_num + w + 1)
@@ -1244,12 +1277,31 @@ class Scanner:
 
     def _is_comment_line(self, text: str, match_pos: int) -> bool:
         """Return True if the matched line is a Java/Kotlin comment (// or * or /*)."""
-        lines = text.splitlines()
-        line_num = text[:match_pos].count('\n')
+        ix = index_for(text)
+        lines, line_num = ix.lines, ix.line_of(match_pos)
         if line_num >= len(lines):
             return False
         stripped = lines[line_num].lstrip()
-        return stripped.startswith('//') or stripped.startswith('*') or stripped.startswith('/*')
+        if stripped.startswith(('//', '/*')):
+            return True
+        if stripped.startswith('*'):
+            # a leading '*' is a comment only as the continuation of a /* ... */ block
+            prev = next((l.lstrip() for l in reversed(lines[max(0, line_num - 3):line_num]) if l.strip()), '')
+            return prev.startswith(('/*', '*'))
+        return False
+
+    _CONCAT_INPUT = re.compile(
+        r"(?:\+\s*(?:selection|where|having|groupBy|sortOrder|orderBy|projection|\w*getLastPathSegment\s*\(|\w*Segment\b|uri\b))|"
+        r"(?:\b(?:selection|where|sortOrder|orderBy)\s*\+)", re.I)
+
+    def _concatenates_provider_input(self, text: str, match_pos: int) -> bool:
+        """True when the matched statement itself concatenates provider/URI input into the SQL. A
+        selectionArgs or '?' elsewhere in the window does not make THIS statement parameterised."""
+        ix = index_for(text)
+        line = ix.line_of(match_pos)
+        stmt = "\n".join(ix.lines[line:line + 4])
+        stmt = stmt.split(";", 1)[0]
+        return bool(self._CONCAT_INPUT.search(stmt))
 
     def _has_selection_args_nearby(self, text: str, match_pos: int, window: int = 15) -> bool:
         """Return True if a parameterized query pattern is found within *window* lines.
@@ -1257,8 +1309,8 @@ class Scanner:
         Detects: selectionArgs usage, '?' bind placeholders, or ContentValues
         (all indicate the developer is using safe parameterized queries).
         """
-        lines = text.splitlines()
-        line_num = text[:match_pos].count('\n')
+        ix = index_for(text)
+        lines, line_num = ix.lines, ix.line_of(match_pos)
         start = max(0, line_num - window)
         end = min(len(lines), line_num + window + 1)
         ctx = "\n".join(lines[start:end])
@@ -1280,8 +1332,8 @@ class Scanner:
             "allowedSchemes", "allowedHosts", "checkCallingPermission",
             "enforcePermission", "getCallingPackage", "verify(", "sanitize",
         )
-        lines = text.splitlines()
-        line_num = text[:match_pos].count('\n')
+        ix = index_for(text)
+        lines, line_num = ix.lines, ix.line_of(match_pos)
         start = max(0, line_num - window)
         end = min(len(lines), line_num + window + 1)
         ctx = "\n".join(lines[start:end]).lower()

@@ -56,6 +56,7 @@ LIBRARY_PREFIXES = (
     "javax/", "java/", "org/json/", "org/junit/", "org/mockito/",
     "org/hamcrest/", "org/objectweb/", "org/intellij/", "org/jetbrains/",
     "org/koin/", "org/threeten/", "org/slf4j/", "org/checkerframework/",
+    "org/xmlpull/", "org/kxml2/", "org/ksoap2/",
 
     # Charting, image loading, UI
     "com/github/", "com/airbnb/", "com/squareup/picasso/",

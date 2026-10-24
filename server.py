@@ -2955,13 +2955,13 @@ code,pre{{font-family:'JetBrains Mono',monospace}}
           <div class="dyn-config-row">
             <div class="form-group">
               <label class="form-label">ADB Device Serial <span style="color:var(--text3)">(leave blank for default)</span></label>
-              <input class="form-input" id="dynAdbSerial" placeholder="e.g. emulator-5554 or 192.168.1.5:5555">
+              <input class="form-input" id="dynAdbSerial" aria-label="ADB device serial" placeholder="e.g. emulator-5554 or 192.168.1.5:5555">
             </div>
             <div class="form-group" style="display:flex;align-items:flex-end;gap:8px">
               <button class="btn btn-sm" onclick="refreshAdbDevices()" style="margin-bottom:0">
                 <i class="fa-solid fa-rotate"></i> Refresh
               </button>
-              <select class="form-select" id="adbDeviceList" onchange="document.getElementById('dynAdbSerial').value=this.value" style="flex:1"></select>
+              <select class="form-select" id="adbDeviceList" aria-label="Connected ADB devices" onchange="document.getElementById('dynAdbSerial').value=this.value" style="flex:1"></select>
             </div>
           </div>
         </div>
@@ -2979,7 +2979,7 @@ code,pre{{font-family:'JetBrains Mono',monospace}}
             <div class="form-group dyn-config-full" style="display:flex;align-items:flex-end;gap:8px">
               <div style="flex:1">
                 <label class="form-label">Instance</label>
-                <select class="form-select" id="dynInstanceList"></select>
+                <select class="form-select" id="dynInstanceList" aria-label="Corellium instance"></select>
               </div>
               <button class="btn btn-sm" onclick="fetchCorelliumInstances()"><i class="fa-solid fa-rotate"></i> Fetch Instances</button>
               <button class="btn btn-primary btn-sm" onclick="testCorelliumConnection()"><i class="fa-solid fa-plug"></i> Test</button>
@@ -5402,13 +5402,18 @@ function buildHeatmap() {{
 
   const SEVS = ['Critical','High','Medium','Low','Info'];
 
-  // Group by top-level component (first 2 segments of file path after /sources/)
+  // Group by component: the app package (first 3 segments under sources/), or the manifest/resources
   const compMap = {{}};
   _allFindings.forEach(f => {{
-    const fp = (f.evidence?.file || '').split('\\\\').join('/');
-    let comp = fp.split('/sources/')[1] || fp;
-    // Take first 2 path segments as component name
-    comp = comp.split('/').slice(0,2).join('/') || fp.split('/').pop() || 'unknown';
+    let fp = (f.evidence?.file || '').split('\\').join('/');
+    const di = fp.indexOf('decompiled/');
+    if (di !== -1) fp = fp.slice(di + 'decompiled/'.length);
+    let comp;
+    if (fp.startsWith('sources/')) comp = fp.slice('sources/'.length).split('/').slice(0,3).join('/');
+    else if (fp.endsWith('AndroidManifest.xml')) comp = 'AndroidManifest.xml';
+    else if (fp.startsWith('resources/')) comp = 'resources/' + (fp.split('/')[2] || '');
+    else comp = fp.split('/').slice(0,3).join('/');
+    comp = comp || 'unknown';
     if (!compMap[comp]) compMap[comp] = {{}};
     const sev = f.severity || 'Info';
     compMap[comp][sev] = (compMap[comp][sev]||0) + 1;
@@ -5426,7 +5431,7 @@ function buildHeatmap() {{
   html += '<th>Total</th></tr></thead><tbody>';
 
   comps.forEach(([comp, sevMap, total]) => {{
-    html += `<tr><td title="${{escHtml(comp)}}">${{escHtml(comp.split('/').pop()||comp)}}</td>`;
+    html += `<tr><td title="${{escHtml(comp)}}">${{escHtml(comp.includes('.') && !comp.includes('/') ? comp : comp.split('/').join('.'))}}</td>`;
     SEVS.forEach(s => {{
       const cnt = sevMap[s]||0;
       const cls = cnt===0?'hm-0':cnt<=2?'hm-1':cnt<=5?'hm-2':cnt<=10?'hm-3':'hm-4';
@@ -5450,7 +5455,7 @@ function filterByComp(comp, sev) {{
   _currentSevFilter = sev;
   // Set search to component path
   const s = document.getElementById('fSearch');
-  if (s) s.value = comp.split('/').pop() || comp;
+  if (s) s.value = comp;           // full component path, so unrelated files do not match
   applyFilters();
 }}
 
@@ -5913,7 +5918,7 @@ def _poc_modal_html() -> str:
         <div class="modal-title">Generate PoC Android App</div>
         <div class="modal-sub">Claude AI writes a complete Android Studio project targeting this vulnerability</div>
       </div>
-      <button class="poc-modal-close" onclick="closePocModal()"><i class="fa-solid fa-xmark"></i></button>
+      <button class="poc-modal-close" onclick="closePocModal()" aria-label="Close PoC dialog"><i class="fa-solid fa-xmark"></i></button>
     </div>
     <div class="poc-modal-body">
       <div id="modalReady">

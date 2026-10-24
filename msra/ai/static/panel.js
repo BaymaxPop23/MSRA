@@ -502,6 +502,20 @@
     (cat.models || []).forEach(function (m) { dl.appendChild(h('option', { value: m.id }, m.label || m.id)); });
     var inputs = {};
     var modelsCard = h('div', { class: 'ai-card' }, dl);
+    // Presets set every feature at once; per-feature models below stay editable ("Custom").
+    var PRESETS = {
+      fast:     { label: 'Fast and cheap', models: { triage: 'haiku', research: 'sonnet', dynamic_verdict: 'haiku', poc: 'haiku', rule_extraction: 'haiku', quick: 'haiku' } },
+      balanced: { label: 'Balanced (default)', models: { triage: 'sonnet', research: 'sonnet', dynamic_verdict: 'sonnet', poc: 'sonnet', rule_extraction: 'sonnet', quick: 'haiku' } },
+      thorough: { label: 'Thorough', models: { triage: 'sonnet', research: 'opus', dynamic_verdict: 'opus', poc: 'opus', rule_extraction: 'sonnet', quick: 'haiku' } }
+    };
+    var presetSel = h('select', { class: 'ai-sel', 'aria-label': 'Model preset' }, h('option', { value: '' }, 'Custom (edit below)'));
+    Object.keys(PRESETS).forEach(function (k) { presetSel.appendChild(h('option', { value: k }, PRESETS[k].label)); });
+    presetSel.addEventListener('change', function () {
+      var p = PRESETS[presetSel.value]; if (!p) return;
+      Object.keys(p.models).forEach(function (f) { if (inputs[f]) { inputs[f].value = p.models[f]; inputs[f].dispatchEvent(new Event('input')); } });
+    });
+    modelsCard.appendChild(h('div', { class: 'ai-row', style: 'grid-template-columns:190px 1fr' },
+      h('div', null, h('div', { class: 'ai-lbl', text: 'Preset' }), h('div', { class: 'ai-sub', text: 'sets every feature at once' })), presetSel));
     Object.keys(st.features).forEach(function (feat) {
       var cur = cfg.models[feat];
       var info = h('div', { class: 'ai-sub', text: infoText(byId[cur]) });

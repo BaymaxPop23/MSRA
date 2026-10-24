@@ -804,7 +804,10 @@ def enrich_finding(finding: Finding, package: str) -> Finding:
     confidence = confidence_for_path(file_path) if file_path else "high"
 
     finding.extra["code_class"] = code_class
-    finding.extra["confidence"] = confidence
+    # Never raise a confidence an earlier stage already lowered (e.g. "not reachable from an exported component").
+    rank = {"low": 0, "medium": 1, "high": 2}
+    prior = finding.extra.get("confidence")
+    finding.extra["confidence"] = prior if prior in rank and rank[prior] < rank.get(confidence, 2) else confidence
 
     # If we have a rule template, attach the reviewer fields
     if rule_key:
