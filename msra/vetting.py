@@ -44,6 +44,11 @@ _PROVIDER_INPUT = re.compile(
 _DDL = re.compile(r"""execSQL\(\s*["'](?:\s*)(CREATE|DROP|ALTER|PRAGMA|VACUUM|ANALYZE|REINDEX)\b""", re.I)
 
 
+def cap_severity() -> bool:
+    """Demoted findings are capped to Low unless MSRA_VETTING_CAP=0 (then only labelled)."""
+    return os.environ.get("MSRA_VETTING_CAP", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
 def enabled() -> bool:
     return os.environ.get("MSRA_VETTING", "1").strip().lower() not in ("0", "false", "no", "off")
 
@@ -93,6 +98,100 @@ def _rel(path: str) -> str:
     return p.split("sources/", 1)[1] if "sources/" in p else p
 
 
+
+_CLASS_DECL = re.compile(
+    r"\b(?:class|interface|enum)\s+(\w+)(?:\s*<[^>{]*>)?(?:\s+extends\s+([\w.$<>, ]+?))?"
+    r"(?:\s+implements\s+[\w.$<>, ]+)?\s*\{")
+
+
+def _strip_noise(raw: str, in_block: bool) -> Tuple[str, bool]:
+    """Remove string/char literals and comments so braces and keywords inside them are ignored."""
+    out, i, n = [], 0, len(raw)
+    while i < n:
+        c = raw[i]
+        if in_block:
+            j = raw.find("*/", i)
+            if j == -1:
+                return "".join(out), True
+            i, in_block = j + 2, False
+        elif raw.startswith("/*", i):
+            in_block = True
+            i += 2
+        elif raw.startswith("//", i):
+            break
+        elif c in "\"'":
+            q, i = c, i + 1
+            while i < n and raw[i] != q:
+                i += 2 if raw[i] == "\\" else 1
+            i += 1
+            out.append(" ")
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out), in_block
+
+
+def enclosing_class(lines: List[str], line_no: int) -> Optional[Tuple[str, str]]:
+    """(name, base class) of the innermost class still OPEN at line_no, tracked by brace depth.
+    Returns None when it cannot be established (fail closed)."""
+    depth, in_block = 0, False
+    stack: List[Tuple[str, str, int]] = []
+    for raw in lines[:max(0, line_no)]:
+        code, in_block = _strip_noise(raw, in_block)
+        opens = {m.end() - 1: (m.group(1), (m.group(2) or "").split("<")[0].strip().split(".")[-1])
+                 for m in _CLASS_DECL.finditer(code)}
+        for idx, ch in enumerate(code):
+            if ch == "{":
+                depth += 1
+                if idx in opens:
+                    stack.append((opens[idx][0], opens[idx][1], depth))
+            elif ch == "}":
+                if stack and stack[-1][2] == depth:
+                    stack.pop()
+                depth -= 1
+                if depth < 0:
+                    return None
+    return (stack[-1][0], stack[-1][1]) if stack else None
+
+
+def split_statements(line: str) -> List[str]:
+    """Split on ';' that are outside string/char literals."""
+    out, cur, q, i = [], [], "", 0
+    while i < len(line):
+        c = line[i]
+        if q:
+            cur.append(c)
+            if c == "\\" and i + 1 < len(line):
+                cur.append(line[i + 1])
+                i += 1
+            elif c == q:
+                q = ""
+        elif c in "\"'":
+            q = c
+            cur.append(c)
+        elif c == ";":
+            out.append("".join(cur))
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    if "".join(cur).strip():
+        out.append("".join(cur))
+    return [x for x in out if x.strip()]
+
+
+def method_span_text(path: str, line: int, ctx: dict) -> str:
+    """Source from the enclosing method's signature down to the flagged line."""
+    lines = _source_lines(path, ctx)
+    start = max(0, line - 1)
+    for i in range(min(line, len(lines)) - 1, max(-1, line - 60), -1):
+        m = _METHOD_RE.match(lines[i])
+        if m and m.group(1) not in ("if", "for", "while", "switch", "catch", "synchronized", "return", "new"):
+            start = i
+            break
+    return "\n".join(lines[start:line])
+
+
 # Each disprover returns a reason string when the finding is DISPROVED, else None.
 Disprover = Callable[[object, str, dict], Optional[str]]
 
@@ -103,23 +202,34 @@ def _not_code(f, line: str, cache) -> Optional[str]:
         return None
     if re.match(r"(import|package)\s", s):
         return "the evidence line is an import/package statement, not code that uses the API"
-    if s.startswith(("//", "/*", "*")):
+    if s.startswith(("//", "/*")):
         return "the evidence line is a comment"
     return None
+
+
+_LOCAL_SEND = re.compile(r"LocalBroadcastManager\s*\.\s*getInstance\([^;]*?\)\s*\.\s*sendBroadcast\(")
+_EXPLICIT_INTENT = re.compile(
+    r"new\s+Intent\([^;]*?\)\s*\.\s*(?:setPackage|setComponent|setClassName|setClass)\(|"
+    r"new\s+Intent\(\s*[\w.()]+\s*,\s*[\w.$]+\.class\s*\)")
+
+
+_SENDISH = re.compile(r"\b(?:sendBroadcast|sendOrderedBroadcast|sendStickyBroadcast|sendBroadcastAsUser|"
+                      r"startActivity|startActivityForResult|startService|startForegroundService)\s*\(")
 
 
 def _local_broadcast(f, line: str, cache) -> Optional[str]:
     t = (f.title or "").lower()
     if "implicit intent" not in t:
         return None
-    ev = _evidence(f)
-    window = line + " " + str(getattr(ev, "snippet", "") or "")
-    if "LocalBroadcastManager" in line:
-        return "LocalBroadcastManager delivers only inside this app's process; other apps cannot receive it"
-    if re.search(r"\.setPackage\(|\.setComponent\(|\.setClass(Name)?\(|new Intent\([^)]*,\s*[\w.]+\.class\)", line):
-        return "the intent is made explicit (setPackage/setComponent/class), so it is not implicit"
-    if re.search(r"sendBroadcast\([^,()]+,\s*[^)]+\)", line) and "permission" in window.lower():
-        return "the broadcast is protected by a receiver permission"
+    # Judge every statement on the line that sends or builds an intent; ONE non-local/non-explicit
+    # statement keeps the finding (the flagged call could be any of them).
+    relevant = [x for x in split_statements(line) if _SENDISH.search(x) or re.search(r"new\s+Intent\(", x)]
+    if not relevant:
+        return None
+    if all(_LOCAL_SEND.search(x) for x in relevant):
+        return "sent through LocalBroadcastManager.getInstance(...).sendBroadcast, which delivers only inside this app's process"
+    if all(_EXPLICIT_INTENT.search(x) or _LOCAL_SEND.search(x) for x in relevant):
+        return "the intent is constructed explicitly (setPackage/setComponent/class target), so it is not implicit"
     return None
 
 
@@ -128,17 +238,27 @@ def _schema_sql(f, line: str, cache) -> Optional[str]:
     if "sql injection" not in t:
         return None
     ev = _evidence(f)
-    if not ev:
+    if not ev or not ev.file_path:
         return None
-    stmt = line or ""
-    if _PROVIDER_INPUT.search(stmt):
+    ln = int(ev.line_number or 0)
+    if _PROVIDER_INPUT.search(line or ""):
         return None                                           # provider input is in play: keep
-    method = enclosing_method(ev.file_path, int(ev.line_number or 0), cache)
-    if _DDL.search(stmt):
-        return ("schema-setup DDL (" + (stmt.strip()[:50]) + "...) built from internal values, "
+    lines = _source_lines(ev.file_path, cache)
+    if "ContentProvider" in "\n".join(lines):
+        return None
+    cls = enclosing_class(lines, ln)                          # the class that really contains the line
+    if not cls or cls[1] != "SQLiteOpenHelper":
+        return None
+    # provider input held in a variable earlier in the method (or its parameters) keeps the finding
+    if _PROVIDER_INPUT.search(method_span_text(ev.file_path, ln, cache)):
+        return None
+    method = enclosing_method(ev.file_path, ln, cache)
+    if _DDL.search(line or ""):
+        return (f"schema-setup DDL ({(line or '').strip()[:40]}...) in SQLiteOpenHelper {cls[0]}; "
                 "no ContentProvider input reaches it")
     if method in _SCHEMA_METHODS:
-        return f"statement is inside {method}() (database setup) and uses no provider input"
+        return (f"statement is inside {method}() of SQLiteOpenHelper {cls[0]} (database setup) and no "
+                "ContentProvider input reaches it")
     return None
 
 
@@ -155,16 +275,18 @@ def _webview_param_evidence(f, line: str, cache) -> Optional[str]:
     return None
 
 
-def _library(f, line: str, cache) -> Optional[str]:
+def _library_note(f, cache) -> Optional[str]:
+    """Namespace-only signal. Package names are chosen by the app's author, so this never demotes a
+    finding by itself (an attacker can call their code com/google/...); it only lowers confidence."""
     ev = _evidence(f)
     if not ev or not ev.file_path or any(k in (f.extra or {}).get("category", "") for k in _PATHLESS):
         return None
-    path = ev.file_path
-    if "sources/" not in path.replace("\\", "/"):
+    if "sources/" not in ev.file_path.replace("\\", "/"):
         return None
-    kind = classify_path(path, cache.get("package") or None)
+    kind = classify_path(ev.file_path, cache.get("package") or None)
     if kind in ("library", "framework"):
-        return f"the code is third-party/{kind} code ({_rel(path)[:60]}), owned by its maintainers, not this app"
+        return (f"the file is under a third-party namespace ({_rel(ev.file_path)[:60]}); likely the library "
+                "maintainers' code, but a package name is not proof")
     return None
 
 
@@ -219,11 +341,8 @@ def _cookie_claim_without_cookies(f, line: str, cache) -> Optional[str]:
     return None
 
 
-_NON_PROVIDER_BASES = re.compile(
-    r"\bclass\s+\w+\s+extends\s+(?:\w+\.)*(BroadcastReceiver|Service|IntentService|JobService|"
-    r"Activity|AppCompatActivity|FragmentActivity|Fragment|Application)\b")
-
-
+_NON_PROVIDER_BASE_NAMES = {"BroadcastReceiver", "Service", "IntentService", "JobService", "Activity",
+                            "AppCompatActivity", "FragmentActivity", "Fragment", "Application"}
 def _not_a_provider(f, line: str, cache) -> Optional[str]:
     t = (f.title or "").lower()
     if "contentprovider" not in t:
@@ -231,15 +350,18 @@ def _not_a_provider(f, line: str, cache) -> Optional[str]:
     ev = _evidence(f)
     if not ev or not ev.file_path:
         return None
-    text = "\n".join(_source_lines(ev.file_path, cache))
-    m = _NON_PROVIDER_BASES.search(text)
-    if m and "ContentProvider" not in text:
-        return f"the flagged class extends {m.group(1)}, not ContentProvider, so provider-only attack paths do not apply"
+    lines = _source_lines(ev.file_path, cache)
+    if "ContentProvider" in "\n".join(lines):
+        return None
+    cls = enclosing_class(lines, int(ev.line_number or 0))
+    if cls and cls[1] in _NON_PROVIDER_BASE_NAMES:
+        return (f"the class containing the flagged line ({cls[0]}) extends {cls[1]}, not ContentProvider, "
+                "so provider-only attack paths do not apply")
     return None
 
 
 DISPROVERS: List[Disprover] = [_not_code, _local_broadcast, _schema_sql, _webview_param_evidence,
-                               _ui_string_credential, _not_a_provider, _cookie_claim_without_cookies, _library]
+                               _ui_string_credential, _not_a_provider, _cookie_claim_without_cookies]
 
 
 def _positive_signals(f) -> Tuple[str, List[str]]:
@@ -272,6 +394,13 @@ def vet_finding(f, cache: Optional[dict] = None) -> dict:
         status = "likely_fp"
     else:
         status, reasons = _positive_signals(f)
+        try:
+            note = _library_note(f, cache)
+        except Exception:
+            note = None
+        if note and status != "verified":
+            reasons = reasons + [note]
+            return {"status": status, "reasons": reasons, "low_confidence": True}
     return {"status": status, "reasons": reasons}
 
 
@@ -291,11 +420,14 @@ def vet_findings(findings: list, package: str = "") -> Tuple[list, Dict[str, int
             f.extra = {}
         extra = f.extra
         info = {"status": v["status"], "reasons": v["reasons"]}
+        if v.get("low_confidence"):
+            extra["confidence"] = "low"
         if v["status"] == "likely_fp":
             sev = _sev(f)
             if _SEV_RANK.get(sev, 0) > _SEV_RANK["Low"]:
                 info["original_severity"] = sev
-                f.severity = "Low"
+                if cap_severity():
+                    f.severity = "Low"
             extra["confidence"] = "low"
             fp = list(extra.get("false_positive_check") or [])
             fp.insert(0, "Vetting: likely false positive - " + v["reasons"][0])

@@ -230,9 +230,13 @@ def test_vet_candidates_skip_proven_and_disproved():
           {"id": 4, "severity": "Critical", "extra": {}},
           {"id": 5, "severity": "Low", "extra": {}},
           {"id": 6, "severity": "High", "extra": {}}]
-    got = [f["id"] for f in ai_routes.vet_candidates(fs, {6}, "High", 10)]
+    got = [f["id"] for f in ai_routes.vet_candidates(fs, {6}, "High", 10, include_demoted=False)]
     assert got == [4, 3]                       # critical first; 6 already researched; 5 below floor
-    assert [f["id"] for f in ai_routes.vet_candidates(fs, set(), "High", 1)] == [4]
+    # a demoted finding is re-examined by its ORIGINAL severity so the AI can overturn the heuristic
+    fs[0]["extra"]["vetting"]["original_severity"] = "Critical"
+    fs[0]["severity"] = "Low"
+    assert [f["id"] for f in ai_routes.vet_candidates(fs, {6}, "High", 10)] == [1, 4, 3]
+    assert [f["id"] for f in ai_routes.vet_candidates(fs, set(), "High", 1)] == [1]   # Critical, lowest id
 
 
 def test_ai_vet_api_end_to_end(env):
@@ -244,14 +248,14 @@ def test_ai_vet_api_end_to_end(env):
                                                            "disproof_attempts": ["constant only"]}})
     assert c.post("/api/scans/scan1/ai-vet", json={"min_severity": "Banana"}).status_code == 400
     r = c.post("/api/scans/scan1/ai-vet", json={})
-    assert r.status_code == 202 and r.get_json()["total"] == 1        # finding 2 is already disproved
+    assert r.status_code == 202 and r.get_json()["total"] == 2        # the demoted one is re-examined too
     t0 = time.time()
     while time.time() - t0 < 10:
         j = c.get("/api/scans/scan1/ai-vet").get_json()
         if j["status"] != "running":
             break
         time.sleep(0.05)
-    assert j["status"] == "done" and j["tally"]["false_positive"] == 1
+    assert j["status"] == "done" and j["tally"]["false_positive"] == 2
     assert c.get("/api/scans/scan1/findings/1/ai-research").get_json()["research"]["verdict"] == "false_positive"
     again = c.post("/api/scans/scan1/ai-vet", json={})
     assert again.status_code == 400 and "Nothing to vet" in again.get_json()["error"]

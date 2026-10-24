@@ -18,13 +18,21 @@ def status(f, pkg="com.app"):
     return f.extra["vetting"]["status"]
 
 
-def test_ddl_in_oncreate_is_disproved_and_demoted():
-    f = mk("SQL Injection in ContentProvider",
-           'db.execSQL("CREATE TABLE " + name() + " (a TEXT)");')
+def helper_file(tmp_path, body, base="SQLiteOpenHelper", method="onCreate", name="H.java"):
+    src = tmp_path / "decompiled/sources/com/app" / name
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text(f"public class {name[:-5]} extends {base} {{\n  public void {method}(SQLiteDatabase db) {{\n"
+                   f"{body}\n  }}\n}}\n")
+    return str(src)
+
+
+def test_ddl_in_oncreate_is_disproved_and_demoted(tmp_path):
+    stmt = '    db.execSQL("CREATE TABLE " + name() + " (a TEXT)");'
+    f = mk("SQL Injection in ContentProvider", stmt.strip(), line=3, path=helper_file(tmp_path, stmt))
     assert status(f) == "likely_fp"
     assert f.severity == "Low" and f.extra["vetting"]["original_severity"] == "Critical"
     assert f.extra["confidence"] == "low"
-    assert "schema-setup" in f.extra["false_positive_check"][0]
+    assert "SQLiteOpenHelper" in f.extra["false_positive_check"][0]
 
 
 def test_real_provider_sqli_is_kept(tmp_path):
@@ -65,8 +73,60 @@ def test_real_implicit_broadcast_is_kept():
 
 
 def test_explicit_intent_is_not_implicit():
-    f = mk("Sensitive Data in Implicit Intent", 'Intent i = new Intent("x"); i.setPackage("com.app");', sev="High")
+    f = mk("Sensitive Data in Implicit Intent", 'new Intent("x").setPackage("com.app").putExtra("t", tok);', sev="High")
     assert status(f) == "likely_fp"
+
+
+# ── adversarial: the scanned app controls the code these heuristics read ──
+def test_ddl_outside_a_sqliteopenhelper_is_kept(tmp_path):
+    stmt = '    db.execSQL("CREATE TABLE " + name());'
+    p = helper_file(tmp_path, stmt, base="ContentProvider", method="onCreate", name="P.java")
+    f = mk("SQL Injection in ContentProvider", stmt.strip(), line=3, path=p)
+    assert status(f) == "needs_review" and f.severity == "Critical"
+    q = helper_file(tmp_path, stmt, base="SomethingElse", method="onCreate", name="Q.java")
+    assert status(mk("SQL Injection in ContentProvider", stmt.strip(), line=3, path=q)) == "needs_review"
+
+
+def test_schema_helper_that_also_mentions_a_provider_is_kept(tmp_path):
+    stmt = '    db.execSQL("CREATE TABLE " + name());  // ContentProvider'
+    p = helper_file(tmp_path, stmt)
+    assert status(mk("SQL Injection in ContentProvider", stmt.strip(), line=3, path=p)) == "needs_review"
+
+
+def test_localbroadcast_mention_elsewhere_in_the_line_does_not_suppress():
+    for line in ('sendBroadcast(new Intent("a").putExtra("t", tok)); // LocalBroadcastManager',
+                 'String s = "LocalBroadcastManager"; sendBroadcast(new Intent("a").putExtra("t", tok));',
+                 'ctx.sendBroadcast(i); Object o = LocalBroadcastManager.class;'):
+        f = mk("Sensitive Data in Implicit Intent", line, sev="High")
+        assert status(f) == "needs_review" and f.severity == "High", line
+
+
+def test_setpackage_on_a_different_intent_does_not_suppress():
+    f = mk("Sensitive Data in Implicit Intent",
+           'other.setPackage("x"); sendBroadcast(new Intent("a").putExtra("t", tok));', sev="High")
+    assert status(f) == "needs_review"
+
+
+def test_star_prefixed_continuation_line_is_not_a_comment():
+    f = mk("Exported Activity with WebView URL Parameter", "* web.loadUrl(u);", sev="High")
+    assert status(f) == "needs_review"
+
+
+def test_inner_class_cannot_launder_a_provider_finding(tmp_path):
+    p = tmp_path / "decompiled/sources/com/app/M.java"
+    p.parent.mkdir(parents=True)
+    p.write_text("public class M extends AbstractC1a {\n  void f(){ uri.getLastPathSegment(); }\n"
+                 "  static class R extends BroadcastReceiver {}\n}\n")
+    f = mk("ContentProvider Path Traversal via URI Decoding", "uri.getLastPathSegment();", line=2, path=str(p))
+    assert status(f) == "needs_review"
+
+
+def test_severity_cap_can_be_turned_off(tmp_path, monkeypatch):
+    monkeypatch.setenv("MSRA_VETTING_CAP", "0")
+    f = mk("Sensitive Data in Implicit Intent", 'LocalBroadcastManager.getInstance(c).sendBroadcast(new Intent("X"));',
+           sev="High")
+    assert status(f) == "likely_fp" and f.severity == "High"
+    assert f.extra["vetting"]["original_severity"] == "High"
 
 
 def test_import_line_evidence_is_disproved():
@@ -82,11 +142,14 @@ def test_class_declaration_without_sink_is_disproved_but_with_loadurl_kept():
     assert status(g) == "needs_review"
 
 
-def test_library_code_is_demoted_but_app_package_under_google_is_not():
+def test_library_namespace_lowers_confidence_but_never_demotes():
     lib = mk("Hardcoded thing", "x = 1;", path="/t/decompiled/sources/com/google/android/gms/X.java", sev="High")
-    assert status(lib, "com.myapp") == "likely_fp"
+    assert status(lib, "com.myapp") == "needs_review"          # a package name is not proof
+    assert lib.severity == "High" and lib.extra["confidence"] == "low"
+    assert "not proof" in lib.extra["vetting"]["reasons"][-1]
     mine = mk("Hardcoded thing", "x = 1;", path="/t/decompiled/sources/com/google/myapp/X.java", sev="High")
     assert status(mine, "com.google.myapp") == "needs_review"
+    assert mine.extra.get("confidence") != "low"
 
 
 def test_taint_flows_get_positive_status():
@@ -152,3 +215,64 @@ def test_cookie_claim_needs_cookie_evidence():
     assert status(f) == "likely_fp"
     g = mk("SSO Activity Exposes Session Cookies", "CookieManager.getInstance().getCookie(url);")
     assert status(g) == "needs_review"
+
+
+# ── structure-aware checks (brace depth, statements, method span) ─────────
+def test_enclosing_class_uses_brace_depth_not_nearest_declaration():
+    from msra.vetting import enclosing_class
+    src = ["public class M extends AbstractC1a {",
+           "  static class R extends BroadcastReceiver { void g(){ } }",
+           "  void f(){ uri.getLastPathSegment(); }",
+           "}"]
+    assert enclosing_class(src, 3) == ("M", "AbstractC1a")            # R closed before line 3
+    assert enclosing_class(src, 2)[0] == "M"                           # R opens and closes on line 2
+    assert enclosing_class(["class M extends X {", "  class R extends Service {", "    int a;"], 3) == ("R", "Service")
+    assert enclosing_class(["class A {", "  }", "}", "}"], 4) is None   # inconsistent braces: fail closed
+    tricky = ['class A extends Service {', '  String s = "} class B extends Activity {";', '  void f(){}', '}']
+    assert enclosing_class(tricky, 3) == ("A", "Service")              # braces in strings are ignored
+
+
+def test_closed_receiver_before_the_line_cannot_launder_a_provider_finding(tmp_path):
+    p = tmp_path / "decompiled/sources/com/app/M.java"
+    p.parent.mkdir(parents=True)
+    p.write_text("public class M extends AbstractC1a {\n  static class R extends BroadcastReceiver { }\n"
+                 "  void f(){ uri.getLastPathSegment(); }\n}\n")
+    f = mk("ContentProvider Path Traversal via URI Decoding", "uri.getLastPathSegment();", line=3, path=str(p))
+    assert status(f) == "needs_review"
+
+
+def test_one_unsafe_send_among_several_statements_keeps_the_finding():
+    safe = 'LocalBroadcastManager.getInstance(c).sendBroadcast(new Intent("X"));'
+    f = mk("Sensitive Data in Implicit Intent", safe + ' sendBroadcast(new Intent("a").putExtra("t", tok));', sev="High")
+    assert status(f) == "needs_review" and f.severity == "High"
+    g = mk("Sensitive Data in Implicit Intent", safe + ' log("ok");', sev="High")
+    assert status(g) == "likely_fp"
+    h = mk("Sensitive Data in Implicit Intent", safe + " " + safe, sev="High")
+    assert status(h) == "likely_fp"
+
+
+def test_schema_check_uses_the_class_that_encloses_the_line(tmp_path):
+    p = tmp_path / "decompiled/sources/com/app/D.java"
+    p.parent.mkdir(parents=True)
+    # a helper class exists in the file, but the flagged line sits in a different (non-helper) class
+    p.write_text("class Helper extends SQLiteOpenHelper { void onCreate(SQLiteDatabase d){ } }\n"
+                 "class Other extends Base {\n  void onCreate(SQLiteDatabase db) {\n"
+                 '    db.execSQL("CREATE TABLE " + name());\n  }\n}\n')
+    f = mk("SQL Injection in ContentProvider", 'db.execSQL("CREATE TABLE " + name());', line=4, path=str(p))
+    assert status(f) == "needs_review"
+
+
+def test_provider_input_held_in_a_variable_keeps_the_sql_finding(tmp_path):
+    p = tmp_path / "decompiled/sources/com/app/E.java"
+    p.parent.mkdir(parents=True)
+    p.write_text("public class E extends SQLiteOpenHelper {\n"
+                 "  void drop(SQLiteDatabase db, Uri uri) {\n    String t = uri.getLastPathSegment();\n"
+                 '    db.execSQL("DROP TABLE " + t);\n  }\n}\n')
+    f = mk("SQL Injection in ContentProvider", 'db.execSQL("DROP TABLE " + t);', line=4, path=str(p))
+    assert status(f) == "needs_review" and f.severity == "Critical"
+    q = tmp_path / "decompiled/sources/com/app/F.java"
+    q.write_text("public class F extends SQLiteOpenHelper {\n  static void b(SQLiteDatabase db, Kind k) {\n"
+                 '    db.execSQL("CREATE TABLE IF NOT EXISTS " + k.tableName() + " (a TEXT)");\n  }\n}\n')
+    g = mk("SQL Injection in ContentProvider", 'db.execSQL("CREATE TABLE IF NOT EXISTS " + k.tableName() + " (a TEXT)");',
+           line=3, path=str(q))
+    assert status(g) == "likely_fp"
