@@ -91,6 +91,17 @@ def init_db() -> None:
                     updated_at  REAL,
                     PRIMARY KEY (scan_id, finding_id)
                 );
+                CREATE TABLE IF NOT EXISTS ai_research (
+                    scan_id     TEXT NOT NULL,
+                    finding_id  INTEGER NOT NULL,
+                    verdict     TEXT NOT NULL,
+                    confidence  REAL,
+                    report_json TEXT,
+                    model       TEXT,
+                    cost_usd    REAL DEFAULT 0,
+                    updated_at  REAL,
+                    PRIMARY KEY (scan_id, finding_id)
+                );
                 CREATE TABLE IF NOT EXISTS finding_triage (
                     scan_id          TEXT NOT NULL,
                     finding_id       INTEGER NOT NULL,
@@ -206,6 +217,7 @@ def delete_scan(scan_id: str) -> None:
         with _conn() as c:
             c.execute("DELETE FROM finding_triage WHERE scan_id = ?", (scan_id,))
             c.execute("DELETE FROM ai_triage WHERE scan_id = ?", (scan_id,))
+            c.execute("DELETE FROM ai_research WHERE scan_id = ?", (scan_id,))
             c.execute("DELETE FROM dynamic_jobs WHERE scan_id = ?", (scan_id,))
             c.execute("DELETE FROM scans WHERE scan_id = ?", (scan_id,))
 
@@ -341,3 +353,46 @@ def list_triage_rows() -> List[Dict]:
         rows = c.execute("SELECT scan_id, finding_id, status FROM finding_triage "
                          "WHERE status != 'New'").fetchall()
     return [dict(r) for r in rows]
+
+
+# ── AI researcher reports ──────────────────────────────────────────────────────
+
+def upsert_ai_research(scan_id: str, finding_id: int, verdict: str, confidence: float,
+                       report: dict, model: str, cost_usd: float = 0.0) -> None:
+    with _lock:
+        with _conn() as c:
+            c.execute(
+                """INSERT INTO ai_research (scan_id, finding_id, verdict, confidence, report_json,
+                                            model, cost_usd, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(scan_id, finding_id)
+                   DO UPDATE SET verdict=excluded.verdict, confidence=excluded.confidence,
+                                 report_json=excluded.report_json, model=excluded.model,
+                                 cost_usd=excluded.cost_usd, updated_at=excluded.updated_at""",
+                (scan_id, finding_id, verdict, confidence, json.dumps(report), model,
+                 cost_usd, time.time()),
+            )
+
+
+def get_ai_research(scan_id: str, finding_id: int) -> Optional[Dict]:
+    with _conn() as c:
+        r = c.execute(
+            "SELECT verdict, confidence, report_json, model, cost_usd, updated_at "
+            "FROM ai_research WHERE scan_id = ? AND finding_id = ?", (scan_id, finding_id)).fetchone()
+    if not r:
+        return None
+    try:
+        report = json.loads(r["report_json"] or "{}")
+    except ValueError:
+        report = {}
+    return {"verdict": r["verdict"], "confidence": r["confidence"], "report": report,
+            "model": r["model"], "cost_usd": r["cost_usd"], "updated_at": r["updated_at"]}
+
+
+def get_ai_research_summary_map(scan_id: str) -> Dict[int, Dict]:
+    """Verdict + confidence only (for list badges); full reports are fetched per finding."""
+    with _conn() as c:
+        rows = c.execute("SELECT finding_id, verdict, confidence, model FROM ai_research "
+                         "WHERE scan_id = ?", (scan_id,)).fetchall()
+    return {r["finding_id"]: {"verdict": r["verdict"], "confidence": r["confidence"],
+                              "model": r["model"]} for r in rows}

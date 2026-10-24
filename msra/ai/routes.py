@@ -10,6 +10,7 @@ from flask import Blueprint, jsonify, request
 from . import learning, settings as S
 from .client import LLMError, get_client
 from .models import PRICING_NOTE, model_info, valid_model_id
+from .research import ResearchSandbox, investigate
 from .triage import select_findings, triage_findings
 
 bp = Blueprint("ai", __name__)
@@ -19,16 +20,19 @@ _pool = None
 _jobs: Dict[str, dict] = {}
 _jobs_lock = threading.Lock()
 _cancel: Dict[str, threading.Event] = {}
+_research_jobs: Dict[tuple, dict] = {}
+_research_cancel: Dict[tuple, threading.Event] = {}
 _fb_cache: Dict[str, object] = {"ts": 0.0, "data": {}}
 _FB_TTL = 30.0
 
 
 def register(app, *, load_findings: Callable[[str], Optional[dict]],
              scan_exists: Callable[[str], bool], get_scan: Callable[[str], Optional[dict]],
-             db_module, pool) -> None:
+             db_module, pool, scan_dir: Optional[Callable] = None) -> None:
     """Wire the blueprint to the host app's storage helpers (avoids a circular import)."""
     global _pool
-    _deps.update(load_findings=load_findings, scan_exists=scan_exists, get_scan=get_scan, db=db_module)
+    _deps.update(load_findings=load_findings, scan_exists=scan_exists, get_scan=get_scan, db=db_module,
+                 scan_dir=scan_dir)
     _pool = pool
     app.register_blueprint(bp)
 
@@ -245,6 +249,100 @@ def ai_triage_cancel(scan_id: str):
     ev = _cancel.get(scan_id)
     if not ev:
         return jsonify({"error": "No AI triage running for this scan"}), 404
+    ev.set()
+    return jsonify({"ok": True})
+
+
+# ── AI researcher (one finding, investigated by reading the code) ────────
+
+def _find_finding(scan_id: str, finding_id: int):
+    data = _deps["load_findings"](scan_id)
+    for i, f in enumerate((data or {}).get("findings", []), start=1):
+        if int(f.get("id") or i) == finding_id:
+            return dict(f, id=finding_id), (data or {}).get("package") or ""
+    return None
+
+
+def _research_view(scan_id: str, finding_id: int) -> dict:
+    with _jobs_lock:
+        job = dict(_research_jobs.get((scan_id, finding_id)) or {"status": "none"})
+    saved = _deps["db"].get_ai_research(scan_id, finding_id)
+    return {"job": job, "research": saved}
+
+
+@bp.route("/api/scans/<scan_id>/findings/<int:finding_id>/ai-research", methods=["GET"])
+def ai_research_get(scan_id: str, finding_id: int):
+    if not _deps["scan_exists"](scan_id):
+        return jsonify({"error": "Scan not found"}), 404
+    return jsonify(_research_view(scan_id, finding_id))
+
+
+@bp.route("/api/scans/<scan_id>/findings/<int:finding_id>/ai-research", methods=["POST"])
+def ai_research_start(scan_id: str, finding_id: int):
+    if not _deps["scan_exists"](scan_id):
+        return jsonify({"error": "Scan not found"}), 404
+    c = _client()
+    if not c.provider.configured:
+        return _not_configured()
+    hit = _find_finding(scan_id, finding_id)
+    if not hit:
+        return jsonify({"error": "Finding not found"}), 404
+    finding, pkg = hit
+    scan_dir = _deps.get("scan_dir")
+    root = (scan_dir(scan_id) / "decompiled") if scan_dir else None
+    if root is None or not root.is_dir():
+        return jsonify({"error": "The decompiled sources for this scan are not available (pruned or "
+                                 "not an Android scan). Re-scan to enable the researcher."}), 409
+    key = (scan_id, finding_id)
+    with _jobs_lock:
+        cur = _research_jobs.get(key)
+        if cur and cur.get("status") == "running":
+            return jsonify({"error": "The researcher is already working on this finding"}), 409
+    cfg = S.load()
+    opts = cfg["research"]
+    model = S.model_for("research")
+    stats = feedback_stats()
+    cancel = threading.Event()
+    _research_cancel[key] = cancel
+    job = {"status": "running", "step": 0, "doing": "starting", "model": model,
+           "started": time.time(), "error": None}
+    with _jobs_lock:
+        _research_jobs[key] = job
+
+    def on_step(n, action, args):
+        with _jobs_lock:
+            job["step"] = n
+            job["doing"] = f"{action} {str(args.get('path') or args.get('term') or args.get('symbol') or '')[:80]}".strip()
+
+    def run():
+        try:
+            fb = learning.feedback_sentence(stats, learning.rule_key(finding.get("fid"), finding.get("title")))
+            out = investigate(finding, client=c, model=model, package=pkg, sandbox=ResearchSandbox(root),
+                              max_steps=opts["max_steps"], max_usd=opts["max_usd"], feedback_line=fb,
+                              should_stop=cancel.is_set, on_step=on_step)
+            rep = dict(out["report"], steps=out["steps"], stopped=out["stopped"])
+            _deps["db"].upsert_ai_research(scan_id, finding_id, rep["verdict"], rep["confidence"],
+                                           rep, model, out["cost_usd"])
+            with _jobs_lock:
+                job["status"] = "cancelled" if out["stopped"] == "cancelled" else "done"
+                job["stopped"] = out["stopped"]
+                job["cost_usd"] = out["cost_usd"]
+        except Exception as e:                       # noqa: BLE001 - surface to the UI
+            with _jobs_lock:
+                job["status"], job["error"] = "error", str(e)[:300]
+        finally:
+            job["finished"] = time.time()
+            _research_cancel.pop(key, None)
+
+    _pool.submit(run)
+    return jsonify({"started": True, "model": model, "max_steps": opts["max_steps"]}), 202
+
+
+@bp.route("/api/scans/<scan_id>/findings/<int:finding_id>/ai-research/cancel", methods=["POST"])
+def ai_research_cancel(scan_id: str, finding_id: int):
+    ev = _research_cancel.get((scan_id, finding_id))
+    if not ev:
+        return jsonify({"error": "No investigation running for this finding"}), 404
     ev.set()
     return jsonify({"ok": True})
 

@@ -9,6 +9,9 @@ _PARAM_RE = re.compile(
     r"session[_-]?id|jwt|bearer|csrf|xsrf|client[_-]?secret|private[_-]?key)\b"
     r"([\"']?[ \t]{0,4}[=:][ \t]{0,4})"
     r"(?:\"((?:\\.|[^\"\n]){0,500})\"|'((?:\\.|[^'\n]){0,500})'|([^&\s\"'<>,}]{1,500}))")
+SENSITIVE_KEY_RE = re.compile(
+    r"(?i)(password|passwd|pwd|token|secret|api[_-]?key|authorization|cookie|session[_-]?id|jwt|"
+    r"bearer|csrf|xsrf|private[_-]?key|credential)")
 _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
 _BEARER_RE = re.compile(r"(?i)\bBearer[ \t]+[A-Za-z0-9\-_.+/=]{8,}")
 _PEM_RE = re.compile(r"-----BEGIN [A-Z ]{0,30}PRIVATE KEY-----[\s\S]{0,8000}?(?:-----END [A-Z ]{0,30}PRIVATE KEY-----|$)")

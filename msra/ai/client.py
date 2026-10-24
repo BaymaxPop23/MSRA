@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from . import settings as _settings
-from .masking import mask
+from .masking import MASK, SENSITIVE_KEY_RE, mask
 from .models import (ALIASES, DIRECT_MODELS, family_of, is_chat_model, resolve_alias,
                      usd_for_usage, uses_chat_completions)
 
@@ -57,6 +57,8 @@ class ProviderConfig:
 
     @classmethod
     def from_env(cls) -> "ProviderConfig":
+        if os.environ.get("MSRA_LLM_MOCK", "").strip().lower() in ("1", "true", "yes"):
+            return cls(kind="mock", base_url="")
         if os.environ.get("MSRA_LLM_PROVIDER", "").strip().lower() == "bedrock":
             region = (os.environ.get("MSRA_BEDROCK_REGION") or os.environ.get("AWS_REGION")
                       or os.environ.get("AWS_DEFAULT_REGION") or "").strip()
@@ -75,12 +77,16 @@ class ProviderConfig:
 
     @property
     def configured(self) -> bool:
+        if self.kind == "mock":
+            return True
         if self.kind == "bedrock":
             return bool(self.region) and (self.client_factory is not None or _boto3_available())
         return bool(self.token)
 
     def public(self) -> Dict[str, Any]:
         """Safe to show in the UI: never includes the token."""
+        if self.kind == "mock":
+            return {"kind": "mock", "host": "(no network)", "configured": True, "auth_header": "none"}
         if self.kind == "bedrock":
             return {"kind": "bedrock", "host": f"bedrock-runtime.{self.region or '?'}.amazonaws.com",
                     "configured": self.configured, "auth_header": "AWS credential chain",
@@ -124,10 +130,79 @@ _OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 def _parse_retry_after(value: str) -> Optional[float]:
+    """Seconds form or HTTP-date form, capped; never 0 (would busy-loop)."""
+    if not value:
+        return None
+    value = value.strip()
     try:
         return max(0.1, min(float(value), _MAX_RETRY_AFTER_S))
-    except (TypeError, ValueError):
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        from datetime import datetime, timezone
+        dt = parsedate_to_datetime(value)
+        return max(0.1, min((dt - datetime.now(timezone.utc)).total_seconds(), _MAX_RETRY_AFTER_S))
+    except (ValueError, TypeError, OverflowError):
         return None
+
+
+def _prompt_cache_enabled() -> bool:
+    return os.environ.get("MSRA_LLM_PROMPT_CACHE", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _looks_like_cache_rejection(text: str) -> bool:
+    """A 4xx naming the block-form system / cache_control shape (not an ordinary content bug)."""
+    t = (text or "").lower()
+    return any(s in t for s in ("cache_control", "cache control", "ephemeral", "unknown field",
+                                "unknown key", "unexpected key", "additional propert", "not allowed"))
+
+
+def _looks_like_context_error(text: str) -> bool:
+    t = (text or "").lower()
+    return any(s in t for s in ("maximum context length", "context length", "context window", "too long",
+                                "reduce the length", "context_length_exceeded", "prompt is too long"))
+
+
+def _shrink_prompt(prompt: str, keep: int = 24000) -> str:
+    """Keep the head and tail of an over-long prompt (the middle is the least informative)."""
+    if len(prompt) <= keep:
+        return prompt
+    half = keep // 2
+    return prompt[:half] + "\n...[truncated to fit the model context]...\n" + prompt[-half:]
+
+
+def _mask_tree(v: Any, key: str = "") -> Any:
+    """Mask a JSON-like structure BEFORE serialising (masking the JSON text can miss secrets that
+    escaping splits up). Values under credential-named keys are replaced outright; every other
+    scalar is masked as text."""
+    if isinstance(v, dict):
+        return {mask(str(k)): _mask_tree(x, str(k)) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_mask_tree(x, key) for x in v]
+    if v is None or isinstance(v, bool):
+        return v
+    if key and SENSITIVE_KEY_RE.search(key) and not isinstance(v, (dict, list)):
+        return MASK
+    return mask(v) if isinstance(v, str) else mask(str(v)) if not isinstance(v, (int, float)) else v
+
+
+def _safe_dumps(v: Any, limit: Optional[int] = None) -> str:
+    """Tree-mask, serialise, then mask the final text once more (defence in depth)."""
+    out = mask(json.dumps(_mask_tree(v), default=str))
+    return out[:limit] if limit else out
+
+
+def _debug_log(entry: dict) -> None:
+    """Opt-in raw request/response log (MSRA_LLM_DEBUG_LOG). Masked before it touches disk."""
+    path = os.environ.get("MSRA_LLM_DEBUG_LOG", "").strip()
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(_safe_dumps(entry) + "\n")
+    except OSError:
+        pass
 
 
 def _content_to_text(content: Any) -> str:
@@ -160,6 +235,10 @@ class LLMClient:
         self.ledger = ledger or _settings.LEDGER
         self._models_cache: Dict[str, Any] = {"ts": 0.0, "data": None}
         self._cache_lock = threading.Lock()
+        # Safe-degrade latches: once a gateway rejects a request shape, stop sending it.
+        self._cache_disabled = False
+        self._max_tokens_key = "max_tokens"
+        self.mock_responses: List[str] = []       # tests / offline demos; cycles, last one repeats
 
     # ── helpers ──────────────────────────────────────────────────────────
     def _headers(self, token: str) -> Dict[str, str]:
@@ -172,11 +251,18 @@ class LLMClient:
             h[self.provider.auth_header] = token
         return h
 
-    def _post(self, path: str, body: dict, token: str, timeout: float, retries: int = 3) -> dict:
+    def _post(self, path: str, body: dict, token: str, timeout: float, retries: int = 3,
+              adapt=None) -> dict:
+        """POST with retry. `adapt(status, text, body)` may return a corrected body for a 4xx
+        (safe-degrade: cache shape, max_completion_tokens, over-long prompt); it is tried once per
+        distinct correction and the request is repeated without consuming a retry."""
         url = self.provider.base_url + path
-        data = json.dumps(body).encode()
         last: Optional[Exception] = None
-        for attempt in range(1, retries + 1):
+        attempt = 0
+        adapted = 0
+        while attempt < retries:
+            attempt += 1
+            data = json.dumps(body).encode()
             req = urllib.request.Request(url, data=data, headers=self._headers(token), method="POST")
             wait = 2.0 * (2 ** (attempt - 1))
             try:
@@ -184,14 +270,23 @@ class LLMClient:
                     payload = json.loads(resp.read().decode("utf-8", "replace"))
                 if not isinstance(payload, dict):
                     raise LLMError("provider returned a non-object JSON response")
+                _debug_log({"url": path, "request": body, "response": payload})
                 return payload
             except urllib.error.HTTPError as e:
-                text = mask(e.read().decode("utf-8", "replace")[:500]) if e.fp else ""
-                last = LLMError(f"HTTP {e.code}: {text}", e.code)
+                text = e.read().decode("utf-8", "replace")[:2000] if e.fp else ""
+                last = LLMError(f"HTTP {e.code}: {mask(text[:500])}", e.code)
                 if e.code == 429:
                     ra = _parse_retry_after(e.headers.get("Retry-After", "")) if e.headers else None
                     wait = ra if ra is not None else wait
                 elif e.code < 500 and e.code != 529:
+                    if adapt is not None and adapted < 3:
+                        fixed = adapt(e.code, text, body)
+                        if fixed is not None:
+                            adapted += 1
+                            body = fixed
+                            attempt -= 1
+                            continue
+                    _debug_log({"url": path, "request": body, "error_status": e.code, "error_body": text})
                     raise last                       # 4xx: retrying cannot help
             except (urllib.error.URLError, TimeoutError, ConnectionError, ValueError) as e:
                 last = LLMError(f"request failed: {mask(str(e))[:200]}")
@@ -335,8 +430,8 @@ class LLMClient:
                 self._models_cache.update(ts=time.monotonic(), data=models)
             return models
         tok = token or self.provider.token
-        models = [dict(m, source="builtin") for m in DIRECT_MODELS] if self.provider.kind == "anthropic" else []
-        if tok:
+        models = [dict(m, source="builtin") for m in DIRECT_MODELS] if self.provider.kind in ("anthropic", "mock") else []
+        if tok and self.provider.kind != "mock":
             try:
                 raw = self._get(self.provider.models_path, tok)
                 items = raw.get("data", raw) if isinstance(raw, dict) else raw
@@ -368,6 +463,8 @@ class LLMClient:
                  api_key: Optional[str] = None, mask_input: bool = True) -> LLMResult:
         token = api_key or self.provider.token
         bedrock = self.provider.kind == "bedrock"
+        if self.provider.kind == "mock":
+            return self._mock_complete(model, prompt, max_tokens, feature)
         if bedrock:
             if not self.provider.configured:
                 raise LLMError("Bedrock is not usable: set a region (MSRA_BEDROCK_REGION / AWS_REGION) "
@@ -396,19 +493,21 @@ class LLMClient:
         elif chat:
             msgs = ([{"role": "system", "content": system}] if system else []) + \
                    [{"role": "user", "content": prompt}]
-            body: Dict[str, Any] = {"model": exact, "max_tokens": max_tokens, "messages": msgs}
+            body: Dict[str, Any] = {"model": exact, self._max_tokens_key: max_tokens, "messages": msgs}
             if temperature is not None:
                 body["temperature"] = temperature
-            data = self._post(self.provider.chat_path, body, token, timeout)
+            data = self._post(self.provider.chat_path, body, token, timeout, adapt=self._adapt_chat)
             text, usage, returned, stop = self._parse_chat(data, exact)
         else:
             body = {"model": exact, "max_tokens": max_tokens,
                     "messages": [{"role": "user", "content": prompt}]}
             if system:
-                body["system"] = system
+                # Cache the (stable) system prompt: N-vote triage and batch runs repeat it verbatim.
+                body["system"] = ([{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+                                  if _prompt_cache_enabled() and not self._cache_disabled else system)
             if temperature is not None:
                 body["temperature"] = temperature
-            data = self._post(self.provider.api_path, body, token, timeout)
+            data = self._post(self.provider.api_path, body, token, timeout, adapt=self._adapt_messages)
             text, usage, returned, stop = self._parse_messages(data, exact)
 
         usd = usd_for_usage(exact, usage, cfg.get("pricing"))
@@ -421,10 +520,52 @@ class LLMClient:
         return LLMResult(text=text, model=exact, model_returned=returned, usage=usage,
                          usd=usd, stop_reason=stop, coerced=coerced)
 
+    def _adapt_messages(self, status: int, text: str, body: dict) -> Optional[dict]:
+        if isinstance(body.get("system"), list) and _looks_like_cache_rejection(text):
+            self._cache_disabled = True
+            logger.info("provider rejected cache_control; prompt caching disabled for this process")
+            return dict(body, system=body["system"][0]["text"])
+        return self._shrink_on_context_error(text, body)
+
+    def _adapt_chat(self, status: int, text: str, body: dict) -> Optional[dict]:
+        if "max_tokens" in body and "max_completion_tokens" in text:
+            self._max_tokens_key = "max_completion_tokens"
+            fixed = dict(body)
+            fixed["max_completion_tokens"] = fixed.pop("max_tokens")
+            return fixed
+        return self._shrink_on_context_error(text, body)
+
+    @staticmethod
+    def _shrink_on_context_error(text: str, body: dict) -> Optional[dict]:
+        if not _looks_like_context_error(text):
+            return None
+        msgs = body.get("messages") or []
+        if not msgs or not isinstance(msgs[-1].get("content"), str):
+            return None
+        last = msgs[-1]["content"]
+        shrunk = _shrink_prompt(last)
+        if shrunk == last:
+            return None
+        return dict(body, messages=msgs[:-1] + [dict(msgs[-1], content=shrunk)])
+
+    def _mock_complete(self, model: str, prompt: str, max_tokens: int, feature: str) -> "LLMResult":
+        """No-network provider (MSRA_LLM_MOCK=1) so the AI features can be exercised end to end."""
+        i = getattr(self, "_mock_i", 0)
+        self._mock_i = i + 1
+        if self.mock_responses:
+            text = self.mock_responses[min(i, len(self.mock_responses) - 1)]
+        else:
+            text = '{"verdict": "uncertain", "confidence": 0.5, "reason": "mock provider"}'
+        usage = {"input_tokens": max(1, len(prompt) // 4), "output_tokens": max(1, len(text) // 4),
+                 "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+        self.ledger.record(feature, model or "mock", usage, 0.0)
+        return LLMResult(text=text, model=model or "mock", model_returned=model or "mock",
+                         usage=usage, usd=0.0, stop_reason="end_turn")
+
     @staticmethod
     def _parse_messages(data: dict, requested: str):
         if data.get("type") == "error" or ("error" in data and "content" not in data):
-            raise LLMError(f"provider error: {mask(json.dumps(data.get('error', data))[:300])}")
+            raise LLMError(f"provider error: {_safe_dumps(data.get('error', data), 300)}")
         text = "".join(b.get("text", "") for b in data.get("content") or []
                        if isinstance(b, dict) and b.get("type") == "text")
         u = data.get("usage") or {}
@@ -435,7 +576,7 @@ class LLMClient:
     @staticmethod
     def _parse_chat(data: dict, requested: str):
         if data.get("error") and not data.get("choices"):
-            raise LLMError(f"provider error: {mask(json.dumps(data['error'])[:300])}")
+            raise LLMError(f"provider error: {_safe_dumps(data['error'], 300)}")
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise LLMError("provider response had no choices")

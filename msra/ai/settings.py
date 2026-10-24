@@ -18,6 +18,7 @@ from .models import valid_model_id
 # feature -> (label, default model alias)
 FEATURES: Dict[str, Dict[str, str]] = {
     "triage":          {"label": "Finding triage (verifier votes)", "default": "sonnet"},
+    "research":        {"label": "Researcher (deep investigation)", "default": "sonnet"},
     "dynamic_verdict": {"label": "Dynamic scan verdicts",           "default": "sonnet"},
     "poc":             {"label": "PoC generation",                  "default": "sonnet"},
     "rule_extraction": {"label": "Intel rule extraction",           "default": "sonnet"},
@@ -27,6 +28,7 @@ FEATURES: Dict[str, Dict[str, str]] = {
 DEFAULTS: Dict[str, Any] = {
     "models": {k: v["default"] for k, v in FEATURES.items()},
     "triage": {"votes": 2, "min_severity": "Medium", "max_findings": 25},
+    "research": {"max_steps": 6, "max_usd": 0.5},
     "budget": {"usd_cap": None},
     "pricing": {},
 }
@@ -110,6 +112,22 @@ def validate(update: dict) -> Dict[str, Any]:
                 raise ValueError("triage.max_findings must be 1-200")
             ct["max_findings"] = m
         clean["triage"] = ct
+    if "research" in update:
+        r = update["research"]
+        if not isinstance(r, dict):
+            raise ValueError("research must be an object")
+        cr: Dict[str, Any] = {}
+        if "max_steps" in r:
+            n = int(r["max_steps"])
+            if not 2 <= n <= 12:
+                raise ValueError("research.max_steps must be 2-12")
+            cr["max_steps"] = n
+        if "max_usd" in r:
+            u = float(r["max_usd"])
+            if not 0.05 <= u <= 20:
+                raise ValueError("research.max_usd must be between 0.05 and 20")
+            cr["max_usd"] = u
+        clean["research"] = cr
     if "budget" in update:
         b = update["budget"]
         if not isinstance(b, dict):

@@ -10,8 +10,11 @@ class FakeLLM:
         self.fail_first_429 = False
         self.coerce_to = None       # answer with this model id regardless of request
         self.reply = "OK"
+        self.replies = []           # if set: answered in order, the last one repeats
+        self._ri = 0
         self.status = 200
         self.redirect_to = None
+        self.reject = None          # callable(path, body) -> error text (400) or None
         self._429_sent = False
         outer = self
 
@@ -52,10 +55,18 @@ class FakeLLM:
                     outer._429_sent = True
                     self._send(429, {"error": "slow down"}, {"Retry-After": "0.1"})
                     return
+                if outer.reject:
+                    msg = outer.reject(self.path, body)
+                    if msg:
+                        self._send(400, {"error": {"message": msg}})
+                        return
                 if outer.status != 200:
                     self._send(outer.status, {"error": {"message": "boom"}})
                     return
                 model = outer.coerce_to or body.get("model")
+                if outer.replies:
+                    outer.reply = outer.replies[min(outer._ri, len(outer.replies) - 1)]
+                    outer._ri += 1
                 if self.path == "/v1/messages":
                     self._send(200, {"content": [{"type": "text", "text": outer.reply}],
                                      "model": model, "stop_reason": "end_turn",

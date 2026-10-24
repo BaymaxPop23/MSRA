@@ -6660,6 +6660,7 @@ def _load_findings_with_triage(scan_id: str) -> dict | None:
         return None
     triage_map = _db.get_triage_map(scan_id)
     ai_map = _db.get_ai_triage_map(scan_id)
+    research_map = _db.get_ai_research_summary_map(scan_id)
     try:
         fb = _ai_routes.feedback_stats()
     except Exception:
@@ -6672,6 +6673,8 @@ def _load_findings_with_triage(scan_id: str) -> dict | None:
         f["suppression_note"] = t.get("suppression_note", "")
         if fid in ai_map:
             f["ai_triage"] = ai_map[fid]
+        if fid in research_map:
+            f["ai_research"] = research_map[fid]
         stat = fb.get(_rule_key(f.get("fid"), f.get("title")))
         if stat and stat["total"] >= 3:
             f["rule_feedback"] = {"fp": stat["fp"], "total": stat["total"], "fp_rate": stat["fp_rate"]}
@@ -8007,6 +8010,7 @@ _ai_routes.register(
     get_scan=_db.get_scan,
     db_module=_db,
     pool=_AI_POOL,
+    scan_dir=_scan_dir,
 )
 
 # ── Reset stale dynamic jobs left in "running" state from a previous session ──

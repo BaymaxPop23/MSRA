@@ -91,6 +91,8 @@
     '.ai-badge{font-size:10px;font-weight:700;padding:1px 7px;border-radius:9px;white-space:nowrap}',
     '.ai-vote{padding:8px 0;border-bottom:1px solid var(--border);font-size:12.5px}.ai-vote:last-child{border-bottom:none}',
     '.ai-vote .t{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:3px}',
+    '.ai-rsec{margin-top:8px;font-size:12.5px}.ai-rt{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:2px;cursor:default}',
+    '.ai-rli{margin:2px 0}.ai-rsec code{font-size:11.5px}',
     '@media (max-width:700px){.ai-row{grid-template-columns:1fr}.ai-grid{grid-template-columns:1fr}}'
   ].join('\n');
   document.head.appendChild(h('style', { id: 'msra-ai-css', text: css }));
@@ -121,7 +123,7 @@
     return api('/api/scans/' + sid + '/findings').then(function (d) {
       findingMap = {};
       (d.findings || []).forEach(function (f, i) {
-        findingMap[f.id != null ? f.id : i + 1] = { ai: f.ai_triage || null, fb: f.rule_feedback || null };
+        findingMap[f.id != null ? f.id : i + 1] = { ai: f.ai_triage || null, fb: f.rule_feedback || null, rs: f.ai_research || null };
       });
       findingsScan = sid;
     }).catch(function () { /* badges are optional */ });
@@ -142,12 +144,17 @@
       var sig = info ? JSON.stringify(info) : '';
       if (old && old.getAttribute('data-sig') === sig) return;
       if (old) old.remove();
-      if (!info || (!info.ai && !info.fb)) return;
+      if (!info || (!info.ai && !info.fb && !info.rs)) return;
       var wrap = h('span', { class: 'ai-badges', 'data-for': id, 'data-sig': sig });
       if (info.ai) {
         var v = VERDICT[info.ai.verdict] || VERDICT.uncertain;
         wrap.appendChild(badge(v.label + ' ' + Math.round(info.ai.confidence || 0) + '%', v.cls,
           'Verified by ' + info.ai.model + ' (' + ((info.ai.detail || {}).agree || '?') + ' verifiers agree)'));
+      }
+      if (info.rs) {
+        var rv = VERDICT[info.rs.verdict] || VERDICT.uncertain;
+        wrap.appendChild(badge(rv.label.replace('AI:', 'Research:') + ' ' + Math.round(info.rs.confidence || 0) + '%', rv.cls,
+          'Investigated by ' + info.rs.model + ' (read the code, not just the snippet)'));
       }
       if (info.fb && info.fb.fp_rate >= 0.6) {
         wrap.appendChild(badge('rule: ' + info.fb.fp + '/' + info.fb.total + ' FP', 'warn',
@@ -191,9 +198,10 @@
     var old = body.querySelector('.ai-drawer-sec'); if (old) old.remove();
     var id = f.id != null ? f.id : null;
     var info = id != null ? findingMap[id] : null;
-    if (!info || (!info.ai && !info.fb)) return;
     var first = body.querySelector('.drawer-section');
-    var sec = drawerCard(info);
+    var sec = h('div', { class: 'drawer-section ai-drawer-sec' });
+    if (info && (info.ai || info.fb)) sec.appendChild(drawerCard(info));
+    if (id != null) sec.appendChild(researchBlock(id));
     if (first && first.nextSibling) body.insertBefore(sec, first.nextSibling); else body.appendChild(sec);
   }
   function wrapOpenDrawer() {
@@ -206,6 +214,93 @@
     };
     wrapped.__ai = true;
     window.openDrawer = wrapped;
+  }
+
+
+  // ── researcher (reads the code, reasons, reports) ───────────────────────
+  var researchTimers = {};
+  function listBlock(title, items, render) {
+    if (!items || !items.length) return null;
+    var ul = h('ul', { style: 'margin:4px 0 0 18px;padding:0' });
+    items.forEach(function (it) { ul.appendChild(h('li', { class: 'ai-rli' }, render ? render(it) : String(it))); });
+    return h('div', { class: 'ai-rsec' }, h('div', { class: 'ai-rt', text: title }), ul);
+  }
+  function textBlock(title, text) {
+    if (!text) return null;
+    return h('div', { class: 'ai-rsec' }, h('div', { class: 'ai-rt', text: title }), h('div', { text: text }));
+  }
+  function renderReport(saved) {
+    var r = saved.report || {}, v = VERDICT[r.verdict] || VERDICT.uncertain;
+    var box = h('div', null);
+    box.appendChild(h('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px' },
+      h('span', { class: 'ai-pill ' + v.cls, text: v.label.replace('AI:', 'Researcher:') }),
+      h('span', { class: 'ai-note', text: Math.round(saved.confidence || 0) + '% confidence · ' + saved.model + ' · ' +
+        (r.steps || []).length + ' lookups · ' + money(saved.cost_usd) })));
+    if (r.summary) box.appendChild(h('div', { style: 'margin-bottom:6px', text: r.summary }));
+    if (r.note) box.appendChild(h('div', { class: 'ai-note', style: 'color:#facc15', text: r.note }));
+    [textBlock('Root cause', r.root_cause), textBlock('Attack scenario', r.attack_scenario),
+     listBlock('Preconditions', r.preconditions),
+     listBlock('Evidence (checked against the real files)', r.evidence, function (e) {
+       return h('span', null, h('code', { text: e.file + (e.line ? ':' + e.line : '') }), ' ',
+         h('span', { class: 'ai-pill ' + (e.verified ? 'good' : 'warn'), text: e.verified ? 'verified' : 'not found' }),
+         ' ' + (e.why || '')); }),
+     listBlock('What I tried to disprove', r.disproof_attempts),
+     textBlock('Safe way to confirm', r.poc_idea), textBlock('Remediation', r.remediation),
+     listBlock('Not verified', r.unknowns), listBlock('Suggested next steps', r.next_steps),
+     listBlock('Other leads noticed (unverified)', r.related_leads)
+    ].forEach(function (x) { if (x) box.appendChild(x); });
+    if ((r.steps || []).length) {
+      var logBox = h('div', { class: 'ai-note' });
+      r.steps.forEach(function (s, i) {
+        var a = s.args || {};
+        logBox.appendChild(h('div', { text: (i + 1) + '. ' + s.action + ' ' + (a.path || a.term || a.symbol || '') }));
+      });
+      box.appendChild(h('details', { class: 'ai-rsec' }, h('summary', { class: 'ai-rt', text: 'Research log' }), logBox));
+    }
+    box.appendChild(h('div', { class: 'ai-note', style: 'margin-top:8px', text:
+      'Advisory only. The researcher read untrusted code with read-only tools; it cannot change findings, rules or your triage decision.' }));
+    return box;
+  }
+  function researchBlock(fid) {
+    var sid = scanId();
+    var wrap = h('div', { class: 'ai-sec', style: 'margin-top:12px' }, h('h3', null, 'AI researcher'));
+    var card = h('div', { class: 'ai-card' });
+    wrap.appendChild(card);
+    var base = '/api/scans/' + sid + '/findings/' + fid + '/ai-research';
+    function stop() { if (researchTimers[fid]) { clearInterval(researchTimers[fid]); delete researchTimers[fid]; } }
+    function paint(view) {
+      card.textContent = '';
+      var job = view.job || {}, saved = view.research;
+      if (job.status === 'running') {
+        card.appendChild(h('div', { class: 'ai-note', text: 'Investigating: step ' + (job.step || 0) + ' - ' + (job.doing || 'thinking') + ' ...' }));
+        card.appendChild(h('button', { class: 'btn btn-sm', style: 'margin-top:8px', text: 'Cancel', onclick: function () {
+          api(base + '/cancel', { method: 'POST' }).catch(function () {}); } }));
+        return;
+      }
+      if (saved) card.appendChild(renderReport(saved));
+      else card.appendChild(h('div', { class: 'ai-note', text:
+        'Triage judges the snippet. The researcher reads the surrounding code like an analyst would: finds how it is reached, traces the data, tries to disprove it, and writes up what it found.' }));
+      if (job.status === 'error') card.appendChild(h('div', { class: 'ai-note', style: 'color:#f87171', text: job.error }));
+      card.appendChild(h('button', { class: 'btn btn-sm ai-btn', style: 'margin-top:10px', onclick: start },
+        icon('magnifying-glass'), saved ? ' Re-investigate' : ' Investigate with AI'));
+    }
+    function poll() {
+      stop();
+      researchTimers[fid] = setInterval(function () {
+        api(base).then(function (v) {
+          paint(v);
+          if ((v.job || {}).status !== 'running') { stop(); loadFindingData(true).then(decorateRows); }
+        }).catch(stop);
+      }, 1200);
+    }
+    function start() {
+      api(base, { method: 'POST', body: {} }).then(function () {
+        paint({ job: { status: 'running', step: 0, doing: 'starting' } }); poll();
+      }).catch(function (e) { toast(e.message, e.status === 409 ? 'warn' : 'err', 8000); });
+    }
+    api(base).then(function (v) { paint(v); if ((v.job || {}).status === 'running') poll(); })
+      .catch(function () { card.appendChild(h('div', { class: 'ai-note', text: 'Researcher unavailable.' })); });
+    return wrap;
   }
 
   // ── AI triage run ───────────────────────────────────────────────────────
@@ -361,6 +456,16 @@
     var maxF = h('input', { class: 'ai-in', type: 'number', min: 1, max: 200, value: cfg.triage.max_findings });
     var cap = h('input', { class: 'ai-in', type: 'number', min: 0, step: '0.5', placeholder: 'no limit',
       value: cfg.budget.usd_cap == null ? '' : cfg.budget.usd_cap });
+    var rsteps = h('input', { class: 'ai-in', type: 'number', min: 2, max: 12, value: (cfg.research || {}).max_steps || 6 });
+    var rusd = h('input', { class: 'ai-in', type: 'number', min: 0.05, max: 20, step: '0.05', value: (cfg.research || {}).max_usd || 0.5 });
+    body.appendChild(h('div', { class: 'ai-sec' }, h('h3', null, 'AI researcher'),
+      h('div', { class: 'ai-card' },
+        h('div', { class: 'ai-grid' },
+          h('div', { class: 'ai-fld' }, h('label', null, 'Max steps per finding'), rsteps),
+          h('div', { class: 'ai-fld' }, h('label', null, 'Max spend per finding (USD)'), rusd)),
+        h('div', { class: 'ai-note', style: 'margin-top:10px', text:
+          'Open a finding and press "Investigate with AI". The researcher reads the decompiled code with read-only tools (files, search, callers, manifest), ' +
+          'looks for what would disprove the finding, and cites file:line evidence that MSRA re-checks against the real files.' }))));
     body.appendChild(h('div', { class: 'ai-sec' }, h('h3', null, 'AI triage & budget'),
       h('div', { class: 'ai-card' },
         h('div', { class: 'ai-grid' },
@@ -409,6 +514,7 @@
       api('/api/ai/settings', { method: 'PUT', body: {
         models: models,
         triage: { votes: parseInt(votes.value, 10), min_severity: minSev.value, max_findings: parseInt(maxF.value, 10) },
+        research: { max_steps: parseInt(rsteps.value, 10), max_usd: parseFloat(rusd.value) },
         budget: { usd_cap: cap.value === '' ? null : parseFloat(cap.value) }
       } }).then(function () { toast('AI settings saved', 'ok'); closeSettings(); })
         .catch(function (e) { toast('Not saved: ' + e.message, 'err', 7000); });
