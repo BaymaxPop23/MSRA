@@ -103,3 +103,11 @@ def test_mock_provider_needs_no_network(monkeypatch, tmp_path):
     c.mock_responses = ["first", "second"]
     assert [c.complete(prompt="x", model="sonnet").text for _ in range(3)] == ["first", "second", "second"]
     assert c.provider.public()["configured"] is True
+
+
+def test_debug_log_masks_multiline_secret_before_serialising(fake, tmp_path, monkeypatch):
+    log = tmp_path / "raw2.log"
+    monkeypatch.setenv("MSRA_LLM_DEBUG_LOG", str(log))
+    pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAabcdefghijklmnop\n-----END RSA PRIVATE KEY-----"
+    gw(fake).complete(prompt=pem, model="claude-sonnet-5-5", mask_input=False)
+    assert "MIIEowIBAAKCAQEA" not in log.read_text()

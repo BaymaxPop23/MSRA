@@ -172,6 +172,18 @@ def _shrink_prompt(prompt: str, keep: int = 24000) -> str:
     return prompt[:half] + "\n...[truncated to fit the model context]...\n" + prompt[-half:]
 
 
+def _mask_tree(v: Any) -> Any:
+    """Mask every string leaf (keys too) BEFORE serialising: masking the JSON text can miss
+    secrets that escaping splits up (multi-line keys, quotes)."""
+    if isinstance(v, str):
+        return mask(v)
+    if isinstance(v, dict):
+        return {mask(str(k)): _mask_tree(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_mask_tree(x) for x in v]
+    return v
+
+
 def _debug_log(entry: dict) -> None:
     """Opt-in raw request/response log (MSRA_LLM_DEBUG_LOG). Masked before it touches disk."""
     path = os.environ.get("MSRA_LLM_DEBUG_LOG", "").strip()
@@ -179,7 +191,7 @@ def _debug_log(entry: dict) -> None:
         return
     try:
         with open(path, "a", encoding="utf-8") as f:
-            f.write(mask(json.dumps(entry, default=str)) + "\n")
+            f.write(json.dumps(_mask_tree(entry), default=str) + "\n")
     except OSError:
         pass
 
@@ -544,7 +556,7 @@ class LLMClient:
     @staticmethod
     def _parse_messages(data: dict, requested: str):
         if data.get("type") == "error" or ("error" in data and "content" not in data):
-            raise LLMError(f"provider error: {mask(json.dumps(data.get('error', data))[:300])}")
+            raise LLMError(f"provider error: {json.dumps(_mask_tree(data.get('error', data)))[:300]}")
         text = "".join(b.get("text", "") for b in data.get("content") or []
                        if isinstance(b, dict) and b.get("type") == "text")
         u = data.get("usage") or {}
@@ -555,7 +567,7 @@ class LLMClient:
     @staticmethod
     def _parse_chat(data: dict, requested: str):
         if data.get("error") and not data.get("choices"):
-            raise LLMError(f"provider error: {mask(json.dumps(data['error'])[:300])}")
+            raise LLMError(f"provider error: {json.dumps(_mask_tree(data['error']))[:300]}")
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise LLMError("provider response had no choices")
