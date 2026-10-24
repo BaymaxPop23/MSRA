@@ -8,6 +8,7 @@ with security payloads and analyses the output for vulnerability evidence.
 import logging
 import re
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -132,6 +133,12 @@ class ComponentProber:
         self._package = package
         self._device_serial = device_serial
         self._adb_runner = adb_runner or self._default_adb_runner
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        """Ask a running probe_all to stop before its next component (it cannot be interrupted
+        mid-adb-call, but it will not start new probes after the job's timeout)."""
+        self._cancel.set()
 
     # ------------------------------------------------------------------ #
     # Public API                                                          #
@@ -153,24 +160,32 @@ class ComponentProber:
         results: List[ProbeResult] = []
 
         for activity in manifest_components.get("activities", []):
+            if self._cancel.is_set():
+                break
             name = activity.get("name", "")
             filters = activity.get("intent_filters", [])
             if name:
                 results.extend(self.probe_activity(name, filters))
 
         for provider in manifest_components.get("providers", []):
+            if self._cancel.is_set():
+                break
             authority = provider.get("authority", "")
             paths = provider.get("paths", [])
             if authority:
                 results.extend(self.probe_content_provider(authority, paths))
 
         for receiver in manifest_components.get("receivers", []):
+            if self._cancel.is_set():
+                break
             name = receiver.get("name", "")
             actions = receiver.get("actions", [])
             if name:
                 results.extend(self.probe_broadcast_receiver(name, actions))
 
         for service in manifest_components.get("services", []):
+            if self._cancel.is_set():
+                break
             name = service.get("name", "")
             if name:
                 results.extend(self.probe_service(name))

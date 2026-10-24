@@ -1102,6 +1102,8 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
                     _probe_results = _cp_future.result(timeout=30)
                 except concurrent.futures.TimeoutError:
                     _probe_results = []
+                    _prober.cancel()          # stop issuing adb commands before the next job takes the device
+                    concurrent.futures.wait([_cp_future], timeout=10)
                     extra_evidence += "\nComponentProber: timed out (30s) — skipped.\n"
                 _update_job(job_id, progress=64, message="Component probing done, collecting evidence…")
                 _vuln_probes = [r for r in _probe_results if r.is_vulnerable]

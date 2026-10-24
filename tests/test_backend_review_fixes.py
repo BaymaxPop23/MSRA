@@ -241,3 +241,14 @@ def test_snippet_endpoint_cannot_read_outside_decompiled(env):
 def test_duplicate_security_headers_removed():
     import re
     assert len(re.findall(r"def _security_headers", Path(server.__file__).read_text())) == 1
+
+
+def test_component_prober_stops_when_cancelled():
+    from msra.dynamic.verification.component_prober import ComponentProber
+    calls = []
+    pr = ComponentProber("com.x", adb_runner=lambda a: (calls.append(a) or (0, "", "")))
+    pr.cancel()
+    out = pr.probe_all({"activities": [{"name": "A", "intent_filters": []}],
+                        "providers": [{"authority": "x", "paths": []}],
+                        "receivers": [{"name": "R", "actions": []}], "services": [{"name": "S"}]})
+    assert out == [] and calls == []
