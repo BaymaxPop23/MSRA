@@ -215,3 +215,64 @@ def test_cookie_claim_needs_cookie_evidence():
     assert status(f) == "likely_fp"
     g = mk("SSO Activity Exposes Session Cookies", "CookieManager.getInstance().getCookie(url);")
     assert status(g) == "needs_review"
+
+
+# ── structure-aware checks (brace depth, statements, method span) ─────────
+def test_enclosing_class_uses_brace_depth_not_nearest_declaration():
+    from msra.vetting import enclosing_class
+    src = ["public class M extends AbstractC1a {",
+           "  static class R extends BroadcastReceiver { void g(){ } }",
+           "  void f(){ uri.getLastPathSegment(); }",
+           "}"]
+    assert enclosing_class(src, 3) == ("M", "AbstractC1a")            # R closed before line 3
+    assert enclosing_class(src, 2)[0] == "M"                           # R opens and closes on line 2
+    assert enclosing_class(["class M extends X {", "  class R extends Service {", "    int a;"], 3) == ("R", "Service")
+    assert enclosing_class(["class A {", "  }", "}", "}"], 4) is None   # inconsistent braces: fail closed
+    tricky = ['class A extends Service {', '  String s = "} class B extends Activity {";', '  void f(){}', '}']
+    assert enclosing_class(tricky, 3) == ("A", "Service")              # braces in strings are ignored
+
+
+def test_closed_receiver_before_the_line_cannot_launder_a_provider_finding(tmp_path):
+    p = tmp_path / "decompiled/sources/com/app/M.java"
+    p.parent.mkdir(parents=True)
+    p.write_text("public class M extends AbstractC1a {\n  static class R extends BroadcastReceiver { }\n"
+                 "  void f(){ uri.getLastPathSegment(); }\n}\n")
+    f = mk("ContentProvider Path Traversal via URI Decoding", "uri.getLastPathSegment();", line=3, path=str(p))
+    assert status(f) == "needs_review"
+
+
+def test_one_unsafe_send_among_several_statements_keeps_the_finding():
+    safe = 'LocalBroadcastManager.getInstance(c).sendBroadcast(new Intent("X"));'
+    f = mk("Sensitive Data in Implicit Intent", safe + ' sendBroadcast(new Intent("a").putExtra("t", tok));', sev="High")
+    assert status(f) == "needs_review" and f.severity == "High"
+    g = mk("Sensitive Data in Implicit Intent", safe + ' log("ok");', sev="High")
+    assert status(g) == "likely_fp"
+    h = mk("Sensitive Data in Implicit Intent", safe + " " + safe, sev="High")
+    assert status(h) == "likely_fp"
+
+
+def test_schema_check_uses_the_class_that_encloses_the_line(tmp_path):
+    p = tmp_path / "decompiled/sources/com/app/D.java"
+    p.parent.mkdir(parents=True)
+    # a helper class exists in the file, but the flagged line sits in a different (non-helper) class
+    p.write_text("class Helper extends SQLiteOpenHelper { void onCreate(SQLiteDatabase d){ } }\n"
+                 "class Other extends Base {\n  void onCreate(SQLiteDatabase db) {\n"
+                 '    db.execSQL("CREATE TABLE " + name());\n  }\n}\n')
+    f = mk("SQL Injection in ContentProvider", 'db.execSQL("CREATE TABLE " + name());', line=4, path=str(p))
+    assert status(f) == "needs_review"
+
+
+def test_provider_input_held_in_a_variable_keeps_the_sql_finding(tmp_path):
+    p = tmp_path / "decompiled/sources/com/app/E.java"
+    p.parent.mkdir(parents=True)
+    p.write_text("public class E extends SQLiteOpenHelper {\n"
+                 "  void drop(SQLiteDatabase db, Uri uri) {\n    String t = uri.getLastPathSegment();\n"
+                 '    db.execSQL("DROP TABLE " + t);\n  }\n}\n')
+    f = mk("SQL Injection in ContentProvider", 'db.execSQL("DROP TABLE " + t);', line=4, path=str(p))
+    assert status(f) == "needs_review" and f.severity == "Critical"
+    q = tmp_path / "decompiled/sources/com/app/F.java"
+    q.write_text("public class F extends SQLiteOpenHelper {\n  static void b(SQLiteDatabase db, Kind k) {\n"
+                 '    db.execSQL("CREATE TABLE IF NOT EXISTS " + k.tableName() + " (a TEXT)");\n  }\n}\n')
+    g = mk("SQL Injection in ContentProvider", 'db.execSQL("CREATE TABLE IF NOT EXISTS " + k.tableName() + " (a TEXT)");',
+           line=3, path=str(q))
+    assert status(g) == "likely_fp"
