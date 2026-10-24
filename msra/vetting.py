@@ -294,8 +294,13 @@ _STRING_RE = re.compile(r'<string\s+name="([^"]+)"[^>]*>(.*?)</string>', re.S)
 _PLACEHOLDER = re.compile(r"%\d*\$?[sd]|\{[A-Za-z0-9_]+\}")
 
 
-def _looks_like_ui_text(value: str) -> bool:
-    """Human-readable label/sentence rather than a secret: prose, placeholders, or one plain word."""
+_SECRETISH_NAME = re.compile(r"(?i)pass|pwd|secret|key|token|cred|auth")
+
+
+def _looks_like_ui_text(value: str, name: str = "") -> bool:
+    """Prose or placeholders: never a credential. A single plain word only counts when the string
+    name is NOT itself credential-like (a hardcoded 'Administrator' under 'admin_password' is a
+    finding, not a label); those cases are handled by _translated_elsewhere instead."""
     v = value.strip()
     if not v:
         return False
@@ -303,9 +308,34 @@ def _looks_like_ui_text(value: str) -> bool:
         return True
     if any(ord(c) > 127 and c.isalpha() for c in v):
         return True                                   # translated text (accents, CJK, Arabic ...)
+    if _SECRETISH_NAME.search(name):
+        return False
     if re.fullmatch(r"[A-Za-z]{2,30}", v) and v[0].isupper():
-        return True                                   # "Password", "Gold"
+        return True                                   # "Gold"
     return bool(re.fullmatch(r"[A-Z][a-z]{1,15}(?:[/\-][A-Za-z][a-z]{1,15}){1,3}", v))   # "Platinum/Gold"
+
+
+def _translated_elsewhere(path: str, name: str, value: str, cache: dict) -> bool:
+    """Same string name defined with a DIFFERENT value in another locale folder: a UI label.
+    Secrets are not translated per language."""
+    key = ("loc", path, name)
+    if key in cache:
+        return cache[key]
+    found = False
+    try:
+        res = Path(path).parent.parent
+        pat = re.compile(r'<string\s+name="' + re.escape(name) + r'"[^>]*>(.*?)</string>', re.S)
+        for sib in res.glob("values*/strings.xml"):
+            if sib.resolve() == Path(path).resolve():
+                continue
+            m = pat.search(sib.read_text(encoding="utf-8", errors="replace"))
+            if m and m.group(1).strip() != value.strip():
+                found = True
+                break
+    except OSError:
+        pass
+    cache[key] = found
+    return found
 
 
 def _ui_string_credential(f, line: str, cache) -> Optional[str]:
@@ -325,7 +355,7 @@ def _ui_string_credential(f, line: str, cache) -> Optional[str]:
     if not m:
         return None
     name, value = m.group(1), m.group(2)
-    if _looks_like_ui_text(value):
+    if _looks_like_ui_text(value, name) or _translated_elsewhere(path, name, value, cache):
         return f'the value of string "{name}" is user-facing text (a label/sentence), not a credential'
     return None
 

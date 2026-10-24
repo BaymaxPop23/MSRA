@@ -7,6 +7,7 @@ file only stores *choices*, so it is safe to show in the UI and back up.
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
@@ -124,7 +125,7 @@ def validate(update: dict) -> Dict[str, Any]:
             cr["max_steps"] = n
         if "max_usd" in r:
             u = float(r["max_usd"])
-            if not 0.05 <= u <= 20:
+            if not math.isfinite(u) or not 0.05 <= u <= 20:
                 raise ValueError("research.max_usd must be between 0.05 and 20")
             cr["max_usd"] = u
         clean["research"] = cr
@@ -137,7 +138,7 @@ def validate(update: dict) -> Dict[str, Any]:
             clean["budget"] = {"usd_cap": None}
         else:
             cap = float(cap)
-            if cap < 0 or cap > 100000:
+            if not math.isfinite(cap) or cap < 0 or cap > 100000:
                 raise ValueError("budget.usd_cap must be between 0 and 100000")
             clean["budget"] = {"usd_cap": cap}
     return clean

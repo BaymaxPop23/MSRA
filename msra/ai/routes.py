@@ -52,6 +52,24 @@ def invalidate_feedback() -> None:
     _fb_cache["ts"] = 0.0
 
 
+def _vet_running(scan_id: str) -> bool:
+    """Caller must hold _jobs_lock."""
+    return (_vet_jobs.get(scan_id) or {}).get("status") == "running"
+
+
+def active_jobs(scan_id: str) -> list:
+    """Human-readable list of AI jobs still running for a scan (used to block deletion)."""
+    out = []
+    with _jobs_lock:
+        if (_jobs.get(scan_id) or {}).get("status") == "running":
+            out.append("AI triage")
+        if _vet_running(scan_id):
+            out.append("AI vetting")
+        out += [f"AI research on finding {k[1]}" for k, j in _research_jobs.items()
+                if k[0] == scan_id and j.get("status") == "running"]
+    return out
+
+
 def _client():
     return get_client()
 
@@ -184,11 +202,6 @@ def ai_triage_start(scan_id: str):
     cfg = S.load()
     opts = {**cfg["triage"], **patch.get("triage", {})}
 
-    with _jobs_lock:
-        cur = _jobs.get(scan_id)
-        if cur and cur.get("status") == "running":
-            return jsonify({"error": "AI triage already running for this scan"}), 409
-
     findings = data["findings"]
     for i, f in enumerate(findings, start=1):
         f.setdefault("id", i)
@@ -205,12 +218,17 @@ def ai_triage_start(scan_id: str):
     pkg = (data.get("package") or "")
     stats = feedback_stats()
     cancel = threading.Event()
-    _cancel[scan_id] = cancel
     job = {"status": "running", "total": len(chosen), "done": 0, "calls_done": 0,
            "calls_total": len(chosen) * opts["votes"], "model": model, "votes": opts["votes"],
            "started": time.time(), "cost_usd": 0.0, "error": None, "stopped": None}
-    with _jobs_lock:
+    with _jobs_lock:                              # check-and-claim in ONE critical section
+        cur = _jobs.get(scan_id)
+        if cur and cur.get("status") == "running":
+            return jsonify({"error": "AI triage already running for this scan"}), 409
+        if _vet_running(scan_id):
+            return jsonify({"error": "AI vetting is running for this scan"}), 409
         _jobs[scan_id] = job
+    _cancel[scan_id] = cancel
 
     def on_result(fid, res):
         db.upsert_ai_triage(scan_id, fid, res["verdict"], res["confidence"],
@@ -313,19 +331,20 @@ def ai_research_start(scan_id: str, finding_id: int):
         return jsonify({"error": "The decompiled sources for this scan are not available (pruned or "
                                  "not an Android scan). Re-scan to enable the researcher."}), 409
     key = (scan_id, finding_id)
-    with _jobs_lock:
-        cur = _research_jobs.get(key)
-        if cur and cur.get("status") == "running":
-            return jsonify({"error": "The researcher is already working on this finding"}), 409
     opts = S.load()["research"]
     model = S.model_for("research")
     stats = feedback_stats()
     cancel = threading.Event()
-    _research_cancel[key] = cancel
     job = {"status": "running", "step": 0, "doing": "starting", "model": model,
            "started": time.time(), "error": None}
-    with _jobs_lock:
+    with _jobs_lock:                              # check-and-claim in ONE critical section
+        cur = _research_jobs.get(key)
+        if cur and cur.get("status") == "running":
+            return jsonify({"error": "The researcher is already working on this finding"}), 409
+        if _vet_running(scan_id):
+            return jsonify({"error": "AI vetting is running for this scan"}), 409
         _research_jobs[key] = job
+    _research_cancel[key] = cancel
 
     def on_step(n, action, args):
         with _jobs_lock:
@@ -409,10 +428,6 @@ def ai_vet_start(scan_id: str):
         limit = max(1, min(int(body.get("max_findings", 10)), 50))
     except (TypeError, ValueError):
         return jsonify({"error": "max_findings must be a number"}), 400
-    with _jobs_lock:
-        cur = _vet_jobs.get(scan_id)
-        if cur and cur.get("status") == "running":
-            return jsonify({"error": "AI vetting is already running for this scan"}), 409
     findings = data["findings"]
     for i, f in enumerate(findings, start=1):
         f.setdefault("id", i)
@@ -429,12 +444,17 @@ def ai_vet_start(scan_id: str):
     opts = S.load()["research"]
     stats = feedback_stats()
     cancel = threading.Event()
-    _vet_cancel[scan_id] = cancel
     job = {"status": "running", "total": len(chosen), "done": 0, "cost_usd": 0.0, "model": model,
            "tally": {"true_positive": 0, "false_positive": 0, "uncertain": 0}, "stopped": None,
            "started": time.time(), "error": None}
-    with _jobs_lock:
+    with _jobs_lock:                              # check-and-claim in ONE critical section
+        cur = _vet_jobs.get(scan_id)
+        if cur and cur.get("status") == "running":
+            return jsonify({"error": "AI vetting is already running for this scan"}), 409
+        if any(k[0] == scan_id and j.get("status") == "running" for k, j in _research_jobs.items()):
+            return jsonify({"error": "The researcher is already running on a finding in this scan"}), 409
         _vet_jobs[scan_id] = job
+    _vet_cancel[scan_id] = cancel
 
     def run():
         try:

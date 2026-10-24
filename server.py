@@ -39,7 +39,7 @@ from msra.scanner import Scanner
 from msra.report import generate_html_report
 from msra.utils import iter_source_files
 from msra import rules_api
-from msra.corellium import CorelliumClient
+from msra.corellium import validate_corellium_url, CorelliumClient
 import msra.db as _db
 from msra import security as _sec
 from msra.dynamic import adb_util as _adb_util
@@ -55,8 +55,8 @@ UPLOAD_FOLDER.mkdir(exist_ok=True)
 REPORTS_FOLDER.mkdir(exist_ok=True)
 
 DATA_DIR        = Path(__file__).parent / "data"
-CUSTOM_DIR      = DATA_DIR / "custom"
-DYNAMIC_CFG_F   = CUSTOM_DIR / "dynamic_config.json"
+CUSTOM_DIR      = Path(os.environ.get("MSRA_CUSTOM_DIR") or (DATA_DIR / "custom"))
+DYNAMIC_CFG_F   = Path(os.environ.get("MSRA_DYNAMIC_CONFIG") or (CUSTOM_DIR / "dynamic_config.json"))
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 # Models are chosen per feature in AI Settings (msra/ai/settings.py); the provider
@@ -135,6 +135,34 @@ def _security_headers(resp):
     return resp
 
 
+def _json_obj(force: bool = False) -> dict:
+    """Request JSON body as a dict; anything else (list, string, bad JSON) becomes {}."""
+    data = request.get_json(force=force, silent=True)
+    return data if isinstance(data, dict) else {}
+
+
+class InvalidScanId(ValueError):
+    pass
+
+
+@app.errorhandler(InvalidScanId)
+def _bad_scan_id(exc):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Invalid scan id"}), 400
+    return Response("Invalid scan id", status=400, mimetype="text/plain")
+
+
+@app.errorhandler(Exception)
+def _unhandled(exc):
+    from werkzeug.exceptions import HTTPException
+    if isinstance(exc, HTTPException):
+        return exc
+    _log.exception("unhandled error on %s %s", request.method, request.path)
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Internal error"}), 500
+    return Response("Internal error", status=500, mimetype="text/plain")
+
+
 def _session_value() -> str:
     import hmac as _h, hashlib
     return _h.new(AUTH_TOKEN.encode(), b"msra-session", hashlib.sha256).hexdigest()
@@ -146,7 +174,7 @@ def login():
     if not AUTH_TOKEN:
         return redirect("/")
     if request.method == "POST":
-        supplied = request.form.get("token") or (request.get_json(silent=True) or {}).get("token", "")
+        supplied = request.form.get("token") or (_json_obj()).get("token", "")
         if supplied and hmac.compare_digest(str(supplied), AUTH_TOKEN):
             resp = redirect("/")
             resp.set_cookie("msra_session", _session_value(), httponly=True,
@@ -161,27 +189,27 @@ def login():
         'Sign in</button></form>', mimetype="text/html")
 
 
-@app.after_request
-def _security_headers(resp):
-    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
-    resp.headers.setdefault("Referrer-Policy", "same-origin")
-    return resp
-
-
 def _load_dynamic_cfg() -> dict:
+    default = {"mode": "adb", "corellium_url": "https://app.corellium.com",
+               "corellium_token": "", "instance_id": "", "adb_serial": ""}
     if DYNAMIC_CFG_F.exists():
         try:
-            return json.loads(DYNAMIC_CFG_F.read_text())
+            cfg = json.loads(DYNAMIC_CFG_F.read_text())
+            if isinstance(cfg, dict):
+                if cfg.get("mode") not in ("adb", "corellium"):
+                    cfg["mode"] = "adb"
+                return {**default, **cfg}
         except Exception:
             pass
-    return {"mode": "adb", "corellium_url": "https://app.corellium.com",
-            "corellium_token": "", "instance_id": ""}
+    return default
 
 
 def _save_dynamic_cfg(cfg: dict):
-    CUSTOM_DIR.mkdir(parents=True, exist_ok=True)
-    DYNAMIC_CFG_F.write_text(json.dumps(cfg, indent=2))
+    """Atomic write: a crash mid-save must not leave a truncated config behind."""
+    DYNAMIC_CFG_F.parent.mkdir(parents=True, exist_ok=True)
+    tmp = DYNAMIC_CFG_F.with_suffix(DYNAMIC_CFG_F.suffix + f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(cfg, indent=2))
+    os.replace(tmp, DYNAMIC_CFG_F)
 
 
 def _update_job(job_id: str, **kwargs):
@@ -751,9 +779,7 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
                 if zipfile.is_zipfile(str(_src_apk)):
                     with zipfile.ZipFile(str(_src_apk)) as _zf:
                         if "base.apk" in _zf.namelist():
-                            _tmp_base = _job_tmp / "base.apk"
-                            _tmp_base.write_bytes(_zf.read("base.apk"))
-                            _src_apk = _tmp_base
+                            _src_apk = _extract_member(_zf, "base.apk", _job_tmp / "base.apk")
                             _update_job(job_id, progress=21,
                                         message="XAPK bundle detected — extracting base.apk…")
             except Exception:
@@ -1231,7 +1257,7 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
 
 def _scan_dir(scan_id: str) -> Path:
     if not _sec.is_valid_scan_id(scan_id):
-        raise ValueError(f"invalid scan_id: {scan_id!r}")
+        raise InvalidScanId(f"invalid scan_id: {scan_id!r}")
     return _sec.safe_join(REPORTS_FOLDER, scan_id)
 
 
@@ -6359,6 +6385,30 @@ def _build_intelligence_hub() -> str:
 
 # ── Background scan ──────────────────────────────────────────────────────
 
+_MAX_EXTRACT_BYTES = int(os.environ.get("MSRA_MAX_APK_MB", "1024")) * 1024 * 1024
+
+
+def _extract_member(zf: "zipfile.ZipFile", name: str, dest: Path) -> Path:
+    """Stream one zip entry to disk. Refuses entries whose declared size exceeds the cap (a tiny
+    upload can otherwise expand into gigabytes) and enforces the cap while copying."""
+    info = zf.getinfo(name)
+    if info.file_size > _MAX_EXTRACT_BYTES:
+        raise ValueError(f"{name} is too large to extract ({info.file_size // (1024 * 1024)} MB)")
+    written = 0
+    with zf.open(info) as src, open(dest, "wb") as out:
+        while True:
+            chunk = src.read(1024 * 1024)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > _MAX_EXTRACT_BYTES:
+                out.close()
+                dest.unlink(missing_ok=True)
+                raise ValueError(f"{name} exceeds the extraction limit")
+            out.write(chunk)
+    return dest
+
+
 def _unwrap_bundle(apk_path: Path, out_dir: Path) -> Path:
     """If the uploaded file is an APKM/XAPK bundle (a zip containing base.apk),
     extract base.apk and return its path.  Otherwise return apk_path unchanged."""
@@ -6367,9 +6417,7 @@ def _unwrap_bundle(apk_path: Path, out_dir: Path) -> Path:
             return apk_path
         with zipfile.ZipFile(apk_path) as zf:
             if "base.apk" in zf.namelist():
-                extracted = out_dir / "base.apk"
-                extracted.write_bytes(zf.read("base.apk"))
-                return extracted
+                return _extract_member(zf, "base.apk", out_dir / "base.apk")
     except Exception:
         pass
     return apk_path
@@ -6696,12 +6744,19 @@ def api_findings(scan_id: str):
 @app.route("/api/scans/<scan_id>/findings/<int:finding_id>/triage", methods=["PATCH"])
 def api_triage_finding(scan_id: str, finding_id: int):
     """Update triage status for a finding."""
-    body = request.get_json(silent=True) or {}
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "JSON object body required"}), 400
     status = body.get("status", "New")
     note   = body.get("suppression_note", "")
     valid  = {"New", "Confirmed", "False Positive", "Accepted Risk", "Fixed", "In Progress"}
-    if status not in valid:
+    if not isinstance(status, str) or status not in valid:
         return jsonify({"error": f"Invalid status. Valid: {sorted(valid)}"}), 400
+    if not isinstance(note, str):
+        return jsonify({"error": "suppression_note must be a string"}), 400
+    note = note[:2000]
+    if not (_scan_dir(scan_id).exists() or _db.get_scan(scan_id)):
+        return jsonify({"error": "Scan not found"}), 404
     _db.upsert_triage(scan_id, finding_id, status, note)
     _ai_routes.invalidate_feedback()          # analyst decision changes rule statistics
     return jsonify({"ok": True, "scan_id": scan_id, "finding_id": finding_id, "status": status})
@@ -6728,37 +6783,36 @@ def api_finding_snippet(scan_id: str, finding_id: str):
         return jsonify({"error": "finding not found"}), 404
 
     ev        = finding.get("evidence") or {}
-    file_path = ev.get("file") or ""
-    line_num  = int(ev.get("line") or 0)
+    file_path = str(ev.get("file") or "")
+    m_line    = re.match(r"\s*(\d+)", str(ev.get("line") or ""))
+    line_num  = int(m_line.group(1)) if m_line else 0
 
     if not file_path or not line_num:
         return jsonify({"error": "no location info"}), 404
 
-    # Resolve path — always rooted within this scan's decompiled directory
-    scan_d     = _scan_dir(scan_id)
-    decompiled = scan_d / "decompiled"
-    p          = Path(file_path)
+    # Resolve path - always rooted within this scan's decompiled directory, and fail closed when
+    # that directory is gone (pruned scan, or a non-Android scan).
+    decompiled = _scan_dir(scan_id) / "decompiled"
+    if not decompiled.is_dir():
+        return jsonify({"error": "decompiled sources are not available for this scan"}), 404
+    root = decompiled.resolve()
 
-    if not p.exists() or not str(p.resolve()).startswith(str(decompiled.resolve())):
-        # Strip everything up to and including "decompiled/"
-        marker = "decompiled/"
-        idx    = file_path.find(marker)
-        if idx != -1:
-            p = decompiled / file_path[idx + len(marker):]
+    def _inside(path: Path) -> bool:
+        try:
+            path.resolve().relative_to(root)
+            return True
+        except (ValueError, OSError):
+            return False
+
+    p = Path(file_path)
+    if not (p.exists() and _inside(p)):
+        idx = file_path.find("decompiled/")
+        p = decompiled / file_path[idx + len("decompiled/"):] if idx != -1 else decompiled / "__missing__"
         if not p.exists():
-            # Last resort: search for filename in decompiled tree
-            fname = Path(file_path).name
-            if decompiled.exists():
-                matches = list(decompiled.rglob(fname))
-                if matches:
-                    p = matches[0]
-
-    # Safety: ensure final path is still inside the scan's decompiled dir
-    try:
-        resolved = p.resolve()
-        if decompiled.exists() and not str(resolved).startswith(str(decompiled.resolve())):
-            return jsonify({"error": "access denied"}), 403
-    except Exception:
+            matches = list(decompiled.rglob(Path(file_path).name)) if Path(file_path).name else []
+            if matches:
+                p = matches[0]
+    if p.exists() and not _inside(p):
         return jsonify({"error": "access denied"}), 403
 
     if not p.exists():
@@ -7194,7 +7248,7 @@ def api_queue_status():
 @app.route("/api/test-ai", methods=["POST"])
 def api_test_ai():
     """Quick smoke-test of the configured provider (kept for the existing key dialog)."""
-    data   = request.get_json(force=True, silent=True) or {}
+    data   = _json_obj(force=True)
     client = _get_ai_client()
     key    = data.get("api_key") or None
     if not (client.provider.configured or key):
@@ -7209,7 +7263,7 @@ def api_test_ai():
 
 @app.route("/api/generate-poc", methods=["POST"])
 def generate_poc():
-    data    = request.get_json(force=True, silent=True) or {}
+    data    = _json_obj(force=True)
     api_key = data.get("api_key") or request.headers.get("X-API-Key") or None
     if not (api_key or _get_ai_client().provider.configured):
         return jsonify({"error": "No AI provider configured. Set ANTHROPIC_API_KEY (or an LLM gateway), "
@@ -7331,9 +7385,9 @@ def _parse_poc_files(raw: str) -> list:
 def download_poc(scan_id: str):
     if not _rate_limit(request.remote_addr or "unknown", max_per_minute=30):
         return jsonify({"error": "Too many requests — please wait a minute"}), 429
-    data  = request.get_json(force=True, silent=True) or {}
+    data  = _json_obj(force=True)
     files = data.get("files", [])
-    if not files:
+    if not isinstance(files, list) or not files:
         return jsonify({"error": "No files"}), 400
     buf = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
     buf_path = buf.name
@@ -7374,14 +7428,17 @@ def api_rules_stats():
 @app.route("/api/rules/<rule_id>/toggle", methods=["PATCH"])
 def api_toggle_rule(rule_id: str):
     """Toggle a rule's enabled state."""
-    result = rules_api.toggle_rule(rule_id)
+    try:
+        result = rules_api.toggle_rule(rule_id)
+    except ValueError:
+        return jsonify({"error": "Rule not found"}), 404
     return jsonify(result)
 
 
 @app.route("/api/rules", methods=["POST"])
 def api_create_rule():
     """Create a new custom rule."""
-    data = request.get_json(force=True, silent=True) or {}
+    data = _json_obj(force=True)
     try:
         rule = rules_api.create_custom_rule(data)
         return jsonify(rule), 201
@@ -7394,8 +7451,11 @@ def api_create_rule():
 @app.route("/api/rules/<rule_id>", methods=["PUT"])
 def api_update_rule(rule_id: str):
     """Update a custom rule."""
-    data   = request.get_json(force=True, silent=True) or {}
-    result = rules_api.update_custom_rule(rule_id, data)
+    data   = _json_obj(force=True)
+    try:
+        result = rules_api.update_custom_rule(rule_id, data)
+    except (ValueError, TypeError) as e:
+        return jsonify({"error": str(e)}), 400
     if result is None:
         return jsonify({"error": "Rule not found or not a custom rule"}), 404
     return jsonify(result)
@@ -7422,14 +7482,30 @@ def api_dyn_cfg_get():
 
 @app.route("/api/dynamic/config", methods=["POST"])
 def api_dyn_cfg_set():
-    data = request.get_json(force=True, silent=True) or {}
+    data = _json_obj(force=True)
     cfg  = _load_dynamic_cfg()
-    for k in ("mode", "adb_serial", "corellium_url", "instance_id"):
-        if k in data:
-            cfg[k] = data[k]
+    if "mode" in data:
+        if data["mode"] not in ("adb", "corellium"):
+            return jsonify({"error": "mode must be 'adb' or 'corellium'"}), 400
+        cfg["mode"] = data["mode"]
+    if "adb_serial" in data:
+        serial = data["adb_serial"]
+        if not isinstance(serial, str) or not re.fullmatch(r"[A-Za-z0-9_.:\-]{0,100}", serial):
+            return jsonify({"error": "adb_serial contains invalid characters"}), 400
+        cfg["adb_serial"] = serial
+    if "instance_id" in data:
+        iid = data["instance_id"]
+        if not isinstance(iid, str) or not re.fullmatch(r"[A-Za-z0-9_.:\-]{0,200}", iid):
+            return jsonify({"error": "instance_id contains invalid characters"}), 400
+        cfg["instance_id"] = iid
+    if "corellium_url" in data:
+        try:
+            cfg["corellium_url"] = validate_corellium_url(data["corellium_url"])
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
     # Only overwrite token if a non-masked value is provided
     token = data.get("corellium_token", "")
-    if token and not set(token).issubset({"•"}):
+    if isinstance(token, str) and token and not set(token).issubset({"\u2022"}):
         cfg["corellium_token"] = token
     _save_dynamic_cfg(cfg)
     return jsonify({"ok": True})
@@ -7460,13 +7536,13 @@ def api_dyn_adb_devices():
 
 @app.route("/api/dynamic/corellium-test", methods=["POST"])
 def api_dyn_corellium_test():
-    data  = request.get_json(force=True, silent=True) or {}
-    url   = (data.get("url") or "https://app.corellium.com").strip()
-    token = (data.get("token") or "").strip()
+    data  = _json_obj(force=True)
+    url   = (data.get("url") if isinstance(data.get("url"), str) and data.get("url") else "https://app.corellium.com").strip()
+    token = (data.get("token") or "").strip() if isinstance(data.get("token"), str) else ""
     if not token:
         return jsonify({"ok": False, "error": "Token required"}), 400
     try:
-        client = CorelliumClient(token, url)
+        client = CorelliumClient(token, validate_corellium_url(url))
         user   = client.check_auth()
         return jsonify({"ok": True, "user": user.get("name") or user.get("label") or "authenticated"})
     except Exception as e:
@@ -7475,13 +7551,13 @@ def api_dyn_corellium_test():
 
 @app.route("/api/dynamic/corellium-instances", methods=["POST"])
 def api_dyn_corellium_instances():
-    data  = request.get_json(force=True, silent=True) or {}
-    url   = (data.get("url") or "https://app.corellium.com").strip()
-    token = (data.get("token") or "").strip()
+    data  = _json_obj(force=True)
+    url   = (data.get("url") if isinstance(data.get("url"), str) and data.get("url") else "https://app.corellium.com").strip()
+    token = (data.get("token") or "").strip() if isinstance(data.get("token"), str) else ""
     if not token:
         return jsonify({"error": "Token required"}), 400
     try:
-        client    = CorelliumClient(token, url)
+        client    = CorelliumClient(token, validate_corellium_url(url))
         instances = client.list_instances()
         return jsonify({"instances": [i.to_dict() for i in instances]})
     except Exception as e:
@@ -7490,7 +7566,7 @@ def api_dyn_corellium_instances():
 
 @app.route("/api/dynamic/verify", methods=["POST"])
 def api_dyn_start_verify():
-    data        = request.get_json(force=True, silent=True) or {}
+    data        = _json_obj(force=True)
     scan_id     = data.get("scan_id", "")
     try:
         finding_idx = int(data.get("finding_index", 0))
@@ -7557,7 +7633,7 @@ def api_intel_extract():
         return jsonify({"error": "No AI provider configured. Set ANTHROPIC_API_KEY (or an LLM gateway) "
                                  "in the environment to use AI extraction."}), 400
 
-    data = request.get_json(force=True, silent=True) or {}
+    data = _json_obj(force=True)
     url  = (data.get("url") or "").strip()
     if not url or not url.startswith("http"):
         return jsonify({"error": "A valid http/https URL is required"}), 400
@@ -7819,7 +7895,7 @@ def api_intel_feed_sync():
     if not _get_ai_client().provider.configured:
         return jsonify({"error": "No AI provider configured (set ANTHROPIC_API_KEY or an LLM gateway)"}), 400
 
-    data    = request.get_json(force=True, silent=True) or {}
+    data    = _json_obj(force=True)
     feed_id = (data.get("feed") or "").strip()
     if feed_id not in _FEED_META:
         return jsonify({"error": f"Unknown feed: {feed_id}"}), 400
@@ -7993,6 +8069,12 @@ def api_delete_scan(scan_id: str):
                      "Wait for it to finish or reach an error state first."
         }), 409
 
+    busy = _ai_routes.active_jobs(scan_id) + [
+        f"dynamic job {j['job_id']}" for j in _db.list_jobs(limit=500)
+        if j.get("scan_id") == scan_id and j.get("status") in ("queued", "running")]
+    if busy:
+        return jsonify({"error": "Cannot delete a scan with active jobs: " + ", ".join(busy[:3])}), 409
+
     shutil.rmtree(scan_dir, ignore_errors=True)
     _db.delete_scan(scan_id)
     return jsonify({"success": True})
@@ -8016,21 +8098,23 @@ _ai_routes.register(
     scan_dir=_scan_dir,
 )
 
-# ── Reset stale dynamic jobs left in "running" state from a previous session ──
-try:
-    import sqlite3 as _sqlite3
-    with _sqlite3.connect(str(_db.DB_PATH)) as _conn:
-        _conn.execute(
-            "UPDATE dynamic_jobs SET status='error', message='Interrupted by server restart' "
-            "WHERE status IN ('running','queued')"
-        )
-        _conn.execute(
-            "UPDATE scans SET status='error', message='Interrupted by server restart' "
-            "WHERE status IN ('queued','decompiling','scanning','reporting')"
-        )
-        _conn.commit()
-except Exception:
-    pass
+# ── Reset stale jobs left "running" by a previous process ─────────────────
+def _reset_stale_jobs() -> None:
+    """Called only when this process is the server (see __main__), never at import: a second
+    importer (reloader parent, extra worker, a CLI) must not kill another process's live jobs."""
+    try:
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(str(_db.DB_PATH))
+        try:
+            conn.execute("UPDATE dynamic_jobs SET status='error', message='Interrupted by server restart' "
+                         "WHERE status IN ('running','queued')")
+            conn.execute("UPDATE scans SET status='error', message='Interrupted by server restart' "
+                         "WHERE status IN ('queued','decompiling','scanning','reporting')")
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        _log.exception("could not reset stale jobs")
 
 
 def _active_scan_ids():
@@ -8067,4 +8151,7 @@ if __name__ == "__main__":
         print("[!] Binding to a non-loopback address without MSRA_AUTH_TOKEN: "
               "anyone on the network can upload files and drive attached devices.")
     print(f"[+] MSRA dashboard → http://localhost:{args.port}")
+    # With the debug reloader the child process re-runs this block; only reset once, in the real server.
+    if not args.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        _reset_stale_jobs()
     app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)
