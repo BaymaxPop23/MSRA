@@ -243,3 +243,94 @@ def test_activity_component_type_is_not_mangled(tmp_path):
     assert flows and flows[0].source.component_type == "activity"
     assert "Activitie " not in flows[0].title and "Activity" in flows[0].title
     assert flows[0].poc_command.startswith("adb shell am start ")
+
+
+# ── review fixes: method attribution, de-duplication, append/+= propagation ──
+def _one(tmp_path, name, body, activity=True):
+    src = tmp_path / "sources" / "com" / "t"
+    src.mkdir(parents=True, exist_ok=True)
+    (src / f"{name}.java").write_text(body)
+    m = {"_package": "com.t", "activities": [{"name": f"com.t.{name}", "exported": activity}]}
+    return TaintEngine(str(tmp_path), m).analyze()
+
+
+def test_methods_by_line_does_not_leak_into_field_initializers():
+    from msra.analysis.taint_engine import _methods_by_line
+    src = ["public class A {",
+           "    void first() {",
+           "        run();",
+           "    }",
+           "    static class Inner {",
+           '        static final File F = new File(base(), "x");',
+           "        void second() { go(); }",
+           "    }",
+           "}"]
+    m = _methods_by_line(src)
+    assert m[2] == "first"
+    assert m[5] == "unknown"                    # field initializer: not attributed to first()
+    assert m[6] == "second"
+
+
+def test_two_distinct_sinks_in_one_method_are_two_flows(tmp_path):
+    body = """package com.t;
+import android.app.Activity;
+import android.os.Bundle;
+import android.webkit.WebView;
+public class Two extends Activity {
+    WebView a; WebView b;
+    protected void onCreate(Bundle s) {
+        String u = getIntent().getStringExtra("u");
+        a.loadUrl(u);
+        b.loadUrl(u);
+    }
+}
+"""
+    flows = [f for f in _one(tmp_path, "Two", body) if f.sink.sink_type == "webview"]
+    assert sorted(f.sink.line_number for f in flows) == [9, 10]
+
+
+def test_stringbuilder_append_and_plus_equals_propagate_taint(tmp_path):
+    body = """package com.t;
+import android.app.Activity;
+import android.os.Bundle;
+import android.webkit.WebView;
+public class Sb extends Activity {
+    WebView w;
+    protected void onCreate(Bundle s) {
+        String u = getIntent().getStringExtra("u");
+        StringBuilder sb = new StringBuilder("https://");
+        sb.append(u);
+        String url = "https://x/";
+        url += u;
+        w.loadUrl(sb.toString());
+        w.loadUrl(url);
+    }
+}
+"""
+    flows = [f for f in _one(tmp_path, "Sb", body) if f.sink.sink_type == "webview"]
+    assert {f.sink.line_number for f in flows} == {13, 14}
+    assert all(f.data_flow == "intra-method" for f in flows), [f.data_flow for f in flows]
+
+
+def test_unproven_flows_are_capped_but_proven_ones_keep_their_severity(tmp_path):
+    from msra.analysis.taint_engine import to_finding
+    flows = [f for f in _flows(tmp_path)]
+    assert flows
+    for fl in flows:
+        f = to_finding(fl)
+        order = ("Info", "Low", "Medium", "High", "Critical")
+        if fl.data_flow in ("intra-method", "call-chain-verified"):
+            assert f.severity == fl.severity
+        elif fl.data_flow == "unverified-same-method":
+            assert f.severity == "Info" and f.extra.get("original_severity") in (None, fl.severity)
+        elif fl.data_flow == "call-chain" and fl.sink.sink_type not in ("sql", "webview", "exec"):
+            assert order.index(f.severity) <= order.index("Low")
+
+
+def test_method_attribution_is_fast_on_hostile_lines():
+    import time
+    from msra.analysis.taint_engine import _methods_by_line
+    lines = ["a " * 50000 + "(", "public " + "x<" * 3000 + " f(" + "(" * 3000, "void m(" + "a," * 20000 + ") {", "}"]
+    t0 = time.time()
+    out = _methods_by_line(lines * 5)
+    assert len(out) == 20 and time.time() - t0 < 3

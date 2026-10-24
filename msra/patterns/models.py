@@ -154,13 +154,23 @@ class RegexDetection:
             if "s" in self.flags:
                 re_flags |= re.DOTALL
             self._compiled = (TimedRegex(self.pattern, re_flags) if self.untrusted
-                              else re.compile(self.pattern, re_flags))
+                              else re.compile(bound_negated_stars(self.pattern), re_flags))
         return self._compiled
 
     @property
     def compiled(self) -> RegexPattern:
         """Get compiled regex pattern."""
         return self.compile()
+
+
+_NEG_STAR = re.compile(r"(\[\^(?:\\.|[^\]\\])+\])\*(\??)")
+
+
+def bound_negated_stars(pattern: str, limit: int = 1500) -> str:
+    """`[^}]*` -> `[^}]{0,1500}` (also lazy form). Shipped rules chain several of these
+    (`a[^}]*b[^}]*c`), which backtracks cubically on a hostile file with no `}`; a bound keeps the
+    worst case finite without changing what a real method-sized gap matches."""
+    return _NEG_STAR.sub(lambda m: f"{m.group(1)}{{0,{limit}}}{m.group(2)}", pattern)
 
 
 @dataclass

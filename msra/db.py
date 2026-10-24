@@ -246,10 +246,14 @@ def upsert_job(job_id: str, **kwargs: Any) -> None:
 
     with _lock:
         with _conn() as c:
-            c.execute(
-                "INSERT OR IGNORE INTO dynamic_jobs (job_id, created_at, updated_at) VALUES (?,?,?)",
-                (job_id, now, now),
-            )
+            exists = c.execute("SELECT 1 FROM dynamic_jobs WHERE job_id = ?", (job_id,)).fetchone()
+            if not exists:
+                # Only a creating call (one that names its scan) may insert. A late update from a
+                # worker whose scan/job was deleted must not resurrect an orphan row.
+                if not kwargs.get("scan_id"):
+                    return
+                c.execute("INSERT OR IGNORE INTO dynamic_jobs (job_id, created_at, updated_at) VALUES (?,?,?)",
+                          (job_id, now, now))
             set_clause = ", ".join(f"{col} = ?" for col in cols)
             c.execute(
                 f"UPDATE dynamic_jobs SET {set_clause} WHERE job_id = ?",

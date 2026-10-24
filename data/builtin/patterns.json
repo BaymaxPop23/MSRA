@@ -256,7 +256,7 @@
         "type": "regex",
         "patterns": [
           {
-            "pattern": "Log\\.(?:d|i|v|w|e)\\s*\\([^)]*(?:password|token|secret|bearer|sessionId|accessToken|refreshToken|apiKey|privateKey)",
+            "pattern": "Log\\.(?:d|i|v|w|e)\\s*\\([^;]{0,300}?[+,]\\s*[\\w.]{0,40}(?:password|passwd|secret|token|bearer|sessionId|apiKey|privateKey)[\\w.]{0,40}\\s*[)+,]",
             "flags": "i",
             "file_types": [
               ".java",
@@ -264,9 +264,6 @@
             ],
             "context": {
               "must_not_contain": [
-                "//",
-                " * ",
-                "/*",
                 "logger.isDebug",
                 "@Test",
                 "assertEquals",
@@ -276,7 +273,7 @@
             }
           },
           {
-            "pattern": "Timber\\.(?:d|i|v|w|e)\\s*\\([^)]*(?:password|token|secret|bearer|sessionId|accessToken|refreshToken)",
+            "pattern": "Timber\\.(?:d|i|v|w|e)\\s*\\([^;]{0,300}?[+,]\\s*[\\w.]{0,40}(?:password|passwd|secret|token|bearer|sessionId|apiKey|privateKey)[\\w.]{0,40}\\s*[)+,]",
             "flags": "i",
             "file_types": [
               ".java",
@@ -284,9 +281,6 @@
             ],
             "context": {
               "must_not_contain": [
-                "//",
-                " * ",
-                "/*",
                 "logger.isDebug",
                 "@Test",
                 "assertEquals",
@@ -649,7 +643,7 @@
         "type": "regex",
         "patterns": [
           {
-            "pattern": "new\\s+Random\\s*\\([^)]*\\)[^;]*(?:token|secret|key|iv|nonce|salt|seed)",
+            "pattern": "new\\s+Random\\s*\\([^)]*\\)[^;]*(?:token|secret|key|\\biv\\b|nonce|salt|seed)",
             "flags": "i",
             "file_types": [
               ".java",
@@ -661,8 +655,6 @@
                 "displayColor",
                 "randomId",
                 "testId",
-                "//",
-                " * ",
                 "@Test",
                 "animation"
               ],
@@ -670,7 +662,7 @@
             }
           },
           {
-            "pattern": "(?:token|secret|key|iv|nonce|salt)\\s*=.*new\\s+Random",
+            "pattern": "(?:token|secret|key|\\biv\\b|nonce|salt)\\s*=.*new\\s+Random",
             "flags": "i",
             "file_types": [
               ".java",
@@ -682,8 +674,6 @@
                 "displayColor",
                 "randomId",
                 "testId",
-                "//",
-                " * ",
                 "@Test",
                 "animation"
               ],
@@ -1187,7 +1177,7 @@
         "type": "regex",
         "patterns": [
           {
-            "pattern": "onReceivedSslError[^}]*handler\\.proceed\\s*\\(\\s*\\)",
+            "pattern": "onReceivedSslError[\\s\\S]{0,400}?handler\\.proceed\\s*\\(\\s*\\)",
             "flags": "ims",
             "file_types": [
               ".java",
@@ -1235,7 +1225,7 @@
             ]
           },
           {
-            "pattern": "checkServerTrusted[^}]*\\{[^}]*//|checkServerTrusted[^}]*\\{\\s*return",
+            "pattern": "checkServerTrusted[^}]*\\{\\s*//[^\\n]*\\n\\s*\\}|checkServerTrusted[^}]*\\{\\s*return\\s*;",
             "flags": "ims",
             "file_types": [
               ".java",
@@ -1284,7 +1274,7 @@
             ]
           },
           {
-            "pattern": "HostnameVerifier[^}]*verify[^}]*return\\s+true",
+            "pattern": "HostnameVerifier\\b[^}]{0,300}?\\bverify\\s*\\([^)]*\\)[^}]{0,200}?return\\s+true",
             "flags": "ims",
             "file_types": [
               ".java",
@@ -1373,7 +1363,7 @@
         "type": "regex",
         "patterns": [
           {
-            "pattern": "onReceivedSslError[^}]*handler\\.proceed\\s*\\(",
+            "pattern": "onReceivedSslError[\\s\\S]{0,400}?handler\\.proceed\\s*\\(",
             "flags": "ims",
             "file_types": [
               ".java",
@@ -1855,9 +1845,7 @@
                 "encrypt",
                 "Encrypted",
                 "cipher",
-                "AES",
-                "//",
-                " * "
+                "AES"
               ],
               "within_lines": 10
             }
@@ -1876,9 +1864,7 @@
                 "encrypt",
                 "Encrypted",
                 "cipher",
-                "AES",
-                "//",
-                " * "
+                "AES"
               ],
               "within_lines": 10
             }
@@ -1957,7 +1943,7 @@
         "type": "regex",
         "patterns": [
           {
-            "pattern": "(?:private|public|protected|static|final|String|val|var)\\s+(?:static\\s+)?(?:final\\s+)?\\w*(?:password|passwd|pwd|secret|api_?key|apikey|auth_?token|access_?token|private_?key)\\w*\\s*=\\s*[\"'][^\"']{8,}[\"']",
+            "pattern": "(?:private|public|protected|static|final|String|val|var)\\s+(?:static\\s+)?(?:final\\s+)?\\w*(?:password|passwd|pwd|secret|api_?key|apikey|auth_?token|access_?token|private_?key)\\w*\\s*=\\s*[\"'](?![A-Z][A-Z0-9_]*[\"'])[^\"']{8,}[\"']",
             "flags": "i",
             "file_types": [
               ".java",
@@ -1975,8 +1961,7 @@
                 "YOUR_",
                 "REPLACE",
                 "BuildConfig",
-                "test",
-                "Test"
+                "@Test"
               ],
               "within_lines": 0
             }
@@ -2004,7 +1989,7 @@
             }
           },
           {
-            "pattern": "<string\\s+name\\s*=\\s*[\"'](?:api_?key|password|secret|auth_?token|access_?token)[\"'][^>]*>\\s*[^<]{8,}\\s*</string>",
+            "pattern": "<string\\s+name\\s*=\\s*[\"'](?:api_?key|password|secret|auth_?token|access_?token)[\"'][^>]*>\\s*(?![A-Za-z ]+</string>)[^<]{8,}\\s*</string>",
             "flags": "i",
             "file_types": [
               ".xml"
@@ -2639,8 +2624,6 @@
             "pattern": "ZENDESK.*(?:KEY|SECRET|TOKEN)|zendeskKey|zendeskSecret",
             "flags": "i",
             "file_types": [
-              ".java",
-              ".kt",
               ".js"
             ]
           },
@@ -2648,8 +2631,6 @@
             "pattern": "(?:API_KEY|SECRET_KEY|PRIVATE_KEY)\\s*[=:]\\s*[\"'][A-Za-z0-9+/=_-]{20,}[\"']",
             "flags": "i",
             "file_types": [
-              ".java",
-              ".kt",
               ".js"
             ]
           }

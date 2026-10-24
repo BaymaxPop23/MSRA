@@ -39,7 +39,7 @@ from msra.scanner import Scanner
 from msra.report import generate_html_report
 from msra.utils import iter_source_files
 from msra import rules_api
-from msra.corellium import CorelliumClient
+from msra.corellium import validate_corellium_url, CorelliumClient
 import msra.db as _db
 from msra import security as _sec
 from msra.dynamic import adb_util as _adb_util
@@ -55,8 +55,8 @@ UPLOAD_FOLDER.mkdir(exist_ok=True)
 REPORTS_FOLDER.mkdir(exist_ok=True)
 
 DATA_DIR        = Path(__file__).parent / "data"
-CUSTOM_DIR      = DATA_DIR / "custom"
-DYNAMIC_CFG_F   = CUSTOM_DIR / "dynamic_config.json"
+CUSTOM_DIR      = Path(os.environ.get("MSRA_CUSTOM_DIR") or (DATA_DIR / "custom"))
+DYNAMIC_CFG_F   = Path(os.environ.get("MSRA_DYNAMIC_CONFIG") or (CUSTOM_DIR / "dynamic_config.json"))
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 # Models are chosen per feature in AI Settings (msra/ai/settings.py); the provider
@@ -135,6 +135,47 @@ def _security_headers(resp):
     return resp
 
 
+def _json_obj(force: bool = False) -> dict:
+    """Request JSON body as a dict; anything else (list, string, bad JSON) becomes {}."""
+    data = request.get_json(force=force, silent=True)
+    return data if isinstance(data, dict) else {}
+
+
+class InvalidScanId(ValueError):
+    pass
+
+
+@app.errorhandler(InvalidScanId)
+def _bad_scan_id(exc):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Invalid scan id"}), 400
+    return Response("Invalid scan id", status=400, mimetype="text/plain")
+
+
+@app.errorhandler(404)
+def _not_found(exc):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Not found"}), 404
+    return Response(
+        '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<title>Not found - MSRA</title><body style="font-family:system-ui,sans-serif;background:#0d1117;color:#e6edf3;'
+        'display:grid;place-items:center;min-height:100vh;margin:0"><main style="text-align:center;padding:24px">'
+        '<h1 style="margin:0 0 8px">Not found</h1><p style="color:#8b949e">That scan or page does not exist '
+        '(it may have been deleted).</p><a href="/" style="color:#58a6ff">Back to the dashboard</a></main></body>',
+        status=404, mimetype="text/html")
+
+
+@app.errorhandler(Exception)
+def _unhandled(exc):
+    from werkzeug.exceptions import HTTPException
+    if isinstance(exc, HTTPException):
+        return exc
+    _log.exception("unhandled error on %s %s", request.method, request.path)
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Internal error"}), 500
+    return Response("Internal error", status=500, mimetype="text/plain")
+
+
 def _session_value() -> str:
     import hmac as _h, hashlib
     return _h.new(AUTH_TOKEN.encode(), b"msra-session", hashlib.sha256).hexdigest()
@@ -146,7 +187,7 @@ def login():
     if not AUTH_TOKEN:
         return redirect("/")
     if request.method == "POST":
-        supplied = request.form.get("token") or (request.get_json(silent=True) or {}).get("token", "")
+        supplied = request.form.get("token") or (_json_obj()).get("token", "")
         if supplied and hmac.compare_digest(str(supplied), AUTH_TOKEN):
             resp = redirect("/")
             resp.set_cookie("msra_session", _session_value(), httponly=True,
@@ -161,27 +202,27 @@ def login():
         'Sign in</button></form>', mimetype="text/html")
 
 
-@app.after_request
-def _security_headers(resp):
-    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
-    resp.headers.setdefault("Referrer-Policy", "same-origin")
-    return resp
-
-
 def _load_dynamic_cfg() -> dict:
+    default = {"mode": "adb", "corellium_url": "https://app.corellium.com",
+               "corellium_token": "", "instance_id": "", "adb_serial": ""}
     if DYNAMIC_CFG_F.exists():
         try:
-            return json.loads(DYNAMIC_CFG_F.read_text())
+            cfg = json.loads(DYNAMIC_CFG_F.read_text())
+            if isinstance(cfg, dict):
+                if cfg.get("mode") not in ("adb", "corellium"):
+                    cfg["mode"] = "adb"
+                return {**default, **cfg}
         except Exception:
             pass
-    return {"mode": "adb", "corellium_url": "https://app.corellium.com",
-            "corellium_token": "", "instance_id": ""}
+    return default
 
 
 def _save_dynamic_cfg(cfg: dict):
-    CUSTOM_DIR.mkdir(parents=True, exist_ok=True)
-    DYNAMIC_CFG_F.write_text(json.dumps(cfg, indent=2))
+    """Atomic write: a crash mid-save must not leave a truncated config behind."""
+    DYNAMIC_CFG_F.parent.mkdir(parents=True, exist_ok=True)
+    tmp = DYNAMIC_CFG_F.with_suffix(DYNAMIC_CFG_F.suffix + f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(cfg, indent=2))
+    os.replace(tmp, DYNAMIC_CFG_F)
 
 
 def _update_job(job_id: str, **kwargs):
@@ -751,9 +792,7 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
                 if zipfile.is_zipfile(str(_src_apk)):
                     with zipfile.ZipFile(str(_src_apk)) as _zf:
                         if "base.apk" in _zf.namelist():
-                            _tmp_base = _job_tmp / "base.apk"
-                            _tmp_base.write_bytes(_zf.read("base.apk"))
-                            _src_apk = _tmp_base
+                            _src_apk = _extract_member(_zf, "base.apk", _job_tmp / "base.apk")
                             _update_job(job_id, progress=21,
                                         message="XAPK bundle detected — extracting base.apk…")
             except Exception:
@@ -1076,6 +1115,8 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
                     _probe_results = _cp_future.result(timeout=30)
                 except concurrent.futures.TimeoutError:
                     _probe_results = []
+                    _prober.cancel()          # stop issuing adb commands before the next job takes the device
+                    concurrent.futures.wait([_cp_future], timeout=10)
                     extra_evidence += "\nComponentProber: timed out (30s) — skipped.\n"
                 _update_job(job_id, progress=64, message="Component probing done, collecting evidence…")
                 _vuln_probes = [r for r in _probe_results if r.is_vulnerable]
@@ -1231,7 +1272,7 @@ def _dynamic_verify_pipeline(job_id: str, scan_id: str, finding_idx: int,
 
 def _scan_dir(scan_id: str) -> Path:
     if not _sec.is_valid_scan_id(scan_id):
-        raise ValueError(f"invalid scan_id: {scan_id!r}")
+        raise InvalidScanId(f"invalid scan_id: {scan_id!r}")
     return _sec.safe_join(REPORTS_FOLDER, scan_id)
 
 
@@ -2622,7 +2663,7 @@ code,pre{{font-family:'JetBrains Mono',monospace}}
 
 /* ── Phone (≤480px) ── */
 @media (max-width:480px){{
-  .topbar{{padding:0 10px;height:48px;gap:6px}}
+  .topbar{{padding:6px 10px;height:auto;min-height:48px;gap:6px;flex-wrap:wrap}}
   .topbar-pkg{{display:none}}
   .topbar-meta{{gap:6px}}
   .topbar-meta>span{{display:none}}
@@ -2640,9 +2681,9 @@ code,pre{{font-family:'JetBrains Mono',monospace}}
   /* Findings list */
   .findings-list{{padding:8px 10px}}
   .finding-row{{padding:10px 12px;border-radius:var(--radius-sm)}}
-  .fr-top{{gap:6px}}
+  .fr-top{{gap:6px;flex-wrap:wrap}}
   .fr-sev{{width:52px;font-size:10px}}
-  .fr-title{{font-size:12px}}
+  .fr-title{{font-size:12px;flex:1 1 60%;min-width:0}}
   .fr-desc{{font-size:12px}}
 
   /* Drawer */
@@ -2914,13 +2955,13 @@ code,pre{{font-family:'JetBrains Mono',monospace}}
           <div class="dyn-config-row">
             <div class="form-group">
               <label class="form-label">ADB Device Serial <span style="color:var(--text3)">(leave blank for default)</span></label>
-              <input class="form-input" id="dynAdbSerial" placeholder="e.g. emulator-5554 or 192.168.1.5:5555">
+              <input class="form-input" id="dynAdbSerial" aria-label="ADB device serial" placeholder="e.g. emulator-5554 or 192.168.1.5:5555">
             </div>
             <div class="form-group" style="display:flex;align-items:flex-end;gap:8px">
               <button class="btn btn-sm" onclick="refreshAdbDevices()" style="margin-bottom:0">
                 <i class="fa-solid fa-rotate"></i> Refresh
               </button>
-              <select class="form-select" id="adbDeviceList" onchange="document.getElementById('dynAdbSerial').value=this.value" style="flex:1"></select>
+              <select class="form-select" id="adbDeviceList" aria-label="Connected ADB devices" onchange="document.getElementById('dynAdbSerial').value=this.value" style="flex:1"></select>
             </div>
           </div>
         </div>
@@ -2938,7 +2979,7 @@ code,pre{{font-family:'JetBrains Mono',monospace}}
             <div class="form-group dyn-config-full" style="display:flex;align-items:flex-end;gap:8px">
               <div style="flex:1">
                 <label class="form-label">Instance</label>
-                <select class="form-select" id="dynInstanceList"></select>
+                <select class="form-select" id="dynInstanceList" aria-label="Corellium instance"></select>
               </div>
               <button class="btn btn-sm" onclick="fetchCorelliumInstances()"><i class="fa-solid fa-rotate"></i> Fetch Instances</button>
               <button class="btn btn-primary btn-sm" onclick="testCorelliumConnection()"><i class="fa-solid fa-plug"></i> Test</button>
@@ -4655,7 +4696,10 @@ function loadFindingsTab() {{
   if (allChip) allChip.textContent = 'All (' + _allFindings.length + ')';
   ['Critical','High','Medium','Low','Info'].forEach(sev => {{
     const chip = document.querySelector(`.f-chip[data-sev="${{sev}}"]`);
-    if (chip) chip.textContent = sevCounts[sev] ? sev + ' (' + sevCounts[sev] + ')' : sev;
+    if (chip) {{
+      chip.textContent = sevCounts[sev] ? sev + ' (' + sevCounts[sev] + ')' : sev;
+      chip.style.display = sevCounts[sev] ? '' : 'none';      // a chip that can only return 0 is noise
+    }}
   }});
 
   // Populate category dropdown
@@ -4705,8 +4749,15 @@ function applyFilters() {{
   if (el) el.innerHTML = '';
   renderNextPage();
 
+  updateResultCount();
+}}
+
+function updateResultCount() {{
   const cnt = document.getElementById('fResultCount');
-  if (cnt) cnt.textContent = _filteredFindings.length + ' finding' + (_filteredFindings.length!==1?'s':'');
+  if (!cnt) return;
+  const out = _allFindings.filter(f => ['False Positive','Accepted Risk','Fixed'].includes(f.triage_status)).length;
+  cnt.textContent = _filteredFindings.length + ' finding' + (_filteredFindings.length!==1?'s':'')
+    + (out ? ' · ' + out + ' triaged out (false positive / accepted / fixed)' : '');
 }}
 
 function renderNextPage() {{
@@ -4828,7 +4879,9 @@ function escHtml(s) {{
 let _drawerFinding = null;
 let _drawerScanId  = null;
 
+let _drawerOpener = null;
 function openDrawer(f) {{
+  _drawerOpener = document.activeElement;
   _drawerFinding = f;
   _drawerScanId = _getScanId() || '';
 
@@ -4892,7 +4945,7 @@ function openDrawer(f) {{
     const stepsHtml = steps.length
       ? `<div class="expl-block">
            <div class="expl-sub"><i class="fa-solid fa-list-ol" style="color:var(--accent)"></i> Attack Steps</div>
-           <ol class="expl-list">${{steps.map(s=>`<li>${{escHtml(s)}}</li>`).join('')}}</ol>
+           <ol class="expl-list">${{steps.map(s=>`<li>${{escHtml(String(s).replace(/^\\s*\\d+[.)]\\s*/, ''))}}</li>`).join('')}}</ol>
          </div>` : '';
 
     const impactHtml = impacts.length
@@ -4906,7 +4959,7 @@ function openDrawer(f) {{
            <div class="expl-sub" style="display:flex;align-items:center;justify-content:space-between">
              <span><i class="fa-solid fa-terminal" style="color:var(--accent)"></i> ADB Commands</span>
              <button class="btn btn-sm" style="font-size:10px;padding:2px 7px"
-               onclick="navigator.clipboard.writeText(${{JSON.stringify(adbCmds.join('\\n'))}}).then(()=>showToast('Copied'))">
+               aria-label="Copy ADB commands" onclick="copyPre(this)">
                <i class="fa-solid fa-copy"></i>
              </button>
            </div>
@@ -4918,7 +4971,7 @@ function openDrawer(f) {{
            <div class="expl-sub" style="display:flex;align-items:center;justify-content:space-between">
              <span><i class="fa-solid fa-virus" style="color:var(--critical)"></i> Malicious App Code</span>
              <button class="btn btn-sm" style="font-size:10px;padding:2px 7px"
-               onclick="navigator.clipboard.writeText(${{JSON.stringify(malCode)}}).then(()=>showToast('Copied'))">
+               aria-label="Copy code" onclick="copyPre(this)">
                <i class="fa-solid fa-copy"></i>
              </button>
            </div>
@@ -4955,7 +5008,7 @@ function openDrawer(f) {{
             padding:2px 10px;border-radius:4px;font-size:11px;font-weight:700">${{sev}}</span>
       <span style="font-size:14px;font-weight:700;color:var(--text);flex:1;min-width:0;
             overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${{escHtml(f.title||'')}}">${{escHtml(f.title||'')}}</span>
-      <button class="drawer-close" onclick="closeDrawer()"><i class="fa-solid fa-xmark"></i></button>
+      <button class="drawer-close" onclick="closeDrawer()" aria-label="Close finding details"><i class="fa-solid fa-xmark"></i></button>
     </div>
     <div class="drawer-body">
       <div class="drawer-section" style="padding-bottom:10px">
@@ -5103,6 +5156,13 @@ function openDrawer(f) {{
 function closeDrawer() {{
   document.getElementById('findingDrawer')?.classList.remove('open');
   document.getElementById('drawerBackdrop')?.classList.remove('open');
+  if (_drawerOpener && _drawerOpener.focus) {{ try {{ _drawerOpener.focus(); }} catch (e) {{}} }}
+  _drawerOpener = null;
+}}
+
+function copyPre(btn) {{
+  const pre = btn.closest('.expl-block')?.querySelector('pre');
+  if (pre) navigator.clipboard.writeText(pre.textContent).then(() => showToast('Copied'));
 }}
 
 function copyPoc() {{
@@ -5292,6 +5352,12 @@ function saveTriage() {{
   const note     = noteEl?.value   || '';
   const fid      = _drawerFinding.id ?? _drawerFinding.fid;
 
+  if (['False Positive', 'Accepted Risk'].includes(status) && !note.trim()) {{
+    showToast('Add a short justification note for "' + status + '" before saving', 'error');
+    if (noteEl) {{ noteEl.focus(); noteEl.style.borderColor = 'var(--critical)'; }}
+    return;
+  }}
+
   if (btn) {{ btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving…'; }}
 
   fetch(`/api/scans/${{_drawerScanId}}/findings/${{fid}}/triage`, {{
@@ -5311,11 +5377,8 @@ function saveTriage() {{
         pill.className   = 'triage-pill ' + (TRIAGE_CLASS[status] || 'tp-new');
       }}
       // Update the result count (triage filter might now exclude/include this finding)
-      const cnt = document.getElementById('fResultCount');
-      if (cnt) {{
-        const stFilter = (document.getElementById('fFilterStatus')?.value || '').toLowerCase();
-        if (stFilter) applyFilters();
-      }}
+      const stFilter = (document.getElementById('fFilterStatus')?.value || '').toLowerCase();
+      if (stFilter) applyFilters(); else updateResultCount();
       showToast('Triage saved');
     }} else {{
       showToast('Save failed: ' + (d.error || 'Unknown error'), 'error');
@@ -5339,13 +5402,18 @@ function buildHeatmap() {{
 
   const SEVS = ['Critical','High','Medium','Low','Info'];
 
-  // Group by top-level component (first 2 segments of file path after /sources/)
+  // Group by component: the app package (first 3 segments under sources/), or the manifest/resources
   const compMap = {{}};
   _allFindings.forEach(f => {{
-    const fp = (f.evidence?.file || '').split('\\\\').join('/');
-    let comp = fp.split('/sources/')[1] || fp;
-    // Take first 2 path segments as component name
-    comp = comp.split('/').slice(0,2).join('/') || fp.split('/').pop() || 'unknown';
+    let fp = (f.evidence?.file || '').split('\\').join('/');
+    const di = fp.indexOf('decompiled/');
+    if (di !== -1) fp = fp.slice(di + 'decompiled/'.length);
+    let comp;
+    if (fp.startsWith('sources/')) comp = fp.slice('sources/'.length).split('/').slice(0,3).join('/');
+    else if (fp.endsWith('AndroidManifest.xml')) comp = 'AndroidManifest.xml';
+    else if (fp.startsWith('resources/')) comp = 'resources/' + (fp.split('/')[2] || '');
+    else comp = fp.split('/').slice(0,3).join('/');
+    comp = comp || 'unknown';
     if (!compMap[comp]) compMap[comp] = {{}};
     const sev = f.severity || 'Info';
     compMap[comp][sev] = (compMap[comp][sev]||0) + 1;
@@ -5363,7 +5431,7 @@ function buildHeatmap() {{
   html += '<th>Total</th></tr></thead><tbody>';
 
   comps.forEach(([comp, sevMap, total]) => {{
-    html += `<tr><td title="${{escHtml(comp)}}">${{escHtml(comp.split('/').pop()||comp)}}</td>`;
+    html += `<tr><td title="${{escHtml(comp)}}">${{escHtml(comp.includes('.') && !comp.includes('/') ? comp : comp.split('/').join('.'))}}</td>`;
     SEVS.forEach(s => {{
       const cnt = sevMap[s]||0;
       const cls = cnt===0?'hm-0':cnt<=2?'hm-1':cnt<=5?'hm-2':cnt<=10?'hm-3':'hm-4';
@@ -5387,7 +5455,7 @@ function filterByComp(comp, sev) {{
   _currentSevFilter = sev;
   // Set search to component path
   const s = document.getElementById('fSearch');
-  if (s) s.value = comp.split('/').pop() || comp;
+  if (s) s.value = comp;           // full component path, so unrelated files do not match
   applyFilters();
 }}
 
@@ -5586,7 +5654,7 @@ def _build_scan_content(scan_id: str | None, current: dict | None,
 <script type="application/json" id="findingsData">{findings_data_json}</script>
 
 <!-- Detail Drawer -->
-<div class="finding-drawer" id="findingDrawer"></div>
+<div class="finding-drawer" id="findingDrawer" role="dialog" aria-modal="true" aria-label="Finding details"></div>
 <div class="drawer-backdrop" id="drawerBackdrop" onclick="closeDrawer()"></div>
 '''
 
@@ -5850,7 +5918,7 @@ def _poc_modal_html() -> str:
         <div class="modal-title">Generate PoC Android App</div>
         <div class="modal-sub">Claude AI writes a complete Android Studio project targeting this vulnerability</div>
       </div>
-      <button class="poc-modal-close" onclick="closePocModal()"><i class="fa-solid fa-xmark"></i></button>
+      <button class="poc-modal-close" onclick="closePocModal()" aria-label="Close PoC dialog"><i class="fa-solid fa-xmark"></i></button>
     </div>
     <div class="poc-modal-body">
       <div id="modalReady">
@@ -5959,7 +6027,7 @@ def _build_intelligence_hub() -> str:
         <div class="intel-brand-icon"><i class="fa-solid fa-brain"></i></div>
         <div>
           <h1>Intelligence Hub</h1>
-          <p>MSRA detection rules &nbsp;·&nbsp; 77+ patterns &nbsp;·&nbsp; OWASP Mobile Top 10</p>
+          <p>MSRA detection rules &nbsp;·&nbsp; OWASP Mobile Top 10</p>
         </div>
       </div>
     </div>
@@ -6359,6 +6427,30 @@ def _build_intelligence_hub() -> str:
 
 # ── Background scan ──────────────────────────────────────────────────────
 
+_MAX_EXTRACT_BYTES = int(os.environ.get("MSRA_MAX_APK_MB", "1024")) * 1024 * 1024
+
+
+def _extract_member(zf: "zipfile.ZipFile", name: str, dest: Path) -> Path:
+    """Stream one zip entry to disk. Refuses entries whose declared size exceeds the cap (a tiny
+    upload can otherwise expand into gigabytes) and enforces the cap while copying."""
+    info = zf.getinfo(name)
+    if info.file_size > _MAX_EXTRACT_BYTES:
+        raise ValueError(f"{name} is too large to extract ({info.file_size // (1024 * 1024)} MB)")
+    written = 0
+    with zf.open(info) as src, open(dest, "wb") as out:
+        while True:
+            chunk = src.read(1024 * 1024)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > _MAX_EXTRACT_BYTES:
+                out.close()
+                dest.unlink(missing_ok=True)
+                raise ValueError(f"{name} exceeds the extraction limit")
+            out.write(chunk)
+    return dest
+
+
 def _unwrap_bundle(apk_path: Path, out_dir: Path) -> Path:
     """If the uploaded file is an APKM/XAPK bundle (a zip containing base.apk),
     extract base.apk and return its path.  Otherwise return apk_path unchanged."""
@@ -6367,9 +6459,7 @@ def _unwrap_bundle(apk_path: Path, out_dir: Path) -> Path:
             return apk_path
         with zipfile.ZipFile(apk_path) as zf:
             if "base.apk" in zf.namelist():
-                extracted = out_dir / "base.apk"
-                extracted.write_bytes(zf.read("base.apk"))
-                return extracted
+                return _extract_member(zf, "base.apk", out_dir / "base.apk")
     except Exception:
         pass
     return apk_path
@@ -6696,12 +6786,19 @@ def api_findings(scan_id: str):
 @app.route("/api/scans/<scan_id>/findings/<int:finding_id>/triage", methods=["PATCH"])
 def api_triage_finding(scan_id: str, finding_id: int):
     """Update triage status for a finding."""
-    body = request.get_json(silent=True) or {}
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "JSON object body required"}), 400
     status = body.get("status", "New")
     note   = body.get("suppression_note", "")
     valid  = {"New", "Confirmed", "False Positive", "Accepted Risk", "Fixed", "In Progress"}
-    if status not in valid:
+    if not isinstance(status, str) or status not in valid:
         return jsonify({"error": f"Invalid status. Valid: {sorted(valid)}"}), 400
+    if not isinstance(note, str):
+        return jsonify({"error": "suppression_note must be a string"}), 400
+    note = note[:2000]
+    if not (_scan_dir(scan_id).exists() or _db.get_scan(scan_id)):
+        return jsonify({"error": "Scan not found"}), 404
     _db.upsert_triage(scan_id, finding_id, status, note)
     _ai_routes.invalidate_feedback()          # analyst decision changes rule statistics
     return jsonify({"ok": True, "scan_id": scan_id, "finding_id": finding_id, "status": status})
@@ -6728,37 +6825,36 @@ def api_finding_snippet(scan_id: str, finding_id: str):
         return jsonify({"error": "finding not found"}), 404
 
     ev        = finding.get("evidence") or {}
-    file_path = ev.get("file") or ""
-    line_num  = int(ev.get("line") or 0)
+    file_path = str(ev.get("file") or "")
+    m_line    = re.match(r"\s*(\d+)", str(ev.get("line") or ""))
+    line_num  = int(m_line.group(1)) if m_line else 0
 
     if not file_path or not line_num:
         return jsonify({"error": "no location info"}), 404
 
-    # Resolve path — always rooted within this scan's decompiled directory
-    scan_d     = _scan_dir(scan_id)
-    decompiled = scan_d / "decompiled"
-    p          = Path(file_path)
+    # Resolve path - always rooted within this scan's decompiled directory, and fail closed when
+    # that directory is gone (pruned scan, or a non-Android scan).
+    decompiled = _scan_dir(scan_id) / "decompiled"
+    if not decompiled.is_dir():
+        return jsonify({"error": "decompiled sources are not available for this scan"}), 404
+    root = decompiled.resolve()
 
-    if not p.exists() or not str(p.resolve()).startswith(str(decompiled.resolve())):
-        # Strip everything up to and including "decompiled/"
-        marker = "decompiled/"
-        idx    = file_path.find(marker)
-        if idx != -1:
-            p = decompiled / file_path[idx + len(marker):]
+    def _inside(path: Path) -> bool:
+        try:
+            path.resolve().relative_to(root)
+            return True
+        except (ValueError, OSError):
+            return False
+
+    p = Path(file_path)
+    if not (p.exists() and _inside(p)):
+        idx = file_path.find("decompiled/")
+        p = decompiled / file_path[idx + len("decompiled/"):] if idx != -1 else decompiled / "__missing__"
         if not p.exists():
-            # Last resort: search for filename in decompiled tree
-            fname = Path(file_path).name
-            if decompiled.exists():
-                matches = list(decompiled.rglob(fname))
-                if matches:
-                    p = matches[0]
-
-    # Safety: ensure final path is still inside the scan's decompiled dir
-    try:
-        resolved = p.resolve()
-        if decompiled.exists() and not str(resolved).startswith(str(decompiled.resolve())):
-            return jsonify({"error": "access denied"}), 403
-    except Exception:
+            matches = list(decompiled.rglob(Path(file_path).name)) if Path(file_path).name else []
+            if matches:
+                p = matches[0]
+    if p.exists() and not _inside(p):
         return jsonify({"error": "access denied"}), 403
 
     if not p.exists():
@@ -7194,7 +7290,7 @@ def api_queue_status():
 @app.route("/api/test-ai", methods=["POST"])
 def api_test_ai():
     """Quick smoke-test of the configured provider (kept for the existing key dialog)."""
-    data   = request.get_json(force=True, silent=True) or {}
+    data   = _json_obj(force=True)
     client = _get_ai_client()
     key    = data.get("api_key") or None
     if not (client.provider.configured or key):
@@ -7209,7 +7305,7 @@ def api_test_ai():
 
 @app.route("/api/generate-poc", methods=["POST"])
 def generate_poc():
-    data    = request.get_json(force=True, silent=True) or {}
+    data    = _json_obj(force=True)
     api_key = data.get("api_key") or request.headers.get("X-API-Key") or None
     if not (api_key or _get_ai_client().provider.configured):
         return jsonify({"error": "No AI provider configured. Set ANTHROPIC_API_KEY (or an LLM gateway), "
@@ -7331,9 +7427,9 @@ def _parse_poc_files(raw: str) -> list:
 def download_poc(scan_id: str):
     if not _rate_limit(request.remote_addr or "unknown", max_per_minute=30):
         return jsonify({"error": "Too many requests — please wait a minute"}), 429
-    data  = request.get_json(force=True, silent=True) or {}
+    data  = _json_obj(force=True)
     files = data.get("files", [])
-    if not files:
+    if not isinstance(files, list) or not files:
         return jsonify({"error": "No files"}), 400
     buf = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
     buf_path = buf.name
@@ -7374,14 +7470,17 @@ def api_rules_stats():
 @app.route("/api/rules/<rule_id>/toggle", methods=["PATCH"])
 def api_toggle_rule(rule_id: str):
     """Toggle a rule's enabled state."""
-    result = rules_api.toggle_rule(rule_id)
+    try:
+        result = rules_api.toggle_rule(rule_id)
+    except ValueError:
+        return jsonify({"error": "Rule not found"}), 404
     return jsonify(result)
 
 
 @app.route("/api/rules", methods=["POST"])
 def api_create_rule():
     """Create a new custom rule."""
-    data = request.get_json(force=True, silent=True) or {}
+    data = _json_obj(force=True)
     try:
         rule = rules_api.create_custom_rule(data)
         return jsonify(rule), 201
@@ -7394,8 +7493,11 @@ def api_create_rule():
 @app.route("/api/rules/<rule_id>", methods=["PUT"])
 def api_update_rule(rule_id: str):
     """Update a custom rule."""
-    data   = request.get_json(force=True, silent=True) or {}
-    result = rules_api.update_custom_rule(rule_id, data)
+    data   = _json_obj(force=True)
+    try:
+        result = rules_api.update_custom_rule(rule_id, data)
+    except (ValueError, TypeError) as e:
+        return jsonify({"error": str(e)}), 400
     if result is None:
         return jsonify({"error": "Rule not found or not a custom rule"}), 404
     return jsonify(result)
@@ -7422,14 +7524,30 @@ def api_dyn_cfg_get():
 
 @app.route("/api/dynamic/config", methods=["POST"])
 def api_dyn_cfg_set():
-    data = request.get_json(force=True, silent=True) or {}
+    data = _json_obj(force=True)
     cfg  = _load_dynamic_cfg()
-    for k in ("mode", "adb_serial", "corellium_url", "instance_id"):
-        if k in data:
-            cfg[k] = data[k]
+    if "mode" in data:
+        if data["mode"] not in ("adb", "corellium"):
+            return jsonify({"error": "mode must be 'adb' or 'corellium'"}), 400
+        cfg["mode"] = data["mode"]
+    if "adb_serial" in data:
+        serial = data["adb_serial"]
+        if not isinstance(serial, str) or not re.fullmatch(r"[A-Za-z0-9_.:\-]{0,100}", serial):
+            return jsonify({"error": "adb_serial contains invalid characters"}), 400
+        cfg["adb_serial"] = serial
+    if "instance_id" in data:
+        iid = data["instance_id"]
+        if not isinstance(iid, str) or not re.fullmatch(r"[A-Za-z0-9_.:\-]{0,200}", iid):
+            return jsonify({"error": "instance_id contains invalid characters"}), 400
+        cfg["instance_id"] = iid
+    if "corellium_url" in data:
+        try:
+            cfg["corellium_url"] = validate_corellium_url(data["corellium_url"])
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
     # Only overwrite token if a non-masked value is provided
     token = data.get("corellium_token", "")
-    if token and not set(token).issubset({"•"}):
+    if isinstance(token, str) and token and not set(token).issubset({"\u2022"}):
         cfg["corellium_token"] = token
     _save_dynamic_cfg(cfg)
     return jsonify({"ok": True})
@@ -7460,13 +7578,13 @@ def api_dyn_adb_devices():
 
 @app.route("/api/dynamic/corellium-test", methods=["POST"])
 def api_dyn_corellium_test():
-    data  = request.get_json(force=True, silent=True) or {}
-    url   = (data.get("url") or "https://app.corellium.com").strip()
-    token = (data.get("token") or "").strip()
+    data  = _json_obj(force=True)
+    url   = (data.get("url") if isinstance(data.get("url"), str) and data.get("url") else "https://app.corellium.com").strip()
+    token = (data.get("token") or "").strip() if isinstance(data.get("token"), str) else ""
     if not token:
         return jsonify({"ok": False, "error": "Token required"}), 400
     try:
-        client = CorelliumClient(token, url)
+        client = CorelliumClient(token, validate_corellium_url(url))
         user   = client.check_auth()
         return jsonify({"ok": True, "user": user.get("name") or user.get("label") or "authenticated"})
     except Exception as e:
@@ -7475,13 +7593,13 @@ def api_dyn_corellium_test():
 
 @app.route("/api/dynamic/corellium-instances", methods=["POST"])
 def api_dyn_corellium_instances():
-    data  = request.get_json(force=True, silent=True) or {}
-    url   = (data.get("url") or "https://app.corellium.com").strip()
-    token = (data.get("token") or "").strip()
+    data  = _json_obj(force=True)
+    url   = (data.get("url") if isinstance(data.get("url"), str) and data.get("url") else "https://app.corellium.com").strip()
+    token = (data.get("token") or "").strip() if isinstance(data.get("token"), str) else ""
     if not token:
         return jsonify({"error": "Token required"}), 400
     try:
-        client    = CorelliumClient(token, url)
+        client    = CorelliumClient(token, validate_corellium_url(url))
         instances = client.list_instances()
         return jsonify({"instances": [i.to_dict() for i in instances]})
     except Exception as e:
@@ -7490,7 +7608,7 @@ def api_dyn_corellium_instances():
 
 @app.route("/api/dynamic/verify", methods=["POST"])
 def api_dyn_start_verify():
-    data        = request.get_json(force=True, silent=True) or {}
+    data        = _json_obj(force=True)
     scan_id     = data.get("scan_id", "")
     try:
         finding_idx = int(data.get("finding_index", 0))
@@ -7557,7 +7675,7 @@ def api_intel_extract():
         return jsonify({"error": "No AI provider configured. Set ANTHROPIC_API_KEY (or an LLM gateway) "
                                  "in the environment to use AI extraction."}), 400
 
-    data = request.get_json(force=True, silent=True) or {}
+    data = _json_obj(force=True)
     url  = (data.get("url") or "").strip()
     if not url or not url.startswith("http"):
         return jsonify({"error": "A valid http/https URL is required"}), 400
@@ -7819,7 +7937,7 @@ def api_intel_feed_sync():
     if not _get_ai_client().provider.configured:
         return jsonify({"error": "No AI provider configured (set ANTHROPIC_API_KEY or an LLM gateway)"}), 400
 
-    data    = request.get_json(force=True, silent=True) or {}
+    data    = _json_obj(force=True)
     feed_id = (data.get("feed") or "").strip()
     if feed_id not in _FEED_META:
         return jsonify({"error": f"Unknown feed: {feed_id}"}), 400
@@ -7993,6 +8111,12 @@ def api_delete_scan(scan_id: str):
                      "Wait for it to finish or reach an error state first."
         }), 409
 
+    busy = _ai_routes.active_jobs(scan_id) + [
+        f"dynamic job {j['job_id']}" for j in _db.list_jobs(limit=500)
+        if j.get("scan_id") == scan_id and j.get("status") in ("queued", "running")]
+    if busy:
+        return jsonify({"error": "Cannot delete a scan with active jobs: " + ", ".join(busy[:3])}), 409
+
     shutil.rmtree(scan_dir, ignore_errors=True)
     _db.delete_scan(scan_id)
     return jsonify({"success": True})
@@ -8016,21 +8140,23 @@ _ai_routes.register(
     scan_dir=_scan_dir,
 )
 
-# ── Reset stale dynamic jobs left in "running" state from a previous session ──
-try:
-    import sqlite3 as _sqlite3
-    with _sqlite3.connect(str(_db.DB_PATH)) as _conn:
-        _conn.execute(
-            "UPDATE dynamic_jobs SET status='error', message='Interrupted by server restart' "
-            "WHERE status IN ('running','queued')"
-        )
-        _conn.execute(
-            "UPDATE scans SET status='error', message='Interrupted by server restart' "
-            "WHERE status IN ('queued','decompiling','scanning','reporting')"
-        )
-        _conn.commit()
-except Exception:
-    pass
+# ── Reset stale jobs left "running" by a previous process ─────────────────
+def _reset_stale_jobs() -> None:
+    """Called only when this process is the server (see __main__), never at import: a second
+    importer (reloader parent, extra worker, a CLI) must not kill another process's live jobs."""
+    try:
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(str(_db.DB_PATH))
+        try:
+            conn.execute("UPDATE dynamic_jobs SET status='error', message='Interrupted by server restart' "
+                         "WHERE status IN ('running','queued')")
+            conn.execute("UPDATE scans SET status='error', message='Interrupted by server restart' "
+                         "WHERE status IN ('queued','decompiling','scanning','reporting')")
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        _log.exception("could not reset stale jobs")
 
 
 def _active_scan_ids():
@@ -8067,4 +8193,7 @@ if __name__ == "__main__":
         print("[!] Binding to a non-loopback address without MSRA_AUTH_TOKEN: "
               "anyone on the network can upload files and drive attached devices.")
     print(f"[+] MSRA dashboard → http://localhost:{args.port}")
+    # With the debug reloader the child process re-runs this block; only reset once, in the real server.
+    if not args.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        _reset_stale_jobs()
     app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)

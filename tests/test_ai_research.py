@@ -259,3 +259,25 @@ def test_ai_vet_api_end_to_end(env):
     assert c.get("/api/scans/scan1/findings/1/ai-research").get_json()["research"]["verdict"] == "false_positive"
     again = c.post("/api/scans/scan1/ai-vet", json={})
     assert again.status_code == 400 and "Nothing to vet" in again.get_json()["error"]
+
+
+def test_review_plan_splits_deep_and_quick_and_estimates_cost():
+    cfg = S.load()
+    fs = [{"id": i, "severity": sev, "extra": {}} for i, sev in
+          enumerate(["Critical", "High", "Medium", "Medium", "Low", "High"], start=1)]
+    plan = ai_routes.review_plan(fs, researched={6}, triaged_by_ai={3}, decided=set(), cfg=cfg)
+    assert plan["deep_ids"] == [1, 2]                     # Critical + High, 6 already researched
+    assert plan["quick_ids"] == [4]                       # Medium+ not deep, not already AI-triaged
+    assert plan["est_usd"] > 0 and plan["est_usd_max"] <= plan["est_usd"] + 1e-9
+    assert set(plan["models"]) == {"research", "triage"}
+
+
+def test_review_plan_api(env):
+    c, fake, sd = env
+    r = c.get("/api/scans/scan1/ai-review/plan").get_json()
+    assert r["configured"] is True and r["deep"] == 1 and r["deep_available"] is True
+    import shutil
+    shutil.rmtree(sd / "decompiled")
+    r = c.get("/api/scans/scan1/ai-review/plan").get_json()
+    assert r["deep"] == 0 and r["quick"] >= 1               # no sources: falls back to quick votes
+    assert c.get("/api/scans/nope/ai-review/plan").status_code == 404

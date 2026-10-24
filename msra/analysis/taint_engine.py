@@ -129,6 +129,56 @@ _SINK_DISPLAY: Dict[str, str] = {
 }
 
 # Source API patterns: (regex, api_name, group_index_for_extra_name)
+_MODS = r'(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|protected|private|static|final|synchronized|abstract|native)\s+)*'
+_TAIL = r'\s*\(([^;{}]{0,400})\)\s*(?:throws\s+[\w., ]{1,200})?\s*(?:\{.*)?$'
+_NOT_DECL = r'(?!\s*(?:new|return|else|throw|case|do)\b)'
+# a method has a return type; a constructor is an Upper-case name. A bare `run(new X() {` call is neither.
+_DECL_TYPED = re.compile(r'^' + _NOT_DECL + _MODS + r'[\w<>\[\],.?][\w<>\[\],.? ]{0,120}?\s+(\w+)' + _TAIL)
+_DECL_CTOR = re.compile(r'^' + _NOT_DECL + _MODS + r'([A-Z]\w*)' + _TAIL)
+
+
+class _DeclRE:
+    @staticmethod
+    def search(code: str):
+        code = code.strip()               # indentation must not count as a return type
+        return _DECL_TYPED.search(code) or _DECL_CTOR.search(code)
+
+
+_DECL_RE = _DeclRE()
+_MAX_DECL_LINE = 1000            # minified/generated lines are not scanned for declarations (still brace-counted)
+_NOT_METHODS = {"if", "while", "for", "catch", "new", "return", "switch", "synchronized"}
+_STR_LIT = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
+
+
+def _methods_by_line(lines: List[str]) -> List[str]:
+    """Name of the method each line belongs to, tracked by brace depth. Class-level lines (field
+    initializers, nested-class declarations) are "unknown" instead of inheriting the previous method."""
+    out: List[str] = []
+    depth = 0
+    stack: List[tuple] = []            # (method name, brace depth inside it)
+    pending = None
+    for raw in lines:
+        code = _STR_LIT.sub('""', raw[:20000]).split("//")[0]
+        md = _DECL_RE.search(code) if len(code) <= _MAX_DECL_LINE else None
+        if md and md.group(1) not in _NOT_METHODS:
+            pending = md.group(1)
+        name = pending or (stack[-1][0] if stack else "unknown")
+        out.append(name)
+        for ch in code:
+            if ch == "{":
+                depth += 1
+                if pending:
+                    stack.append((pending, depth))
+                    pending = None
+            elif ch == "}":
+                if stack and stack[-1][1] == depth:
+                    stack.pop()
+                depth -= 1
+        if pending and ";" in code and "{" not in code:
+            pending = None                 # an abstract/interface declaration has no body
+    return out
+
+
 _SOURCE_PATTERNS: List[Tuple[str, str, int]] = [
     (r'\.get(\w+)Extra\s*\(\s*"([^"]+)"', "getExtra", 2),
     (r'\.getStringExtra\s*\(\s*"([^"]+)"', "getStringExtra", 1),
@@ -140,9 +190,9 @@ _SOURCE_PATTERNS: List[Tuple[str, str, int]] = [
     (r'getPathSegments\s*\(\s*\)', "getPathSegments", 0),
     (r'getLastPathSegment\s*\(\s*\)', "getLastPathSegment", 0),
     # ContentProvider – selection / selectionArgs arrive as method parameters
-    (r'void\s+query\s*\([^)]*String\s+selection', "providerQuery", 0),
-    (r'void\s+insert\s*\([^)]*ContentValues', "providerInsert", 0),
-    (r'void\s+update\s*\([^)]*String\s+selection', "providerUpdate", 0),
+    (r'\b(?:Cursor|void)\s+query\s*\([^)]*String\s+selection', "providerQuery", 0),
+    (r'\b(?:Uri|void)\s+insert\s*\([^)]*ContentValues', "providerInsert", 0),
+    (r'\b(?:int|void)\s+update\s*\([^)]*String\s+selection', "providerUpdate", 0),
 ]
 
 # Sanitizer patterns by sink type. A flow is only marked sanitized when a
@@ -224,7 +274,7 @@ class TaintEngine:
                 key = (
                     f"{flow.source.component_class}.{flow.source.method}"
                     f"|{flow.sink.sink_class}.{flow.sink.sink_method}"
-                    f"|{flow.sink.sink_api}"
+                    f"|{flow.sink.sink_api}|{flow.sink.line_number}"
                 )
                 if key not in seen:
                     seen.add(key)
@@ -547,12 +597,9 @@ class TaintEngine:
                 r'(?:[\w<>\[\],\s]+\s+)?(\w+)\s*\('
             )
 
+            methods_by_line = _methods_by_line(lines)
             for line_no, line in enumerate(lines, start=1):
-                md = method_decl_re.search(line)
-                if md and md.group(1) not in {
-                    "if", "while", "for", "catch", "new", "return"
-                }:
-                    current_method = md.group(1)
+                current_method = methods_by_line[line_no - 1]
 
                 for src_pattern, api_name, extra_grp in _SOURCE_PATTERNS:
                     for sm in re.finditer(src_pattern, line):
@@ -649,12 +696,9 @@ class TaintEngine:
                 r'(?:[\w<>\[\],\s]+\s+)?(\w+)\s*\('
             )
 
+            methods_by_line = _methods_by_line(lines)
             for line_no, line in enumerate(lines, start=1):
-                md = method_decl_re.search(line)
-                if md and md.group(1) not in {
-                    "if", "while", "for", "catch", "new", "return"
-                }:
-                    current_method = md.group(1)
+                current_method = methods_by_line[line_no - 1]
 
                 if "(" not in line:
                     continue                      # every sink pattern needs a call paren
@@ -856,6 +900,12 @@ class TaintEngine:
                 if am and am.group(1) not in tainted and self._uses(am.group(2), tainted):
                     tainted.add(am.group(1))
                     grew = True
+                # x += tainted;   sb.append(tainted);   list.add(tainted)  - the receiver becomes tainted
+                for rx in (self._COMPOUND_RE, self._APPEND_RE):
+                    for m in rx.finditer(text):
+                        if m.group(1) not in tainted and self._uses(m.group(2), tainted):
+                            tainted.add(m.group(1))
+                            grew = True
             if not grew:
                 break
         return tainted
@@ -934,6 +984,8 @@ class TaintEngine:
             return False
         return self._uses(sink_text, tainted)
 
+    _COMPOUND_RE = re.compile(r'(\w+)\s*\+=\s*(.*)')
+    _APPEND_RE = re.compile(r'(\w+)\s*\.\s*(?:append|insert|add|put|write)\s*\((.*)\)')
     _ASSIGN_LHS_RE = re.compile(r'(?:[\w<>\[\],.?]+\s+)?(\w+)\s*=(?!=)\s*(.*)')
 
     def _verify_intra_method_flow(self, source: TaintSource, sink: TaintSink) -> bool:
@@ -964,13 +1016,16 @@ class TaintEngine:
         for _ in range(4):                        # small fixpoint over the window
             grew = False
             for text in window[1:]:
+                pairs = []
                 am = self._ASSIGN_LHS_RE.search(text)
-                if not am:
-                    continue
-                lhs, rhs = am.group(1), am.group(2)
-                if lhs not in tainted and any(re.search(rf'\b{re.escape(t)}\b', rhs) for t in tainted):
-                    tainted.add(lhs)
-                    grew = True
+                if am:
+                    pairs.append((am.group(1), am.group(2)))
+                for rx in (self._COMPOUND_RE, self._APPEND_RE):          # x += t;  sb.append(t);
+                    pairs.extend((m.group(1), m.group(2)) for m in rx.finditer(text))
+                for lhs, rhs in pairs:
+                    if lhs not in tainted and any(re.search(rf'\b{re.escape(t)}\b', rhs) for t in tainted):
+                        tainted.add(lhs)
+                        grew = True
             if not grew:
                 break
 
@@ -1086,6 +1141,22 @@ def to_finding(flow: TaintFlow) -> Finding:
                        else "high" if flow.data_flow in ("intra-method", "call-chain-verified") else "medium"),
     }
 
+    # A flow whose data path was NOT demonstrated must not rank beside proven ones. Cap by how much
+    # was shown: same-method without a tainted variable -> Info; unproven call chain -> Medium for
+    # high-impact sinks (sql/webview/exec), Low for the rest (file/intent/crypto noise).
+    severity = flow.severity
+    cap = None
+    if flow.data_flow == "unverified-same-method":
+        cap = "Info"
+    elif flow.data_flow == "call-chain":
+        cap = "Medium" if flow.sink.sink_type in ("sql", "webview", "exec") else "Low"
+    if cap:
+        order = ("Info", "Low", "Medium", "High", "Critical")
+        if order.index(severity) > order.index(cap):
+            extra["original_severity"] = severity
+            extra["severity_note"] = "data flow from the source to this sink was not demonstrated"
+            severity = cap
+
     sanitized_note = " [SANITIZED – may be FP]" if flow.is_sanitized else ""
     fid = (
         f"TAINT_{flow.sink.sink_type.upper()}_"
@@ -1110,7 +1181,7 @@ def to_finding(flow: TaintFlow) -> Finding:
     return Finding(
         fid=fid,
         title=flow.title + sanitized_note,
-        severity=flow.severity,
+        severity=severity,
         description=flow.description,
         attack_path=attack_path,
         adb_commands=[flow.poc_command],

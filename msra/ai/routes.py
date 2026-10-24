@@ -52,6 +52,24 @@ def invalidate_feedback() -> None:
     _fb_cache["ts"] = 0.0
 
 
+def _vet_running(scan_id: str) -> bool:
+    """Caller must hold _jobs_lock."""
+    return (_vet_jobs.get(scan_id) or {}).get("status") == "running"
+
+
+def active_jobs(scan_id: str) -> list:
+    """Human-readable list of AI jobs still running for a scan (used to block deletion)."""
+    out = []
+    with _jobs_lock:
+        if (_jobs.get(scan_id) or {}).get("status") == "running":
+            out.append("AI triage")
+        if _vet_running(scan_id):
+            out.append("AI vetting")
+        out += [f"AI research on finding {k[1]}" for k, j in _research_jobs.items()
+                if k[0] == scan_id and j.get("status") == "running"]
+    return out
+
+
 def _client():
     return get_client()
 
@@ -184,11 +202,6 @@ def ai_triage_start(scan_id: str):
     cfg = S.load()
     opts = {**cfg["triage"], **patch.get("triage", {})}
 
-    with _jobs_lock:
-        cur = _jobs.get(scan_id)
-        if cur and cur.get("status") == "running":
-            return jsonify({"error": "AI triage already running for this scan"}), 409
-
     findings = data["findings"]
     for i, f in enumerate(findings, start=1):
         f.setdefault("id", i)
@@ -205,12 +218,17 @@ def ai_triage_start(scan_id: str):
     pkg = (data.get("package") or "")
     stats = feedback_stats()
     cancel = threading.Event()
-    _cancel[scan_id] = cancel
     job = {"status": "running", "total": len(chosen), "done": 0, "calls_done": 0,
            "calls_total": len(chosen) * opts["votes"], "model": model, "votes": opts["votes"],
            "started": time.time(), "cost_usd": 0.0, "error": None, "stopped": None}
-    with _jobs_lock:
+    with _jobs_lock:                              # check-and-claim in ONE critical section
+        cur = _jobs.get(scan_id)
+        if cur and cur.get("status") == "running":
+            return jsonify({"error": "AI triage already running for this scan"}), 409
+        if _vet_running(scan_id):
+            return jsonify({"error": "AI vetting is running for this scan"}), 409
         _jobs[scan_id] = job
+    _cancel[scan_id] = cancel
 
     def on_result(fid, res):
         db.upsert_ai_triage(scan_id, fid, res["verdict"], res["confidence"],
@@ -313,19 +331,20 @@ def ai_research_start(scan_id: str, finding_id: int):
         return jsonify({"error": "The decompiled sources for this scan are not available (pruned or "
                                  "not an Android scan). Re-scan to enable the researcher."}), 409
     key = (scan_id, finding_id)
-    with _jobs_lock:
-        cur = _research_jobs.get(key)
-        if cur and cur.get("status") == "running":
-            return jsonify({"error": "The researcher is already working on this finding"}), 409
     opts = S.load()["research"]
     model = S.model_for("research")
     stats = feedback_stats()
     cancel = threading.Event()
-    _research_cancel[key] = cancel
     job = {"status": "running", "step": 0, "doing": "starting", "model": model,
            "started": time.time(), "error": None}
-    with _jobs_lock:
+    with _jobs_lock:                              # check-and-claim in ONE critical section
+        cur = _research_jobs.get(key)
+        if cur and cur.get("status") == "running":
+            return jsonify({"error": "The researcher is already working on this finding"}), 409
+        if _vet_running(scan_id):
+            return jsonify({"error": "AI vetting is running for this scan"}), 409
         _research_jobs[key] = job
+    _research_cancel[key] = cancel
 
     def on_step(n, action, args):
         with _jobs_lock:
@@ -380,6 +399,62 @@ def vet_candidates(findings: list, researched: set, min_severity: str, limit: in
     return [f for _, f in pool[:limit]]
 
 
+# ── AI Review: one entry point = deep research on the riskiest + quick votes on the rest ──
+
+_DEEP_CALLS_TOKENS = (3000, 600)      # rough input/output tokens per researcher step
+_QUICK_CALL_TOKENS = (1500, 250)      # rough input/output tokens per triage vote
+DEEP_DEFAULT_LIMIT = 10
+
+
+def review_plan(findings: list, researched: set, triaged_by_ai: set, decided: set, cfg: dict,
+                deep_limit: int = DEEP_DEFAULT_LIMIT) -> dict:
+    """Which findings get the deep researcher, which get quick votes, and a rough cost."""
+    from .models import price_for
+    deep = vet_candidates(findings, researched | decided, "High", deep_limit)
+    deep_ids = {int(f["id"]) for f in deep}
+    t = cfg["triage"]
+    quick = select_findings(findings, t["min_severity"], t["max_findings"],
+                            deep_ids | researched | triaged_by_ai | decided)
+    r_in, r_out = _DEEP_CALLS_TOKENS
+    q_in, q_out = _QUICK_CALL_TOKENS
+    steps = cfg["research"]["max_steps"]
+    rp = price_for(S.model_for("research"), cfg.get("pricing"))
+    tp = price_for(S.model_for("triage"), cfg.get("pricing"))
+    per_deep = steps * (r_in * rp["input"] + r_out * rp["output"]) / 1e6
+    per_quick = t["votes"] * (q_in * tp["input"] + q_out * tp["output"]) / 1e6
+    return {"deep": len(deep), "quick": len(quick),
+            "deep_ids": sorted(deep_ids), "quick_ids": sorted(int(f["id"]) for f in quick),
+            "est_usd": round(len(deep) * per_deep + len(quick) * per_quick, 2),
+            "est_usd_max": round(len(deep) * min(per_deep, cfg["research"]["max_usd"]) +
+                                 len(quick) * per_quick, 2),
+            "models": {"research": S.model_for("research"), "triage": S.model_for("triage")},
+            "budget_cap": cfg["budget"].get("usd_cap")}
+
+
+@bp.route("/api/scans/<scan_id>/ai-review/plan", methods=["GET"])
+def ai_review_plan(scan_id: str):
+    if not _deps["scan_exists"](scan_id):
+        return jsonify({"error": "Scan not found"}), 404
+    c = _client()
+    data = _deps["load_findings"](scan_id)
+    if not data or not data.get("findings"):
+        return jsonify({"error": "No findings available for this scan"}), 404
+    findings = data["findings"]
+    for i, f in enumerate(findings, start=1):
+        f.setdefault("id", i)
+    db = _deps["db"]
+    decided = {fid for fid, t in db.get_triage_map(scan_id).items()
+               if t.get("status") in ("False Positive", "Confirmed", "Fixed")}
+    plan = review_plan(findings, set(db.get_ai_research_summary_map(scan_id)),
+                       set(db.get_ai_triage_map(scan_id)), decided, S.load())
+    plan["configured"] = c.provider.configured
+    plan["deep_available"] = _decompiled_root(scan_id) is not None
+    if not plan["deep_available"]:
+        plan["quick"] += plan["deep"]          # no sources to read: those findings get quick votes instead
+        plan["deep"] = 0
+    return jsonify(plan)
+
+
 @bp.route("/api/scans/<scan_id>/ai-vet", methods=["GET"])
 def ai_vet_get(scan_id: str):
     if not _deps["scan_exists"](scan_id):
@@ -409,10 +484,6 @@ def ai_vet_start(scan_id: str):
         limit = max(1, min(int(body.get("max_findings", 10)), 50))
     except (TypeError, ValueError):
         return jsonify({"error": "max_findings must be a number"}), 400
-    with _jobs_lock:
-        cur = _vet_jobs.get(scan_id)
-        if cur and cur.get("status") == "running":
-            return jsonify({"error": "AI vetting is already running for this scan"}), 409
     findings = data["findings"]
     for i, f in enumerate(findings, start=1):
         f.setdefault("id", i)
@@ -429,12 +500,17 @@ def ai_vet_start(scan_id: str):
     opts = S.load()["research"]
     stats = feedback_stats()
     cancel = threading.Event()
-    _vet_cancel[scan_id] = cancel
     job = {"status": "running", "total": len(chosen), "done": 0, "cost_usd": 0.0, "model": model,
            "tally": {"true_positive": 0, "false_positive": 0, "uncertain": 0}, "stopped": None,
            "started": time.time(), "error": None}
-    with _jobs_lock:
+    with _jobs_lock:                              # check-and-claim in ONE critical section
+        cur = _vet_jobs.get(scan_id)
+        if cur and cur.get("status") == "running":
+            return jsonify({"error": "AI vetting is already running for this scan"}), 409
+        if any(k[0] == scan_id and j.get("status") == "running" for k, j in _research_jobs.items()):
+            return jsonify({"error": "The researcher is already running on a finding in this scan"}), 409
         _vet_jobs[scan_id] = job
+    _vet_cancel[scan_id] = cancel
 
     def run():
         try:

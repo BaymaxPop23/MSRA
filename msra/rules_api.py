@@ -18,7 +18,7 @@ from .patterns import safety as _safety
 from typing import Any, Dict, List, Optional
 
 DATA_DIR     = Path(__file__).parent.parent / "data"
-CUSTOM_DIR   = DATA_DIR / "custom"
+CUSTOM_DIR   = Path(os.environ.get("MSRA_CUSTOM_DIR") or (DATA_DIR / "custom"))
 USER_RULES_F = CUSTOM_DIR / "user_rules.json"
 OVERRIDES_F  = CUSTOM_DIR / "overrides.json"
 
@@ -51,6 +51,17 @@ def _load_overrides() -> Dict[str, List[str]]:
 
 
 _WRITE_LOCK = threading.RLock()
+
+
+def _locked(fn):
+    """Hold the write lock across a whole read-modify-write (the lock is re-entrant)."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        with _WRITE_LOCK:
+            return fn(*a, **k)
+    return wrapper
 
 
 def _atomic_write(path, text: str) -> None:
@@ -278,7 +289,9 @@ def _validate_patterns(data: dict) -> None:
     if len(pats) > _safety.MAX_PATTERNS:
         raise ValueError(f"Too many patterns (max {_safety.MAX_PATTERNS})")
     for p in pats:
-        pat = p.get("pattern", "") if isinstance(p, dict) else ""
+        if not isinstance(p, dict):
+            raise ValueError("each pattern must be an object like {\"pattern\": \"...\", \"file_types\": [...]}")
+        pat = p.get("pattern", "")
         if not pat:
             continue
         problem = _safety.regex_problem(pat)
@@ -322,6 +335,7 @@ def set_rule_enabled(rule_id: str, enabled: bool) -> dict:
     return {"id": rule_id, "enabled": enabled}
 
 
+@_locked
 def toggle_rule(rule_id: str) -> dict:
     """Toggle a rule's enabled state. Returns {"id": ..., "enabled": ...}."""
     overrides = _load_overrides()
@@ -329,6 +343,7 @@ def toggle_rule(rule_id: str) -> dict:
     return set_rule_enabled(rule_id, not current)
 
 
+@_locked
 def create_custom_rule(data: dict) -> dict:
     """Create a new custom rule. Raises ValueError on duplicate ID or invalid regex."""
     _validate_patterns(data)
@@ -346,6 +361,7 @@ def create_custom_rule(data: dict) -> dict:
     return _pattern_to_dict(rule, "custom", _load_overrides())
 
 
+@_locked
 def update_custom_rule(rule_id: str, data: dict) -> Optional[dict]:
     """Update a custom rule. Returns None if not found. Raises ValueError on invalid regex."""
     rules = _load_user_rules()
@@ -384,6 +400,7 @@ def update_custom_rule(rule_id: str, data: dict) -> Optional[dict]:
     return _pattern_to_dict(rule, "custom", _load_overrides())
 
 
+@_locked
 def delete_custom_rule(rule_id: str) -> bool:
     """Delete a custom rule. Returns True if found and deleted."""
     rules     = _load_user_rules()

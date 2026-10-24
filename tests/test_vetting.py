@@ -175,15 +175,20 @@ def test_disabled_by_env(monkeypatch):
     assert counts == {} and f.severity == "Critical" and "vetting" not in (f.extra or {})
 
 
-def _res(tmp_path, name, line, title="Hardcoded Credentials", fid="storage-hardcoded-credentials:x"):
+def _res(tmp_path, name, line, title="Hardcoded Credentials", fid="storage-hardcoded-credentials:x",
+         translated=None):
     f = tmp_path / "decompiled/resources/res/values/strings.xml"
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(f"<resources>\n{line}\n</resources>\n")
+    if translated:                                    # the same string name in another locale
+        g = tmp_path / "decompiled/resources/res/values-de/strings.xml"
+        g.parent.mkdir(parents=True, exist_ok=True)
+        g.write_text(f'<resources>\n    <string name="{name}">{translated}</string>\n</resources>\n')
     return Finding(fid, title, "Critical", "d", "", [],
                    Evidence(str(f), 2, "0002: masked", ""), None, {"category": "x"})
 
 
-@pytest.mark.parametrize("value", ["Password", "Contraseña", "كلمة المرور", "Platinum/Gold",
+@pytest.mark.parametrize("value", ["Contraseña", "كلمة المرور",
                                    "Invalid token {ctx}", "Your account %1$s is ready", "与服务器连接"])
 def test_ui_label_strings_are_not_credentials(tmp_path, value):
     f = _res(tmp_path, "PASSWORD", f'    <string name="PASSWORD">{value}</string>')
@@ -276,3 +281,37 @@ def test_provider_input_held_in_a_variable_keeps_the_sql_finding(tmp_path):
     g = mk("SQL Injection in ContentProvider", 'db.execSQL("CREATE TABLE IF NOT EXISTS " + k.tableName() + " (a TEXT)");',
            line=3, path=str(q))
     assert status(g) == "likely_fp"
+
+
+def test_single_word_label_needs_a_translation_as_proof_when_the_name_is_credential_like(tmp_path):
+    line = '    <string name="PASSWORD">Password</string>'
+    assert status(_res(tmp_path, "PASSWORD", line)) == "needs_review"            # no proof it is a label
+    assert status(_res(tmp_path, "PASSWORD", line, translated="Passwort")) == "likely_fp"
+
+
+def test_credential_named_dictionary_word_is_kept_even_if_capitalised(tmp_path):
+    for value in ("Administrator", "Welcome"):
+        line = f'    <string name="admin_password">{value}</string>'
+        assert status(_res(tmp_path, "admin_password", line)) == "needs_review"
+    # a non-secret name + plain word is still treated as a label
+    assert status(_res(tmp_path, "tier_name", '    <string name="tier_name">Gold</string>')) == "likely_fp"
+
+
+def test_platinum_gold_label_is_proven_by_its_translation(tmp_path):
+    line = '    <string name="IB_TOKEN_PROTOCOL_NAME_5">Platinum/Gold</string>'
+    assert status(_res(tmp_path, "IB_TOKEN_PROTOCOL_NAME_5", line, title="Hardcoded credential-like value",
+                       fid="secret-high-entropy-literal:x")) == "needs_review"
+    assert status(_res(tmp_path, "IB_TOKEN_PROTOCOL_NAME_5", line, title="Hardcoded credential-like value",
+                       fid="secret-high-entropy-literal:x", translated="Platinum/goud")) == "likely_fp"
+
+
+def test_translation_proof_cannot_launder_token_like_values_or_fake_locale_dirs(tmp_path):
+    # a token-like value with a "translation" elsewhere is still a finding
+    line = '    <string name="api_token">9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c</string>'
+    assert status(_res(tmp_path, "api_token", line, translated="different")) == "needs_review"
+    # a plain word whose only "translation" lives in a non-language folder does not count
+    f = _res(tmp_path, "PASSWORD", '    <string name="PASSWORD">Password</string>')
+    fake = tmp_path / "decompiled/resources/res/values-evil/strings.xml"
+    fake.parent.mkdir(parents=True, exist_ok=True)
+    fake.write_text('<resources>\n    <string name="PASSWORD">x</string>\n</resources>\n')
+    assert status(f) == "needs_review"

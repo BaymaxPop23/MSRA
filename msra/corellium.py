@@ -59,12 +59,48 @@ class CorelliumInstance:
 
 # ── Client ────────────────────────────────────────────────────────────────────
 
+def validate_corellium_url(url) -> str:
+    """The Corellium endpoint receives the API token, so it must be a real http(s) host.
+    Private/loopback targets are refused (SSRF + token forwarding) unless MSRA_ALLOW_PRIVATE_CORELLIUM=1
+    (on-prem Corellium Viper on a private network)."""
+    import os
+    from . import security as _sec
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("corellium_url must be a URL")
+    url = url.strip().rstrip("/")
+    try:
+        if os.environ.get("MSRA_ALLOW_PRIVATE_CORELLIUM", "").strip().lower() in ("1", "true", "yes"):
+            import urllib.parse
+            parsed = urllib.parse.urlparse(url)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                raise _sec.UnsafeURLError("only http/https URLs are allowed")
+        else:
+            _sec.check_public_url(url)
+    except _sec.UnsafeURLError as exc:
+        raise ValueError(f"corellium_url rejected: {exc}") from exc
+    return url
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow redirects: that would forward the bearer token to another host."""
+    def redirect_request(self, *a, **k):
+        return None
+
+
+def _opener():
+    """Connect only to the validated address (DNS-rebinding safe) and never follow redirects."""
+    import os
+    from . import security as _sec
+    allow = os.environ.get("MSRA_ALLOW_PRIVATE_CORELLIUM", "").strip().lower() in ("1", "true", "yes")
+    return urllib.request.build_opener(_NoRedirect, *_sec.pinned_handlers(allow_private=allow))
+
+
 class CorelliumClient:
     """Thin wrapper around the Corellium REST API v1."""
 
     def __init__(self, api_token: str, base_url: str = "https://app.corellium.com"):
         self.api_token = api_token.strip()
-        self.base_url  = base_url.rstrip("/")
+        self.base_url  = validate_corellium_url(base_url)
         self._api      = f"{self.base_url}/api/v1"
 
     # ── Internal ──────────────────────────────────────────────────────────────
@@ -79,7 +115,7 @@ class CorelliumClient:
         }
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with _opener().open(req, timeout=timeout) as resp:
                 raw = resp.read()
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as exc:
@@ -193,7 +229,7 @@ class CorelliumClient:
         headers = {"Authorization": f"Bearer {self.api_token}"}
         req     = urllib.request.Request(url, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with _opener().open(req, timeout=15) as resp:
                 return resp.read()
         except Exception:
             return None

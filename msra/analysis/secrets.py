@@ -98,7 +98,8 @@ _PLACEHOLDER_RE = re.compile(
     r"example|sample|dummy|test|todo|null|none|undefined|password|secret|token|"
     r"android\.|com\.|org\.|net\.|https?://(?:www\.)?(?:example|localhost))")
 # Values that merely name a resource / class / key constant
-_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$|^[A-Z][A-Za-z]+(?:-[A-Za-z0-9]{1,12}){1,4}$")
+# second alternative: Header-Style-Names ("Acceptance-Encoding-1"): words joined by hyphens, not a secret
 
 
 def shannon_entropy(s: str) -> float:

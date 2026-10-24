@@ -99,8 +99,16 @@ class JARScanner:
         for name in ("META-INF/MANIFEST.MF", "META-INF/manifest.mf"):
             try:
                 raw = zf.read(name).decode("utf-8", errors="replace")
+                # MANIFEST.MF wraps long values: a continuation line starts with ONE space and is
+                # appended to the previous line without it (a wrapped Class-Path was truncated before).
+                logical: List[str] = []
+                for line in raw.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+                    if line.startswith(" ") and logical:
+                        logical[-1] += line[1:]
+                    else:
+                        logical.append(line)
                 result: Dict[str, str] = {}
-                for line in raw.splitlines():
+                for line in logical:
                     if ":" in line:
                         k, _, v = line.partition(":")
                         result[k.strip().lower()] = v.strip()
