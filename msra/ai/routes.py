@@ -277,6 +277,26 @@ def ai_research_get(scan_id: str, finding_id: int):
     return jsonify(_research_view(scan_id, finding_id))
 
 
+def _research_one(scan_id: str, finding_id: int, finding: dict, pkg: str, root, client, model: str,
+                  opts: dict, stats: dict, cancel: threading.Event, on_step=None) -> dict:
+    """Run + persist one investigation. Shared by the single-finding and batch endpoints."""
+    fb = learning.feedback_sentence(stats, learning.rule_key(finding.get("fid"), finding.get("title")))
+    out = investigate(finding, client=client, model=model, package=pkg, sandbox=ResearchSandbox(root),
+                      max_steps=opts["max_steps"], max_usd=opts["max_usd"], feedback_line=fb,
+                      should_stop=cancel.is_set, on_step=on_step)
+    rep = dict(out["report"], steps=out["steps"], stopped=out["stopped"])
+    if out["stopped"] != "cancelled":
+        _deps["db"].upsert_ai_research(scan_id, finding_id, rep["verdict"], rep["confidence"],
+                                       rep, model, out["cost_usd"])
+    return out
+
+
+def _decompiled_root(scan_id: str):
+    scan_dir = _deps.get("scan_dir")
+    root = (scan_dir(scan_id) / "decompiled") if scan_dir else None
+    return root if root is not None and root.is_dir() else None
+
+
 @bp.route("/api/scans/<scan_id>/findings/<int:finding_id>/ai-research", methods=["POST"])
 def ai_research_start(scan_id: str, finding_id: int):
     if not _deps["scan_exists"](scan_id):
@@ -288,9 +308,8 @@ def ai_research_start(scan_id: str, finding_id: int):
     if not hit:
         return jsonify({"error": "Finding not found"}), 404
     finding, pkg = hit
-    scan_dir = _deps.get("scan_dir")
-    root = (scan_dir(scan_id) / "decompiled") if scan_dir else None
-    if root is None or not root.is_dir():
+    root = _decompiled_root(scan_id)
+    if root is None:
         return jsonify({"error": "The decompiled sources for this scan are not available (pruned or "
                                  "not an Android scan). Re-scan to enable the researcher."}), 409
     key = (scan_id, finding_id)
@@ -298,8 +317,7 @@ def ai_research_start(scan_id: str, finding_id: int):
         cur = _research_jobs.get(key)
         if cur and cur.get("status") == "running":
             return jsonify({"error": "The researcher is already working on this finding"}), 409
-    cfg = S.load()
-    opts = cfg["research"]
+    opts = S.load()["research"]
     model = S.model_for("research")
     stats = feedback_stats()
     cancel = threading.Event()
@@ -316,13 +334,7 @@ def ai_research_start(scan_id: str, finding_id: int):
 
     def run():
         try:
-            fb = learning.feedback_sentence(stats, learning.rule_key(finding.get("fid"), finding.get("title")))
-            out = investigate(finding, client=c, model=model, package=pkg, sandbox=ResearchSandbox(root),
-                              max_steps=opts["max_steps"], max_usd=opts["max_usd"], feedback_line=fb,
-                              should_stop=cancel.is_set, on_step=on_step)
-            rep = dict(out["report"], steps=out["steps"], stopped=out["stopped"])
-            _deps["db"].upsert_ai_research(scan_id, finding_id, rep["verdict"], rep["confidence"],
-                                           rep, model, out["cost_usd"])
+            out = _research_one(scan_id, finding_id, finding, pkg, root, c, model, opts, stats, cancel, on_step)
             with _jobs_lock:
                 job["status"] = "cancelled" if out["stopped"] == "cancelled" else "done"
                 job["stopped"] = out["stopped"]
@@ -336,6 +348,124 @@ def ai_research_start(scan_id: str, finding_id: int):
 
     _pool.submit(run)
     return jsonify({"started": True, "model": model, "max_steps": opts["max_steps"]}), 202
+
+
+# ── batch: have the researcher vet the riskiest findings nobody has proven yet ──
+
+_vet_jobs: Dict[str, dict] = {}
+_vet_cancel: Dict[str, threading.Event] = {}
+
+
+def vet_candidates(findings: list, researched: set, min_severity: str, limit: int) -> list:
+    """Highest-severity findings still unproven: skip likely-FPs (already disproved), verified ones,
+    anything the analyst already decided is handled by the caller, and anything already researched."""
+    from .triage import severity_rank
+    floor = severity_rank(min_severity)
+    pool = []
+    for f in findings:
+        v = ((f.get("extra") or {}).get("vetting") or {}).get("status")
+        if v in ("likely_fp", "verified") or int(f["id"]) in researched:
+            continue
+        if severity_rank(f.get("severity", "")) < floor:
+            continue
+        pool.append(f)
+    pool.sort(key=lambda f: (-severity_rank(f.get("severity", "")), int(f["id"])))
+    return pool[:limit]
+
+
+@bp.route("/api/scans/<scan_id>/ai-vet", methods=["GET"])
+def ai_vet_get(scan_id: str):
+    if not _deps["scan_exists"](scan_id):
+        return jsonify({"error": "Scan not found"}), 404
+    with _jobs_lock:
+        return jsonify(dict(_vet_jobs.get(scan_id) or {"status": "none"}))
+
+
+@bp.route("/api/scans/<scan_id>/ai-vet", methods=["POST"])
+def ai_vet_start(scan_id: str):
+    if not _deps["scan_exists"](scan_id):
+        return jsonify({"error": "Scan not found"}), 404
+    c = _client()
+    if not c.provider.configured:
+        return _not_configured()
+    root = _decompiled_root(scan_id)
+    if root is None:
+        return jsonify({"error": "The decompiled sources for this scan are not available."}), 409
+    data = _deps["load_findings"](scan_id)
+    if not data or not data.get("findings"):
+        return jsonify({"error": "No findings available for this scan"}), 404
+    body = request.get_json(silent=True) or {}
+    min_sev = body.get("min_severity", "High")
+    if min_sev not in S.SEVERITIES:
+        return jsonify({"error": f"min_severity must be one of {S.SEVERITIES}"}), 400
+    try:
+        limit = max(1, min(int(body.get("max_findings", 10)), 50))
+    except (TypeError, ValueError):
+        return jsonify({"error": "max_findings must be a number"}), 400
+    with _jobs_lock:
+        cur = _vet_jobs.get(scan_id)
+        if cur and cur.get("status") == "running":
+            return jsonify({"error": "AI vetting is already running for this scan"}), 409
+    findings = data["findings"]
+    for i, f in enumerate(findings, start=1):
+        f.setdefault("id", i)
+    db = _deps["db"]
+    decided = {fid for fid, t in db.get_triage_map(scan_id).items()
+               if t.get("status") in ("False Positive", "Confirmed", "Fixed")}
+    researched = set(db.get_ai_research_summary_map(scan_id)) | decided
+    chosen = vet_candidates(findings, researched, min_sev, limit)
+    if not chosen:
+        return jsonify({"error": f"Nothing to vet: every finding at {min_sev} or above is already "
+                                 "verified, disproved, researched or triaged."}), 400
+    pkg = data.get("package") or ""
+    model = S.model_for("research")
+    opts = S.load()["research"]
+    stats = feedback_stats()
+    cancel = threading.Event()
+    _vet_cancel[scan_id] = cancel
+    job = {"status": "running", "total": len(chosen), "done": 0, "cost_usd": 0.0, "model": model,
+           "tally": {"true_positive": 0, "false_positive": 0, "uncertain": 0}, "stopped": None,
+           "started": time.time(), "error": None}
+    with _jobs_lock:
+        _vet_jobs[scan_id] = job
+
+    def run():
+        try:
+            for f in chosen:
+                if cancel.is_set():
+                    job["stopped"] = "cancelled"
+                    break
+                out = _research_one(scan_id, int(f["id"]), f, pkg, root, c, model, opts, stats, cancel)
+                with _jobs_lock:
+                    job["done"] += 1
+                    job["cost_usd"] = round(job["cost_usd"] + out["cost_usd"], 6)
+                    v = out["report"]["verdict"]
+                    job["tally"][v] = job["tally"].get(v, 0) + 1
+                if out["stopped"] and out["stopped"] != "cancelled" and (
+                        "budget" in out["stopped"].lower() or "provider error" in out["stopped"]):
+                    job["stopped"] = out["stopped"]
+                    break
+            with _jobs_lock:
+                job["status"] = "cancelled" if job["stopped"] == "cancelled" else (
+                    "stopped" if job["stopped"] else "done")
+        except Exception as e:                       # noqa: BLE001
+            with _jobs_lock:
+                job["status"], job["error"] = "error", str(e)[:300]
+        finally:
+            job["finished"] = time.time()
+            _vet_cancel.pop(scan_id, None)
+
+    _pool.submit(run)
+    return jsonify({"started": True, "total": len(chosen), "model": model}), 202
+
+
+@bp.route("/api/scans/<scan_id>/ai-vet/cancel", methods=["POST"])
+def ai_vet_cancel(scan_id: str):
+    ev = _vet_cancel.get(scan_id)
+    if not ev:
+        return jsonify({"error": "No AI vetting running for this scan"}), 404
+    ev.set()
+    return jsonify({"ok": True})
 
 
 @bp.route("/api/scans/<scan_id>/findings/<int:finding_id>/ai-research/cancel", methods=["POST"])

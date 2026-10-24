@@ -1024,6 +1024,10 @@ def cmd_scan(args) -> int:
         if extra:
             print(f"[+] Taint/ICC analysis added {len(extra)} finding(s)")
             findings = list(findings) + extra
+    from msra.vetting import vet_findings
+    findings, _vet = vet_findings(findings, scanner.package_name or "")
+    if _vet:
+        print("[+] Vetting: " + ", ".join(f"{k}={v}" for k, v in sorted(_vet.items())))
     source_file_count = sum(1 for _ in iter_source_files(decompiled_dir))
 
     # Get package name and create reports directory

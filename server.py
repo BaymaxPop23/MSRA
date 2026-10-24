@@ -6532,6 +6532,9 @@ def _run_scan(scan_id: str, apk_path: Path):
         if _deep_extra:
             findings = list(findings) + _deep_extra
             _log.info("Deep analysis: %d extra findings for %s", len(_deep_extra), scan_id)
+        from msra.vetting import vet_findings
+        findings, _vet = vet_findings(findings, pkg)
+        _log.info("Vetting for %s: %s", scan_id, _vet)
 
         _set_status(scan_id, status="reporting", progress=80,
                     message=f"Generating report ({len(findings)} findings)…")
