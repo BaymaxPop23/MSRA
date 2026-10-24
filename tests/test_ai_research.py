@@ -220,3 +220,38 @@ def test_research_api_errors(env):
     shutil.rmtree(sd / "decompiled")
     r = c.post("/api/scans/scan1/findings/1/ai-research")
     assert r.status_code == 409 and "decompiled" in r.get_json()["error"]
+
+
+# ── batch vetting ────────────────────────────────────────────────────────
+def test_vet_candidates_skip_proven_and_disproved():
+    fs = [{"id": 1, "severity": "Critical", "extra": {"vetting": {"status": "likely_fp"}}},
+          {"id": 2, "severity": "Critical", "extra": {"vetting": {"status": "verified"}}},
+          {"id": 3, "severity": "High", "extra": {"vetting": {"status": "needs_review"}}},
+          {"id": 4, "severity": "Critical", "extra": {}},
+          {"id": 5, "severity": "Low", "extra": {}},
+          {"id": 6, "severity": "High", "extra": {}}]
+    got = [f["id"] for f in ai_routes.vet_candidates(fs, {6}, "High", 10)]
+    assert got == [4, 3]                       # critical first; 6 already researched; 5 below floor
+    assert [f["id"] for f in ai_routes.vet_candidates(fs, set(), "High", 1)] == [4]
+
+
+def test_ai_vet_api_end_to_end(env):
+    c, fake, sd = env
+    data = json.loads((sd / "findings.json").read_text())
+    data["findings"].append(dict(data["findings"][0], id=2, title="other", extra={"vetting": {"status": "likely_fp"}}))
+    (sd / "findings.json").write_text(json.dumps(data))
+    fake.reply = json.dumps({"action": "final", "report": {"verdict": "false_positive", "confidence": 80,
+                                                           "disproof_attempts": ["constant only"]}})
+    assert c.post("/api/scans/scan1/ai-vet", json={"min_severity": "Banana"}).status_code == 400
+    r = c.post("/api/scans/scan1/ai-vet", json={})
+    assert r.status_code == 202 and r.get_json()["total"] == 1        # finding 2 is already disproved
+    t0 = time.time()
+    while time.time() - t0 < 10:
+        j = c.get("/api/scans/scan1/ai-vet").get_json()
+        if j["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert j["status"] == "done" and j["tally"]["false_positive"] == 1
+    assert c.get("/api/scans/scan1/findings/1/ai-research").get_json()["research"]["verdict"] == "false_positive"
+    again = c.post("/api/scans/scan1/ai-vet", json={})
+    assert again.status_code == 400 and "Nothing to vet" in again.get_json()["error"]

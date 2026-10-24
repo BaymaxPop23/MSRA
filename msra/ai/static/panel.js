@@ -352,6 +352,48 @@
     }, 1000);
   }
 
+
+  // ── AI vet: the researcher proves or disproves the riskiest unproven findings ──
+  var vetPolling = null;
+  function startVet() {
+    var sid = scanId(); if (!sid) return;
+    api('/api/ai/status').then(function (st) {
+      if (!st.provider.configured) { toast('No AI provider is configured. Open AI Settings for setup steps.', 'err', 7000); openSettings(); return; }
+      return api('/api/scans/' + sid + '/ai-vet', { method: 'POST', body: {} }).then(function (r) {
+        toast('AI vetting started: the researcher will investigate ' + r.total + ' High/Critical findings that are not yet proven (' + r.model + ').', 'ok', 7000);
+        watchVet(sid);
+      });
+    }).catch(function (e) { toast(e.message, e.status === 409 ? 'warn' : 'err', 8000); });
+  }
+  function watchVet(sid) {
+    if (vetPolling) return;
+    document.querySelectorAll('.ai-vet-btn').forEach(function (b) { b.disabled = true; });
+    var box = h('div', { class: 'ai-toast' });
+    var line = h('div', { text: 'AI vetting...' });
+    var fill = h('div', { style: 'width:0%' });
+    box.appendChild(line); box.appendChild(h('div', { class: 'ai-bar' }, fill));
+    box.appendChild(h('button', { class: 'btn btn-sm', style: 'margin-top:8px', text: 'Cancel', onclick: function () {
+      api('/api/scans/' + sid + '/ai-vet/cancel', { method: 'POST' }).catch(function () {}); } }));
+    if (!toastBox) { toastBox = h('div', { class: 'ai-toasts' }); document.body.appendChild(toastBox); }
+    toastBox.appendChild(box);
+    vetPolling = setInterval(function () {
+      api('/api/scans/' + sid + '/ai-vet').then(function (j) {
+        fill.style.width = (j.total ? Math.round(100 * j.done / j.total) : 0) + '%';
+        line.textContent = 'AI vetting: ' + j.done + '/' + j.total + ' investigated · ' + money(j.cost_usd);
+        if (j.status === 'running') return;
+        clearInterval(vetPolling); vetPolling = null; box.remove();
+        document.querySelectorAll('.ai-vet-btn').forEach(function (b) { b.disabled = false; });
+        var t = j.tally || {};
+        var msg = 'AI vetting ' + j.status + ': ' + (t.true_positive || 0) + ' confirmed by reading the code, ' +
+          (t.false_positive || 0) + ' disproved, ' + (t.uncertain || 0) + ' still unsure · ' + money(j.cost_usd);
+        if (j.stopped && j.stopped !== 'cancelled') msg += ' - stopped: ' + j.stopped;
+        if (j.error) msg += ' - ' + j.error;
+        toast(msg, j.status === 'done' ? 'ok' : 'warn', 12000);
+        loadFindingData(true).then(decorateRows);
+      }).catch(function () { clearInterval(vetPolling); vetPolling = null; box.remove(); });
+    }, 1500);
+  }
+
   // ── settings modal ──────────────────────────────────────────────────────
   var modal = null;
   function closeSettings() { if (modal) { modal.remove(); modal = null; } document.removeEventListener('keydown', onKey); }
@@ -528,6 +570,8 @@
       var spacer = bar.querySelector('.topbar-spacer');
       var holder = h('span', { style: 'display:inline-flex;gap:6px;align-items:center' });
       if (bar.getAttribute('data-scan-id')) {
+        holder.appendChild(h('button', { class: 'btn btn-sm ai-btn ai-vet-btn', title: 'Have the AI researcher read the code and prove or disprove the riskiest unproven findings',
+          onclick: startVet }, icon('magnifying-glass'), ' AI Vet'));
         holder.appendChild(h('button', { class: 'btn btn-sm ai-btn ai-triage-btn', title: 'Verify findings with independent AI reviewers',
           onclick: startTriage }, icon('wand-magic-sparkles'), ' AI Triage'));
       }
@@ -543,5 +587,5 @@
   }, 120);
   new MutationObserver(refresh).observe(document.body, { childList: true, subtree: true });
   refresh();
-  window.MSRA_AI = { openSettings: openSettings, startTriage: startTriage };
+  window.MSRA_AI = { openSettings: openSettings, startTriage: startTriage, startVet: startVet };
 })();
