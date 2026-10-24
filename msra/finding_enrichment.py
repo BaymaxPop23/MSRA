@@ -177,7 +177,6 @@ ENRICHMENT_RULES: Dict[str, Dict] = {
         "references": [
             "https://owasp.org/www-project-mobile-top-10/2016-risks/m1-improper-platform-usage",
             "https://cwe.mitre.org/data/definitions/798.html",
-            "https://nvd.nist.gov/vuln/detail/CVE-2021-44228",
             "https://blog.gitguardian.com/hardcoded-secrets-in-android-apps/",
             "https://developer.android.com/training/articles/keystore",
             "https://cloud.google.com/secret-manager/docs/overview",

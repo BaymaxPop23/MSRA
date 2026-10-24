@@ -4733,8 +4733,15 @@ function applyFilters() {{
   if (el) el.innerHTML = '';
   renderNextPage();
 
+  updateResultCount();
+}}
+
+function updateResultCount() {{
   const cnt = document.getElementById('fResultCount');
-  if (cnt) cnt.textContent = _filteredFindings.length + ' finding' + (_filteredFindings.length!==1?'s':'');
+  if (!cnt) return;
+  const out = _allFindings.filter(f => ['False Positive','Accepted Risk','Fixed'].includes(f.triage_status)).length;
+  cnt.textContent = _filteredFindings.length + ' finding' + (_filteredFindings.length!==1?'s':'')
+    + (out ? ' · ' + out + ' triaged out (false positive / accepted / fixed)' : '');
 }}
 
 function renderNextPage() {{
@@ -4920,7 +4927,7 @@ function openDrawer(f) {{
     const stepsHtml = steps.length
       ? `<div class="expl-block">
            <div class="expl-sub"><i class="fa-solid fa-list-ol" style="color:var(--accent)"></i> Attack Steps</div>
-           <ol class="expl-list">${{steps.map(s=>`<li>${{escHtml(s)}}</li>`).join('')}}</ol>
+           <ol class="expl-list">${{steps.map(s=>`<li>${{escHtml(String(s).replace(/^\\s*\\d+[.)]\\s*/, ''))}}</li>`).join('')}}</ol>
          </div>` : '';
 
     const impactHtml = impacts.length
@@ -4934,7 +4941,7 @@ function openDrawer(f) {{
            <div class="expl-sub" style="display:flex;align-items:center;justify-content:space-between">
              <span><i class="fa-solid fa-terminal" style="color:var(--accent)"></i> ADB Commands</span>
              <button class="btn btn-sm" style="font-size:10px;padding:2px 7px"
-               onclick="navigator.clipboard.writeText(${{JSON.stringify(adbCmds.join('\\n'))}}).then(()=>showToast('Copied'))">
+               aria-label="Copy ADB commands" onclick="copyPre(this)">
                <i class="fa-solid fa-copy"></i>
              </button>
            </div>
@@ -4946,7 +4953,7 @@ function openDrawer(f) {{
            <div class="expl-sub" style="display:flex;align-items:center;justify-content:space-between">
              <span><i class="fa-solid fa-virus" style="color:var(--critical)"></i> Malicious App Code</span>
              <button class="btn btn-sm" style="font-size:10px;padding:2px 7px"
-               onclick="navigator.clipboard.writeText(${{JSON.stringify(malCode)}}).then(()=>showToast('Copied'))">
+               aria-label="Copy code" onclick="copyPre(this)">
                <i class="fa-solid fa-copy"></i>
              </button>
            </div>
@@ -5131,6 +5138,11 @@ function openDrawer(f) {{
 function closeDrawer() {{
   document.getElementById('findingDrawer')?.classList.remove('open');
   document.getElementById('drawerBackdrop')?.classList.remove('open');
+}}
+
+function copyPre(btn) {{
+  const pre = btn.closest('.expl-block')?.querySelector('pre');
+  if (pre) navigator.clipboard.writeText(pre.textContent).then(() => showToast('Copied'));
 }}
 
 function copyPoc() {{
@@ -5320,6 +5332,12 @@ function saveTriage() {{
   const note     = noteEl?.value   || '';
   const fid      = _drawerFinding.id ?? _drawerFinding.fid;
 
+  if (['False Positive', 'Accepted Risk'].includes(status) && !note.trim()) {{
+    showToast('Add a short justification note for "' + status + '" before saving', 'error');
+    if (noteEl) {{ noteEl.focus(); noteEl.style.borderColor = 'var(--critical)'; }}
+    return;
+  }}
+
   if (btn) {{ btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving…'; }}
 
   fetch(`/api/scans/${{_drawerScanId}}/findings/${{fid}}/triage`, {{
@@ -5339,11 +5357,8 @@ function saveTriage() {{
         pill.className   = 'triage-pill ' + (TRIAGE_CLASS[status] || 'tp-new');
       }}
       // Update the result count (triage filter might now exclude/include this finding)
-      const cnt = document.getElementById('fResultCount');
-      if (cnt) {{
-        const stFilter = (document.getElementById('fFilterStatus')?.value || '').toLowerCase();
-        if (stFilter) applyFilters();
-      }}
+      const stFilter = (document.getElementById('fFilterStatus')?.value || '').toLowerCase();
+      if (stFilter) applyFilters(); else updateResultCount();
       showToast('Triage saved');
     }} else {{
       showToast('Save failed: ' + (d.error || 'Unknown error'), 'error');

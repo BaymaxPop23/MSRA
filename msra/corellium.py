@@ -87,7 +87,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_OPENER = urllib.request.build_opener(_NoRedirect)
+def _opener():
+    """Connect only to the validated address (DNS-rebinding safe) and never follow redirects."""
+    import os
+    from . import security as _sec
+    allow = os.environ.get("MSRA_ALLOW_PRIVATE_CORELLIUM", "").strip().lower() in ("1", "true", "yes")
+    return urllib.request.build_opener(_NoRedirect, *_sec.pinned_handlers(allow_private=allow))
 
 
 class CorelliumClient:
@@ -110,7 +115,7 @@ class CorelliumClient:
         }
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with _OPENER.open(req, timeout=timeout) as resp:
+            with _opener().open(req, timeout=timeout) as resp:
                 raw = resp.read()
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as exc:
@@ -224,7 +229,7 @@ class CorelliumClient:
         headers = {"Authorization": f"Bearer {self.api_token}"}
         req     = urllib.request.Request(url, headers=headers)
         try:
-            with _OPENER.open(req, timeout=15) as resp:
+            with _opener().open(req, timeout=15) as resp:
                 return resp.read()
         except Exception:
             return None

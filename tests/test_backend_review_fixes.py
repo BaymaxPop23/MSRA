@@ -252,3 +252,30 @@ def test_component_prober_stops_when_cancelled():
                         "providers": [{"authority": "x", "paths": []}],
                         "receivers": [{"name": "R", "actions": []}], "services": [{"name": "S"}]})
     assert out == [] and calls == []
+
+
+def test_pinned_connection_refuses_rebinding_and_non_public_hosts(monkeypatch):
+    import socket
+    from msra import security as sec
+    answers = iter([[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))],
+                    [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))]])
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: next(answers))
+    # first answer public -> check passes; the connection step resolves again and sees 127.0.0.1
+    sec.check_public_url("http://rebind.example/")
+    with pytest.raises(OSError, match="non-public"):
+        sec._connect_pinned("rebind.example", 80, 1, allow_private=False)
+
+
+def test_pinned_connect_uses_the_validated_address(monkeypatch):
+    import socket
+    from msra import security as sec
+    seen = {}
+
+    class FakeSock:
+        def settimeout(self, t): pass
+        def connect(self, addr): seen["addr"] = addr
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))])
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: FakeSock())
+    sec._connect_pinned("example.com", 443, 5, allow_private=False)
+    assert seen["addr"] == ("93.184.216.34", 443)

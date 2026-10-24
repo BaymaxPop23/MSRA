@@ -315,9 +315,17 @@ def _looks_like_ui_text(value: str, name: str = "") -> bool:
     return bool(re.fullmatch(r"[A-Z][a-z]{1,15}(?:[/\-][A-Za-z][a-z]{1,15}){1,3}", v))   # "Platinum/Gold"
 
 
+_LABEL_SHAPE = re.compile(r"[A-Za-z]{2,30}|[A-Z][a-z]{1,15}(?:[/\-][A-Za-z][a-z]{1,15}){1,3}")
+_LANG_DIR = re.compile(r"values-[a-z]{2,3}(?:-r[A-Z]{2})?$")
+
+
 def _translated_elsewhere(path: str, name: str, value: str, cache: dict) -> bool:
-    """Same string name defined with a DIFFERENT value in another locale folder: a UI label.
-    Secrets are not translated per language."""
+    """Same string name defined with a DIFFERENT value in another LANGUAGE folder: a UI label.
+    Only consulted for label-shaped values (never for token/key-like strings), and only
+    values-xx / values-xx-rYY folders count, because the scanned app controls what its other
+    resource folders contain."""
+    if not _LABEL_SHAPE.fullmatch(value.strip()):
+        return False
     key = ("loc", path, name)
     if key in cache:
         return cache[key]
@@ -325,8 +333,8 @@ def _translated_elsewhere(path: str, name: str, value: str, cache: dict) -> bool
     try:
         res = Path(path).parent.parent
         pat = re.compile(r'<string\s+name="' + re.escape(name) + r'"[^>]*>(.*?)</string>', re.S)
-        for sib in res.glob("values*/strings.xml"):
-            if sib.resolve() == Path(path).resolve():
+        for sib in res.glob("values-*/strings.xml"):
+            if not _LANG_DIR.fullmatch(sib.parent.name) or sib.resolve() == Path(path).resolve():
                 continue
             m = pat.search(sib.read_text(encoding="utf-8", errors="replace"))
             if m and m.group(1).strip() != value.strip():

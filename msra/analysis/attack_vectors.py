@@ -5,6 +5,7 @@ Provides detailed explanations of how attackers can exploit vulnerabilities
 in Android applications through malicious APKs, deep links, etc.
 """
 
+import re
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 
@@ -621,6 +622,12 @@ def get_attack_description(finding_id: str, finding_title: str, component_type: 
     fid_lower = finding_id.lower()
     title_lower = finding_title.lower()
 
+    # Secrets, SBOM and SDK-level findings have no component attack chain: showing the nearest
+    # keyword match (e.g. a "storage" rule id -> insecure external storage) would be misleading.
+    if re.search(r"hardcoded|credential|secret|api[ _-]?key|sbom|bill of materials|minsdk|targetsdk|outdated|"
+                 r"high-entropy|credential-like", fid_lower + " " + title_lower):
+        return result
+
     # Map finding to attack vector
     if 'webview' in fid_lower or 'webview' in title_lower:
         if 'url' in fid_lower or 'load' in title_lower:
@@ -645,7 +652,7 @@ def get_attack_description(finding_id: str, finding_title: str, component_type: 
         vector = ATTACK_VECTORS.get('exported_receiver')
     elif 'deep' in fid_lower or 'link' in fid_lower or 'scheme' in title_lower:
         vector = ATTACK_VECTORS.get('deep_link_hijacking')
-    elif 'crypto' in fid_lower or 'encrypt' in title_lower or 'key' in title_lower:
+    elif 'crypto' in fid_lower or re.search(r'encrypt|cipher|\becb\b|\bmd5\b|sha-?1\b|\bdes\b|rc4', title_lower):
         vector = ATTACK_VECTORS.get('weak_crypto')
     elif 'storage' in fid_lower or 'file' in title_lower or 'shared' in title_lower:
         vector = ATTACK_VECTORS.get('insecure_storage')

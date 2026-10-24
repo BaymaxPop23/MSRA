@@ -6,10 +6,12 @@ these helpers rather than ad-hoc checks.
 """
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import re
 import shlex
 import socket
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -103,22 +105,66 @@ def check_public_url(url: str) -> str:
     return url
 
 
+def _connect_pinned(host: str, port: int, timeout, allow_private: bool) -> socket.socket:
+    """Resolve once, require EVERY address to be public, then connect to one of those exact
+    addresses. This closes the resolve-then-connect gap a DNS-rebinding host would exploit."""
+    infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    if not infos:
+        raise OSError(f"cannot resolve {host}")
+    if not allow_private:
+        for info in infos:
+            if not _ip_is_public(info[4][0]):
+                raise OSError("host resolves to a non-public address")
+    last: Optional[Exception] = None
+    for family, socktype, proto, _canon, addr in infos:
+        try:
+            sock = socket.socket(family, socktype, proto)
+            sock.settimeout(timeout if isinstance(timeout, (int, float)) else None)
+            sock.connect(addr)
+            return sock
+        except OSError as exc:
+            last = exc
+    raise last or OSError(f"cannot connect to {host}")
+
+
+def pinned_handlers(allow_private: bool = False) -> list:
+    """urllib handlers whose connections go to the address that was validated (see _connect_pinned)."""
+
+    class _HTTP(http.client.HTTPConnection):
+        def connect(self):
+            self.sock = _connect_pinned(self.host, self.port, self.timeout, allow_private)
+
+    class _HTTPS(http.client.HTTPSConnection):
+        def connect(self):
+            sock = _connect_pinned(self.host, self.port, self.timeout, allow_private)
+            self.sock = ssl.create_default_context().wrap_socket(sock, server_hostname=self.host)
+
+    class _HTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(_HTTP, req)
+
+    class _HTTPSHandler(urllib.request.HTTPSHandler):
+        def https_open(self, req):
+            return self.do_open(_HTTPS, req)
+
+    return [_HTTPHandler(), _HTTPSHandler()]
+
+
 class _SafeRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         check_public_url(newurl)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_OPENER = urllib.request.build_opener(_SafeRedirect)
+_OPENER = urllib.request.build_opener(_SafeRedirect, *pinned_handlers())
 
 
 def safe_fetch(url: str, *, timeout: float = 15, max_bytes: int = 500_000,
                headers: Optional[dict] = None) -> tuple[bytes, str]:
     """Fetch *url* with SSRF protection. Returns (body, content_type).
 
-    Validates the initial URL and every redirect target. Note: a determined
-    DNS-rebinding attacker can still race the resolve/connect gap; for hostile
-    networks, also egress-filter the host.
+    Validates the initial URL and every redirect target, and connects to the exact addresses
+    that were validated (no resolve-then-connect gap for DNS rebinding).
     """
     check_public_url(url)
     req = urllib.request.Request(url, headers=headers or {"User-Agent": "MSRA/2.0"})

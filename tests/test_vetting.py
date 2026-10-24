@@ -303,3 +303,15 @@ def test_platinum_gold_label_is_proven_by_its_translation(tmp_path):
                        fid="secret-high-entropy-literal:x")) == "needs_review"
     assert status(_res(tmp_path, "IB_TOKEN_PROTOCOL_NAME_5", line, title="Hardcoded credential-like value",
                        fid="secret-high-entropy-literal:x", translated="Platinum/goud")) == "likely_fp"
+
+
+def test_translation_proof_cannot_launder_token_like_values_or_fake_locale_dirs(tmp_path):
+    # a token-like value with a "translation" elsewhere is still a finding
+    line = '    <string name="api_token">9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c</string>'
+    assert status(_res(tmp_path, "api_token", line, translated="different")) == "needs_review"
+    # a plain word whose only "translation" lives in a non-language folder does not count
+    f = _res(tmp_path, "PASSWORD", '    <string name="PASSWORD">Password</string>')
+    fake = tmp_path / "decompiled/resources/res/values-evil/strings.xml"
+    fake.parent.mkdir(parents=True, exist_ok=True)
+    fake.write_text('<resources>\n    <string name="PASSWORD">x</string>\n</resources>\n')
+    assert status(f) == "needs_review"
