@@ -399,6 +399,62 @@ def vet_candidates(findings: list, researched: set, min_severity: str, limit: in
     return [f for _, f in pool[:limit]]
 
 
+# ── AI Review: one entry point = deep research on the riskiest + quick votes on the rest ──
+
+_DEEP_CALLS_TOKENS = (3000, 600)      # rough input/output tokens per researcher step
+_QUICK_CALL_TOKENS = (1500, 250)      # rough input/output tokens per triage vote
+DEEP_DEFAULT_LIMIT = 10
+
+
+def review_plan(findings: list, researched: set, triaged_by_ai: set, decided: set, cfg: dict,
+                deep_limit: int = DEEP_DEFAULT_LIMIT) -> dict:
+    """Which findings get the deep researcher, which get quick votes, and a rough cost."""
+    from .models import price_for
+    deep = vet_candidates(findings, researched | decided, "High", deep_limit)
+    deep_ids = {int(f["id"]) for f in deep}
+    t = cfg["triage"]
+    quick = select_findings(findings, t["min_severity"], t["max_findings"],
+                            deep_ids | researched | triaged_by_ai | decided)
+    r_in, r_out = _DEEP_CALLS_TOKENS
+    q_in, q_out = _QUICK_CALL_TOKENS
+    steps = cfg["research"]["max_steps"]
+    rp = price_for(S.model_for("research"), cfg.get("pricing"))
+    tp = price_for(S.model_for("triage"), cfg.get("pricing"))
+    per_deep = steps * (r_in * rp["input"] + r_out * rp["output"]) / 1e6
+    per_quick = t["votes"] * (q_in * tp["input"] + q_out * tp["output"]) / 1e6
+    return {"deep": len(deep), "quick": len(quick),
+            "deep_ids": sorted(deep_ids), "quick_ids": sorted(int(f["id"]) for f in quick),
+            "est_usd": round(len(deep) * per_deep + len(quick) * per_quick, 2),
+            "est_usd_max": round(len(deep) * min(per_deep, cfg["research"]["max_usd"]) +
+                                 len(quick) * per_quick, 2),
+            "models": {"research": S.model_for("research"), "triage": S.model_for("triage")},
+            "budget_cap": cfg["budget"].get("usd_cap")}
+
+
+@bp.route("/api/scans/<scan_id>/ai-review/plan", methods=["GET"])
+def ai_review_plan(scan_id: str):
+    if not _deps["scan_exists"](scan_id):
+        return jsonify({"error": "Scan not found"}), 404
+    c = _client()
+    data = _deps["load_findings"](scan_id)
+    if not data or not data.get("findings"):
+        return jsonify({"error": "No findings available for this scan"}), 404
+    findings = data["findings"]
+    for i, f in enumerate(findings, start=1):
+        f.setdefault("id", i)
+    db = _deps["db"]
+    decided = {fid for fid, t in db.get_triage_map(scan_id).items()
+               if t.get("status") in ("False Positive", "Confirmed", "Fixed")}
+    plan = review_plan(findings, set(db.get_ai_research_summary_map(scan_id)),
+                       set(db.get_ai_triage_map(scan_id)), decided, S.load())
+    plan["configured"] = c.provider.configured
+    plan["deep_available"] = _decompiled_root(scan_id) is not None
+    if not plan["deep_available"]:
+        plan["quick"] += plan["deep"]          # no sources to read: those findings get quick votes instead
+        plan["deep"] = 0
+    return jsonify(plan)
+
+
 @bp.route("/api/scans/<scan_id>/ai-vet", methods=["GET"])
 def ai_vet_get(scan_id: str):
     if not _deps["scan_exists"](scan_id):

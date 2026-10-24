@@ -152,6 +152,19 @@ def _bad_scan_id(exc):
     return Response("Invalid scan id", status=400, mimetype="text/plain")
 
 
+@app.errorhandler(404)
+def _not_found(exc):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Not found"}), 404
+    return Response(
+        '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<title>Not found - MSRA</title><body style="font-family:system-ui,sans-serif;background:#0d1117;color:#e6edf3;'
+        'display:grid;place-items:center;min-height:100vh;margin:0"><main style="text-align:center;padding:24px">'
+        '<h1 style="margin:0 0 8px">Not found</h1><p style="color:#8b949e">That scan or page does not exist '
+        '(it may have been deleted).</p><a href="/" style="color:#58a6ff">Back to the dashboard</a></main></body>',
+        status=404, mimetype="text/html")
+
+
 @app.errorhandler(Exception)
 def _unhandled(exc):
     from werkzeug.exceptions import HTTPException
@@ -2650,7 +2663,7 @@ code,pre{{font-family:'JetBrains Mono',monospace}}
 
 /* ── Phone (≤480px) ── */
 @media (max-width:480px){{
-  .topbar{{padding:0 10px;height:48px;gap:6px}}
+  .topbar{{padding:6px 10px;height:auto;min-height:48px;gap:6px;flex-wrap:wrap}}
   .topbar-pkg{{display:none}}
   .topbar-meta{{gap:6px}}
   .topbar-meta>span{{display:none}}
@@ -2668,9 +2681,9 @@ code,pre{{font-family:'JetBrains Mono',monospace}}
   /* Findings list */
   .findings-list{{padding:8px 10px}}
   .finding-row{{padding:10px 12px;border-radius:var(--radius-sm)}}
-  .fr-top{{gap:6px}}
+  .fr-top{{gap:6px;flex-wrap:wrap}}
   .fr-sev{{width:52px;font-size:10px}}
-  .fr-title{{font-size:12px}}
+  .fr-title{{font-size:12px;flex:1 1 60%;min-width:0}}
   .fr-desc{{font-size:12px}}
 
   /* Drawer */
@@ -4683,7 +4696,10 @@ function loadFindingsTab() {{
   if (allChip) allChip.textContent = 'All (' + _allFindings.length + ')';
   ['Critical','High','Medium','Low','Info'].forEach(sev => {{
     const chip = document.querySelector(`.f-chip[data-sev="${{sev}}"]`);
-    if (chip) chip.textContent = sevCounts[sev] ? sev + ' (' + sevCounts[sev] + ')' : sev;
+    if (chip) {{
+      chip.textContent = sevCounts[sev] ? sev + ' (' + sevCounts[sev] + ')' : sev;
+      chip.style.display = sevCounts[sev] ? '' : 'none';      // a chip that can only return 0 is noise
+    }}
   }});
 
   // Populate category dropdown
@@ -4863,7 +4879,9 @@ function escHtml(s) {{
 let _drawerFinding = null;
 let _drawerScanId  = null;
 
+let _drawerOpener = null;
 function openDrawer(f) {{
+  _drawerOpener = document.activeElement;
   _drawerFinding = f;
   _drawerScanId = _getScanId() || '';
 
@@ -4990,7 +5008,7 @@ function openDrawer(f) {{
             padding:2px 10px;border-radius:4px;font-size:11px;font-weight:700">${{sev}}</span>
       <span style="font-size:14px;font-weight:700;color:var(--text);flex:1;min-width:0;
             overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${{escHtml(f.title||'')}}">${{escHtml(f.title||'')}}</span>
-      <button class="drawer-close" onclick="closeDrawer()"><i class="fa-solid fa-xmark"></i></button>
+      <button class="drawer-close" onclick="closeDrawer()" aria-label="Close finding details"><i class="fa-solid fa-xmark"></i></button>
     </div>
     <div class="drawer-body">
       <div class="drawer-section" style="padding-bottom:10px">
@@ -5138,6 +5156,8 @@ function openDrawer(f) {{
 function closeDrawer() {{
   document.getElementById('findingDrawer')?.classList.remove('open');
   document.getElementById('drawerBackdrop')?.classList.remove('open');
+  if (_drawerOpener && _drawerOpener.focus) {{ try {{ _drawerOpener.focus(); }} catch (e) {{}} }}
+  _drawerOpener = null;
 }}
 
 function copyPre(btn) {{
@@ -5629,7 +5649,7 @@ def _build_scan_content(scan_id: str | None, current: dict | None,
 <script type="application/json" id="findingsData">{findings_data_json}</script>
 
 <!-- Detail Drawer -->
-<div class="finding-drawer" id="findingDrawer"></div>
+<div class="finding-drawer" id="findingDrawer" role="dialog" aria-modal="true" aria-label="Finding details"></div>
 <div class="drawer-backdrop" id="drawerBackdrop" onclick="closeDrawer()"></div>
 '''
 
@@ -6002,7 +6022,7 @@ def _build_intelligence_hub() -> str:
         <div class="intel-brand-icon"><i class="fa-solid fa-brain"></i></div>
         <div>
           <h1>Intelligence Hub</h1>
-          <p>MSRA detection rules &nbsp;·&nbsp; 77+ patterns &nbsp;·&nbsp; OWASP Mobile Top 10</p>
+          <p>MSRA detection rules &nbsp;·&nbsp; OWASP Mobile Top 10</p>
         </div>
       </div>
     </div>

@@ -93,6 +93,7 @@
     '.ai-vote .t{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:3px}',
     '.ai-rsec{margin-top:8px;font-size:12.5px}.ai-rt{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:2px;cursor:default}',
     '.ai-rli{margin:2px 0}.ai-rsec code{font-size:11.5px}',
+    '@media (max-width:600px){.topbar{flex-wrap:wrap;row-gap:6px}.ai-badges{display:flex;flex-basis:100%;margin:4px 0 0}.ai-toasts{left:12px;right:12px;max-width:none}}',
     '@media (max-width:700px){.ai-row{grid-template-columns:1fr}.ai-grid{grid-template-columns:1fr}}'
   ].join('\n');
   document.head.appendChild(h('style', { id: 'msra-ai-css', text: css }));
@@ -146,15 +147,11 @@
       if (old) old.remove();
       if (!info || (!info.ai && !info.fb && !info.rs)) return;
       var wrap = h('span', { class: 'ai-badges', 'data-for': id, 'data-sig': sig });
-      if (info.ai) {
-        var v = VERDICT[info.ai.verdict] || VERDICT.uncertain;
-        wrap.appendChild(badge(v.label + ' ' + Math.round(info.ai.confidence || 0) + '%', v.cls,
-          'Verified by ' + info.ai.model + ' (' + ((info.ai.detail || {}).agree || '?') + ' verifiers agree)'));
-      }
-      if (info.rs) {
-        var rv = VERDICT[info.rs.verdict] || VERDICT.uncertain;
-        wrap.appendChild(badge(rv.label.replace('AI:', 'Research:') + ' ' + Math.round(info.rs.confidence || 0) + '%', rv.cls,
-          'Investigated by ' + info.rs.model + ' (read the code, not just the snippet)'));
+      var chip = info.rs ? { v: info.rs, how: 'investigated by reading the code (' + info.rs.model + ')' }
+               : info.ai ? { v: info.ai, how: 'quick check (' + ((info.ai.detail || {}).agree || '?') + ' reviewers agree, ' + info.ai.model + ')' } : null;
+      if (chip && chip.v.verdict !== 'uncertain') {
+        var cv = VERDICT[chip.v.verdict] || VERDICT.uncertain;
+        wrap.appendChild(badge(cv.label + ' ' + Math.round(chip.v.confidence || 0) + '%', cv.cls, 'AI ' + chip.how));
       }
       if (info.fb && info.fb.fp_rate >= 0.6) {
         wrap.appendChild(badge('rule: ' + info.fb.fp + '/' + info.fb.total + ' FP', 'warn',
@@ -282,7 +279,7 @@
         'Triage judges the snippet. The researcher reads the surrounding code like an analyst would: finds how it is reached, traces the data, tries to disprove it, and writes up what it found.' }));
       if (job.status === 'error') card.appendChild(h('div', { class: 'ai-note', style: 'color:#f87171', text: job.error }));
       card.appendChild(h('button', { class: 'btn btn-sm ai-btn', style: 'margin-top:10px', onclick: start },
-        icon('magnifying-glass'), saved ? ' Re-investigate' : ' Investigate with AI'));
+        icon('magnifying-glass'), saved ? ' Investigate again' : ' Investigate this finding'));
     }
     function poll() {
       stop();
@@ -305,94 +302,144 @@
 
   // ── AI triage run ───────────────────────────────────────────────────────
   var polling = null;
-  function triageButtonState(running) {
-    document.querySelectorAll('.ai-triage-btn').forEach(function (b) { b.disabled = !!running; });
+  function watchTriage(sid, silent) {
+    return new Promise(function (resolve) {
+      if (polling) { resolve(null); return; }
+      var box = h('div', { class: 'ai-toast' });
+      var line = h('div', { text: 'Quick checks running...' });
+      var fill = h('div', { style: 'width:0%' });
+      box.appendChild(line); box.appendChild(h('div', { class: 'ai-bar' }, fill));
+      box.appendChild(h('button', { class: 'btn btn-sm', style: 'margin-top:8px', text: 'Cancel', onclick: function () {
+        api('/api/scans/' + sid + '/ai-triage/cancel', { method: 'POST' }).catch(function () {}); } }));
+      if (!toastBox) { toastBox = h('div', { class: 'ai-toasts' }); document.body.appendChild(toastBox); }
+      toastBox.appendChild(box);
+      polling = setInterval(function () {
+        api('/api/scans/' + sid + '/ai-triage').then(function (j) {
+          fill.style.width = (j.calls_total ? Math.round(100 * j.calls_done / j.calls_total) : 0) + '%';
+          line.textContent = 'Quick checks: ' + j.done + '/' + j.total + ' findings · ' + money(j.cost_usd);
+          if (j.status === 'running') return;
+          clearInterval(polling); polling = null; box.remove();
+          if (!silent) {
+            var tally = { true_positive: 0, false_positive: 0, uncertain: 0 };
+            Object.keys(j.results || {}).forEach(function (k) { tally[j.results[k].verdict] = (tally[j.results[k].verdict] || 0) + 1; });
+            toast('Quick checks ' + j.status + ': ' + tally.true_positive + ' likely real, ' + tally.false_positive +
+              ' likely false positives, ' + tally.uncertain + ' unsure · ' + money(j.cost_usd), j.status === 'done' ? 'ok' : 'warn', 9000);
+          }
+          loadFindingData(true).then(decorateRows);
+          resolve(j);
+        }).catch(function () { clearInterval(polling); polling = null; box.remove(); resolve(null); });
+      }, 1000);
+    });
   }
-  function startTriage() {
-    var sid = scanId(); if (!sid) return;
+
+  // ── AI vet: the researcher proves or disproves the riskiest unproven findings ──
+  var vetPolling = null;
+  function watchVet(sid, silent) {
+    return new Promise(function (resolve) {
+      if (vetPolling) { resolve(null); return; }
+      var box = h('div', { class: 'ai-toast' });
+      var line = h('div', { text: 'Deep investigation running...' });
+      var fill = h('div', { style: 'width:0%' });
+      box.appendChild(line); box.appendChild(h('div', { class: 'ai-bar' }, fill));
+      box.appendChild(h('button', { class: 'btn btn-sm', style: 'margin-top:8px', text: 'Cancel', onclick: function () {
+        api('/api/scans/' + sid + '/ai-vet/cancel', { method: 'POST' }).catch(function () {}); } }));
+      if (!toastBox) { toastBox = h('div', { class: 'ai-toasts' }); document.body.appendChild(toastBox); }
+      toastBox.appendChild(box);
+      vetPolling = setInterval(function () {
+        api('/api/scans/' + sid + '/ai-vet').then(function (j) {
+          fill.style.width = (j.total ? Math.round(100 * j.done / j.total) : 0) + '%';
+          line.textContent = 'Deep investigation: ' + j.done + '/' + j.total + ' findings · ' + money(j.cost_usd);
+          if (j.status === 'running') return;
+          clearInterval(vetPolling); vetPolling = null; box.remove();
+          if (!silent) {
+            var t = j.tally || {};
+            toast('Deep investigation ' + j.status + ': ' + (t.true_positive || 0) + ' confirmed from the code, ' +
+              (t.false_positive || 0) + ' disproved, ' + (t.uncertain || 0) + ' still unsure · ' + money(j.cost_usd),
+              j.status === 'done' ? 'ok' : 'warn', 12000);
+          }
+          loadFindingData(true).then(decorateRows);
+          resolve(j);
+        }).catch(function () { clearInterval(vetPolling); vetPolling = null; box.remove(); resolve(null); });
+      }, 1500);
+    });
+  }
+
+  // ── AI Review: ONE entry point. Deep code-reading on the riskiest findings, quick checks on the rest ──
+  var reviewing = false;
+  function setReviewBusy(b) {
+    reviewing = b;
+    document.querySelectorAll('.ai-review-btn').forEach(function (el) { el.disabled = b; });
+  }
+  function startReview() {
+    var sid = scanId(); if (!sid || reviewing) return;
     api('/api/ai/status').then(function (st) {
       if (!st.provider.configured) {
         toast('No AI provider is configured. Open AI Settings for setup steps.', 'err', 7000);
         openSettings(); return;
       }
-      var model = st.settings.models.triage, votes = st.settings.triage.votes;
-      return api('/api/scans/' + sid + '/ai-triage', { method: 'POST', body: {} }).then(function (r) {
-        toast('AI triage started: ' + r.total + ' findings × ' + r.votes + ' verifiers with ' + r.model, 'ok');
-        watchTriage(sid);
-      });
-    }).catch(function (e) { toast(e.message, e.status === 409 ? 'warn' : 'err', 7000); });
+      return api('/api/scans/' + sid + '/ai-review/plan').then(function (plan) { confirmReview(sid, plan); });
+    }).catch(function (e) { toast(e.message, 'err', 7000); });
   }
-  function watchTriage(sid) {
-    if (polling) return;
-    triageButtonState(true);
-    var box = h('div', { class: 'ai-toast' });
-    var line = h('div', { text: 'AI triage running...' });
-    var fill = h('div', { style: 'width:0%' });
-    var cancel = h('button', { class: 'btn btn-sm', style: 'margin-top:8px', text: 'Cancel',
-      onclick: function () { api('/api/scans/' + sid + '/ai-triage/cancel', { method: 'POST' }).catch(function () {}); } });
-    box.appendChild(line); box.appendChild(h('div', { class: 'ai-bar' }, fill)); box.appendChild(cancel);
+  function confirmReview(sid, plan) {
+    if (!plan.deep && !plan.quick) {
+      toast('Nothing to review: every finding is already reviewed, triaged by you, or below the severity floor.', 'ok', 7000);
+      return;
+    }
+    var box = h('div', { class: 'ai-toast', role: 'alertdialog', 'aria-label': 'Confirm AI Review' });
+    var lines = [];
+    if (plan.deep) lines.push(plan.deep + ' high-risk finding' + (plan.deep > 1 ? 's' : '') + ' investigated in depth by reading the code (' + plan.models.research + ')');
+    if (plan.quick) lines.push(plan.quick + ' more checked quickly (' + plan.models.triage + ')');
+    if (!plan.deep_available) lines.push('Decompiled sources are not available, so no deep investigation is possible for this scan.');
+    box.appendChild(h('div', { style: 'font-weight:600;margin-bottom:6px', text: 'Run AI Review?' }));
+    lines.forEach(function (l) { box.appendChild(h('div', { text: l })); });
+    box.appendChild(h('div', { class: 'ai-note', style: 'margin-top:6px', text: 'Estimated cost about ' + money(plan.est_usd) +
+      (plan.budget_cap != null ? ' (spend cap ' + money(plan.budget_cap) + ')' : '') + '. Results are advisory; nothing is changed on your findings.' }));
+    var row = h('div', { style: 'display:flex;gap:8px;margin-top:10px' });
+    row.appendChild(h('button', { class: 'btn btn-primary btn-sm', text: 'Run', onclick: function () { box.remove(); runReview(sid, plan); } }));
+    row.appendChild(h('button', { class: 'btn btn-sm', text: 'Cancel', onclick: function () { box.remove(); } }));
+    box.appendChild(row);
     if (!toastBox) { toastBox = h('div', { class: 'ai-toasts' }); document.body.appendChild(toastBox); }
     toastBox.appendChild(box);
-    polling = setInterval(function () {
-      api('/api/scans/' + sid + '/ai-triage').then(function (j) {
-        var pct = j.calls_total ? Math.round(100 * j.calls_done / j.calls_total) : 0;
-        fill.style.width = pct + '%';
-        line.textContent = 'AI triage: ' + j.done + '/' + j.total + ' findings verified · ' + money(j.cost_usd);
-        if (j.status === 'running') return;
-        clearInterval(polling); polling = null; box.remove(); triageButtonState(false);
-        var tally = { true_positive: 0, false_positive: 0, uncertain: 0 };
-        Object.keys(j.results || {}).forEach(function (k) { tally[j.results[k].verdict] = (tally[j.results[k].verdict] || 0) + 1; });
-        var msg = 'AI triage ' + j.status + ': ' + tally.true_positive + ' likely real, ' + tally.false_positive +
-          ' likely false positives, ' + tally.uncertain + ' unsure · ' + money(j.cost_usd);
-        if (j.stopped && j.stopped !== 'cancelled') msg += ' - stopped: ' + j.stopped;
-        if (j.error) msg += ' - ' + j.error;
-        toast(msg, j.status === 'done' ? 'ok' : 'warn', 9000);
-        loadFindingData(true).then(decorateRows);
-      }).catch(function () { clearInterval(polling); polling = null; box.remove(); triageButtonState(false); });
-    }, 1000);
   }
-
-
-  // ── AI vet: the researcher proves or disproves the riskiest unproven findings ──
-  var vetPolling = null;
-  function startVet() {
-    var sid = scanId(); if (!sid) return;
-    api('/api/ai/status').then(function (st) {
-      if (!st.provider.configured) { toast('No AI provider is configured. Open AI Settings for setup steps.', 'err', 7000); openSettings(); return; }
-      return api('/api/scans/' + sid + '/ai-vet', { method: 'POST', body: {} }).then(function (r) {
-        toast('AI vetting started: the researcher will investigate ' + r.total + ' High/Critical findings that are not yet proven (' + r.model + ').', 'ok', 7000);
-        watchVet(sid);
+  function runReview(sid, plan) {
+    setReviewBusy(true);
+    var summary = { deep: null, quick: null };
+    var chain = Promise.resolve();
+    if (plan.deep) {
+      chain = chain.then(function () {
+        return api('/api/scans/' + sid + '/ai-vet', { method: 'POST', body: { max_findings: plan.deep } })
+          .then(function () { return watchVet(sid, true); }).then(function (j) { summary.deep = j; });
       });
-    }).catch(function (e) { toast(e.message, e.status === 409 ? 'warn' : 'err', 8000); });
-  }
-  function watchVet(sid) {
-    if (vetPolling) return;
-    document.querySelectorAll('.ai-vet-btn').forEach(function (b) { b.disabled = true; });
-    var box = h('div', { class: 'ai-toast' });
-    var line = h('div', { text: 'AI vetting...' });
-    var fill = h('div', { style: 'width:0%' });
-    box.appendChild(line); box.appendChild(h('div', { class: 'ai-bar' }, fill));
-    box.appendChild(h('button', { class: 'btn btn-sm', style: 'margin-top:8px', text: 'Cancel', onclick: function () {
-      api('/api/scans/' + sid + '/ai-vet/cancel', { method: 'POST' }).catch(function () {}); } }));
-    if (!toastBox) { toastBox = h('div', { class: 'ai-toasts' }); document.body.appendChild(toastBox); }
-    toastBox.appendChild(box);
-    vetPolling = setInterval(function () {
-      api('/api/scans/' + sid + '/ai-vet').then(function (j) {
-        fill.style.width = (j.total ? Math.round(100 * j.done / j.total) : 0) + '%';
-        line.textContent = 'AI vetting: ' + j.done + '/' + j.total + ' investigated · ' + money(j.cost_usd);
-        if (j.status === 'running') return;
-        clearInterval(vetPolling); vetPolling = null; box.remove();
-        document.querySelectorAll('.ai-vet-btn').forEach(function (b) { b.disabled = false; });
-        var t = j.tally || {};
-        var msg = 'AI vetting ' + j.status + ': ' + (t.true_positive || 0) + ' confirmed by reading the code, ' +
-          (t.false_positive || 0) + ' disproved, ' + (t.uncertain || 0) + ' still unsure · ' + money(j.cost_usd);
-        if (j.stopped && j.stopped !== 'cancelled') msg += ' - stopped: ' + j.stopped;
-        if (j.error) msg += ' - ' + j.error;
-        toast(msg, j.status === 'done' ? 'ok' : 'warn', 12000);
+    }
+    if (plan.quick) {
+      chain = chain.then(function () {
+        if (summary.deep && summary.deep.stopped && summary.deep.stopped !== 'cancelled') return null;   // budget/provider problem: stop
+        if (summary.deep && summary.deep.status === 'cancelled') return null;
+        return api('/api/scans/' + sid + '/ai-triage', { method: 'POST', body: { force: false } })
+          .then(function () { return watchTriage(sid, true); }).then(function (j) { summary.quick = j; });
+      });
+    }
+    chain.catch(function (e) { toast(e.message, e.status === 409 ? 'warn' : 'err', 8000); })
+      .then(function () {
+        setReviewBusy(false);
+        var parts = [], cost = 0, real = 0, fp = 0, unsure = 0;
+        if (summary.deep) { var t = summary.deep.tally || {}; real += t.true_positive || 0; fp += t.false_positive || 0; unsure += t.uncertain || 0; cost += summary.deep.cost_usd || 0; }
+        if (summary.quick) {
+          var mine = {}; (plan.quick_ids || []).forEach(function (id) { mine[String(id)] = true; });
+          Object.keys(summary.quick.results || {}).forEach(function (k) {
+            if (!mine[k]) return;                       // only the findings this run covered
+            var v = summary.quick.results[k].verdict;
+            if (v === 'true_positive') real++; else if (v === 'false_positive') fp++; else unsure++;
+          });
+          cost += summary.quick.cost_usd || 0;
+        }
+        var stopped = (summary.deep && summary.deep.stopped) || (summary.quick && summary.quick.stopped);
+        toast('AI Review finished: ' + real + ' likely real, ' + fp + ' likely false positives, ' + unsure + ' unsure · ' + money(cost) +
+          (stopped && stopped !== 'cancelled' ? ' - stopped: ' + stopped : ''), stopped ? 'warn' : 'ok', 15000);
         loadFindingData(true).then(decorateRows);
-      }).catch(function () { clearInterval(vetPolling); vetPolling = null; box.remove(); });
-    }, 1500);
+      });
   }
+  function startVet() { startReview(); }
 
   // ── settings modal ──────────────────────────────────────────────────────
   var modal = null;
@@ -413,7 +460,7 @@
       onclick: function (e) { if (e.target === modal) closeSettings(); } },
       h('div', { class: 'ai-modal' },
         h('div', { class: 'ai-head' }, icon('robot'), h('h2', { text: 'AI Settings' }),
-          h('button', { class: 'ai-x', 'aria-label': 'Close', onclick: closeSettings }, icon('xmark'))),
+          h('button', { class: 'ai-x', 'aria-label': 'Close AI settings', onclick: closeSettings }, icon('xmark'))),
         body, foot));
     document.body.appendChild(modal);
     document.addEventListener('keydown', onKey);
@@ -570,10 +617,9 @@
       var spacer = bar.querySelector('.topbar-spacer');
       var holder = h('span', { style: 'display:inline-flex;gap:6px;align-items:center' });
       if (bar.getAttribute('data-scan-id')) {
-        holder.appendChild(h('button', { class: 'btn btn-sm ai-btn ai-vet-btn', title: 'Have the AI researcher read the code and prove or disprove the riskiest unproven findings',
-          onclick: startVet }, icon('magnifying-glass'), ' AI Vet'));
-        holder.appendChild(h('button', { class: 'btn btn-sm ai-btn ai-triage-btn', title: 'Verify findings with independent AI reviewers',
-          onclick: startTriage }, icon('wand-magic-sparkles'), ' AI Triage'));
+        holder.appendChild(h('button', { class: 'btn btn-sm ai-btn ai-review-btn',
+          title: 'Let the AI check your findings: deep code-reading on the riskiest, quick checks on the rest',
+          onclick: startReview }, icon('wand-magic-sparkles'), ' AI Review'));
       }
       holder.appendChild(h('button', { class: 'btn btn-sm ai-btn', title: 'Choose models, budget and AI options',
         onclick: openSettings }, icon('robot'), ' AI'));
@@ -587,5 +633,5 @@
   }, 120);
   new MutationObserver(refresh).observe(document.body, { childList: true, subtree: true });
   refresh();
-  window.MSRA_AI = { openSettings: openSettings, startTriage: startTriage, startVet: startVet };
+  window.MSRA_AI = { openSettings: openSettings, startReview: startReview };
 })();
