@@ -18,13 +18,21 @@ def status(f, pkg="com.app"):
     return f.extra["vetting"]["status"]
 
 
-def test_ddl_in_oncreate_is_disproved_and_demoted():
-    f = mk("SQL Injection in ContentProvider",
-           'db.execSQL("CREATE TABLE " + name() + " (a TEXT)");')
+def helper_file(tmp_path, body, base="SQLiteOpenHelper", method="onCreate", name="H.java"):
+    src = tmp_path / "decompiled/sources/com/app" / name
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text(f"public class {name[:-5]} extends {base} {{\n  public void {method}(SQLiteDatabase db) {{\n"
+                   f"{body}\n  }}\n}}\n")
+    return str(src)
+
+
+def test_ddl_in_oncreate_is_disproved_and_demoted(tmp_path):
+    stmt = '    db.execSQL("CREATE TABLE " + name() + " (a TEXT)");'
+    f = mk("SQL Injection in ContentProvider", stmt.strip(), line=3, path=helper_file(tmp_path, stmt))
     assert status(f) == "likely_fp"
     assert f.severity == "Low" and f.extra["vetting"]["original_severity"] == "Critical"
     assert f.extra["confidence"] == "low"
-    assert "schema-setup" in f.extra["false_positive_check"][0]
+    assert "SQLiteOpenHelper" in f.extra["false_positive_check"][0]
 
 
 def test_real_provider_sqli_is_kept(tmp_path):
@@ -65,8 +73,60 @@ def test_real_implicit_broadcast_is_kept():
 
 
 def test_explicit_intent_is_not_implicit():
-    f = mk("Sensitive Data in Implicit Intent", 'Intent i = new Intent("x"); i.setPackage("com.app");', sev="High")
+    f = mk("Sensitive Data in Implicit Intent", 'new Intent("x").setPackage("com.app").putExtra("t", tok);', sev="High")
     assert status(f) == "likely_fp"
+
+
+# ── adversarial: the scanned app controls the code these heuristics read ──
+def test_ddl_outside_a_sqliteopenhelper_is_kept(tmp_path):
+    stmt = '    db.execSQL("CREATE TABLE " + name());'
+    p = helper_file(tmp_path, stmt, base="ContentProvider", method="onCreate", name="P.java")
+    f = mk("SQL Injection in ContentProvider", stmt.strip(), line=3, path=p)
+    assert status(f) == "needs_review" and f.severity == "Critical"
+    q = helper_file(tmp_path, stmt, base="SomethingElse", method="onCreate", name="Q.java")
+    assert status(mk("SQL Injection in ContentProvider", stmt.strip(), line=3, path=q)) == "needs_review"
+
+
+def test_schema_helper_that_also_mentions_a_provider_is_kept(tmp_path):
+    stmt = '    db.execSQL("CREATE TABLE " + name());  // ContentProvider'
+    p = helper_file(tmp_path, stmt)
+    assert status(mk("SQL Injection in ContentProvider", stmt.strip(), line=3, path=p)) == "needs_review"
+
+
+def test_localbroadcast_mention_elsewhere_in_the_line_does_not_suppress():
+    for line in ('sendBroadcast(new Intent("a").putExtra("t", tok)); // LocalBroadcastManager',
+                 'String s = "LocalBroadcastManager"; sendBroadcast(new Intent("a").putExtra("t", tok));',
+                 'ctx.sendBroadcast(i); Object o = LocalBroadcastManager.class;'):
+        f = mk("Sensitive Data in Implicit Intent", line, sev="High")
+        assert status(f) == "needs_review" and f.severity == "High", line
+
+
+def test_setpackage_on_a_different_intent_does_not_suppress():
+    f = mk("Sensitive Data in Implicit Intent",
+           'other.setPackage("x"); sendBroadcast(new Intent("a").putExtra("t", tok));', sev="High")
+    assert status(f) == "needs_review"
+
+
+def test_star_prefixed_continuation_line_is_not_a_comment():
+    f = mk("Exported Activity with WebView URL Parameter", "* web.loadUrl(u);", sev="High")
+    assert status(f) == "needs_review"
+
+
+def test_inner_class_cannot_launder_a_provider_finding(tmp_path):
+    p = tmp_path / "decompiled/sources/com/app/M.java"
+    p.parent.mkdir(parents=True)
+    p.write_text("public class M extends AbstractC1a {\n  void f(){ uri.getLastPathSegment(); }\n"
+                 "  static class R extends BroadcastReceiver {}\n}\n")
+    f = mk("ContentProvider Path Traversal via URI Decoding", "uri.getLastPathSegment();", line=2, path=str(p))
+    assert status(f) == "needs_review"
+
+
+def test_severity_cap_can_be_turned_off(tmp_path, monkeypatch):
+    monkeypatch.setenv("MSRA_VETTING_CAP", "0")
+    f = mk("Sensitive Data in Implicit Intent", 'LocalBroadcastManager.getInstance(c).sendBroadcast(new Intent("X"));',
+           sev="High")
+    assert status(f) == "likely_fp" and f.severity == "High"
+    assert f.extra["vetting"]["original_severity"] == "High"
 
 
 def test_import_line_evidence_is_disproved():
@@ -82,11 +142,14 @@ def test_class_declaration_without_sink_is_disproved_but_with_loadurl_kept():
     assert status(g) == "needs_review"
 
 
-def test_library_code_is_demoted_but_app_package_under_google_is_not():
+def test_library_namespace_lowers_confidence_but_never_demotes():
     lib = mk("Hardcoded thing", "x = 1;", path="/t/decompiled/sources/com/google/android/gms/X.java", sev="High")
-    assert status(lib, "com.myapp") == "likely_fp"
+    assert status(lib, "com.myapp") == "needs_review"          # a package name is not proof
+    assert lib.severity == "High" and lib.extra["confidence"] == "low"
+    assert "not proof" in lib.extra["vetting"]["reasons"][-1]
     mine = mk("Hardcoded thing", "x = 1;", path="/t/decompiled/sources/com/google/myapp/X.java", sev="High")
     assert status(mine, "com.google.myapp") == "needs_review"
+    assert mine.extra.get("confidence") != "low"
 
 
 def test_taint_flows_get_positive_status():

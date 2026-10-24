@@ -44,6 +44,11 @@ _PROVIDER_INPUT = re.compile(
 _DDL = re.compile(r"""execSQL\(\s*["'](?:\s*)(CREATE|DROP|ALTER|PRAGMA|VACUUM|ANALYZE|REINDEX)\b""", re.I)
 
 
+def cap_severity() -> bool:
+    """Demoted findings are capped to Low unless MSRA_VETTING_CAP=0 (then only labelled)."""
+    return os.environ.get("MSRA_VETTING_CAP", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
 def enabled() -> bool:
     return os.environ.get("MSRA_VETTING", "1").strip().lower() not in ("0", "false", "no", "off")
 
@@ -103,24 +108,30 @@ def _not_code(f, line: str, cache) -> Optional[str]:
         return None
     if re.match(r"(import|package)\s", s):
         return "the evidence line is an import/package statement, not code that uses the API"
-    if s.startswith(("//", "/*", "*")):
+    if s.startswith(("//", "/*")):
         return "the evidence line is a comment"
     return None
+
+
+_LOCAL_SEND = re.compile(r"LocalBroadcastManager\s*\.\s*getInstance\([^;]*?\)\s*\.\s*sendBroadcast\(")
+_EXPLICIT_INTENT = re.compile(
+    r"new\s+Intent\([^;]*?\)\s*\.\s*(?:setPackage|setComponent|setClassName|setClass)\(|"
+    r"new\s+Intent\(\s*[\w.()]+\s*,\s*[\w.$]+\.class\s*\)")
 
 
 def _local_broadcast(f, line: str, cache) -> Optional[str]:
     t = (f.title or "").lower()
     if "implicit intent" not in t:
         return None
-    ev = _evidence(f)
-    window = line + " " + str(getattr(ev, "snippet", "") or "")
-    if "LocalBroadcastManager" in line:
-        return "LocalBroadcastManager delivers only inside this app's process; other apps cannot receive it"
-    if re.search(r"\.setPackage\(|\.setComponent\(|\.setClass(Name)?\(|new Intent\([^)]*,\s*[\w.]+\.class\)", line):
-        return "the intent is made explicit (setPackage/setComponent/class), so it is not implicit"
-    if re.search(r"sendBroadcast\([^,()]+,\s*[^)]+\)", line) and "permission" in window.lower():
-        return "the broadcast is protected by a receiver permission"
+    # anchored on the call that actually sends the intent, not on any mention in the line
+    if _LOCAL_SEND.search(line):
+        return "sent through LocalBroadcastManager.getInstance(...).sendBroadcast, which delivers only inside this app's process"
+    if _EXPLICIT_INTENT.search(line):
+        return "the intent is constructed explicitly (setPackage/setComponent/class target), so it is not implicit"
     return None
+
+
+_HELPER_CLASS = re.compile(r"\bclass\s+\w+\s+extends\s+(?:\w+\.)*SQLiteOpenHelper\b")
 
 
 def _schema_sql(f, line: str, cache) -> Optional[str]:
@@ -128,17 +139,22 @@ def _schema_sql(f, line: str, cache) -> Optional[str]:
     if "sql injection" not in t:
         return None
     ev = _evidence(f)
-    if not ev:
+    if not ev or not ev.file_path:
         return None
     stmt = line or ""
     if _PROVIDER_INPUT.search(stmt):
         return None                                           # provider input is in play: keep
+    text = "\n".join(_source_lines(ev.file_path, cache))
+    # must really be a database-helper class (not a ContentProvider that merely mimics DDL)
+    if not _HELPER_CLASS.search(text) or "ContentProvider" in text:
+        return None
     method = enclosing_method(ev.file_path, int(ev.line_number or 0), cache)
     if _DDL.search(stmt):
-        return ("schema-setup DDL (" + (stmt.strip()[:50]) + "...) built from internal values, "
-                "no ContentProvider input reaches it")
+        return (f"schema-setup DDL in a SQLiteOpenHelper ({stmt.strip()[:40]}...); no ContentProvider "
+                "input reaches it")
     if method in _SCHEMA_METHODS:
-        return f"statement is inside {method}() (database setup) and uses no provider input"
+        return (f"statement is inside {method}() of a SQLiteOpenHelper (database setup) and no "
+                "ContentProvider input reaches it")
     return None
 
 
@@ -155,16 +171,18 @@ def _webview_param_evidence(f, line: str, cache) -> Optional[str]:
     return None
 
 
-def _library(f, line: str, cache) -> Optional[str]:
+def _library_note(f, cache) -> Optional[str]:
+    """Namespace-only signal. Package names are chosen by the app's author, so this never demotes a
+    finding by itself (an attacker can call their code com/google/...); it only lowers confidence."""
     ev = _evidence(f)
     if not ev or not ev.file_path or any(k in (f.extra or {}).get("category", "") for k in _PATHLESS):
         return None
-    path = ev.file_path
-    if "sources/" not in path.replace("\\", "/"):
+    if "sources/" not in ev.file_path.replace("\\", "/"):
         return None
-    kind = classify_path(path, cache.get("package") or None)
+    kind = classify_path(ev.file_path, cache.get("package") or None)
     if kind in ("library", "framework"):
-        return f"the code is third-party/{kind} code ({_rel(path)[:60]}), owned by its maintainers, not this app"
+        return (f"the file is under a third-party namespace ({_rel(ev.file_path)[:60]}); likely the library "
+                "maintainers' code, but a package name is not proof")
     return None
 
 
@@ -231,15 +249,22 @@ def _not_a_provider(f, line: str, cache) -> Optional[str]:
     ev = _evidence(f)
     if not ev or not ev.file_path:
         return None
-    text = "\n".join(_source_lines(ev.file_path, cache))
-    m = _NON_PROVIDER_BASES.search(text)
-    if m and "ContentProvider" not in text:
-        return f"the flagged class extends {m.group(1)}, not ContentProvider, so provider-only attack paths do not apply"
+    lines = _source_lines(ev.file_path, cache)
+    if "ContentProvider" in "\n".join(lines):
+        return None
+    # the class that actually contains the flagged line
+    for i in range(min(int(ev.line_number or 0), len(lines)) - 1, -1, -1):
+        m = _NON_PROVIDER_BASES.search(lines[i])
+        if m:
+            return (f"the class containing the flagged line extends {m.group(1)}, not ContentProvider, "
+                    "so provider-only attack paths do not apply")
+        if re.search(r"\bclass\s+\w+\s+extends\b", lines[i]):
+            return None                                   # a different (unknown) base: keep
     return None
 
 
 DISPROVERS: List[Disprover] = [_not_code, _local_broadcast, _schema_sql, _webview_param_evidence,
-                               _ui_string_credential, _not_a_provider, _cookie_claim_without_cookies, _library]
+                               _ui_string_credential, _not_a_provider, _cookie_claim_without_cookies]
 
 
 def _positive_signals(f) -> Tuple[str, List[str]]:
@@ -272,6 +297,13 @@ def vet_finding(f, cache: Optional[dict] = None) -> dict:
         status = "likely_fp"
     else:
         status, reasons = _positive_signals(f)
+        try:
+            note = _library_note(f, cache)
+        except Exception:
+            note = None
+        if note and status != "verified":
+            reasons = reasons + [note]
+            return {"status": status, "reasons": reasons, "low_confidence": True}
     return {"status": status, "reasons": reasons}
 
 
@@ -291,11 +323,14 @@ def vet_findings(findings: list, package: str = "") -> Tuple[list, Dict[str, int
             f.extra = {}
         extra = f.extra
         info = {"status": v["status"], "reasons": v["reasons"]}
+        if v.get("low_confidence"):
+            extra["confidence"] = "low"
         if v["status"] == "likely_fp":
             sev = _sev(f)
             if _SEV_RANK.get(sev, 0) > _SEV_RANK["Low"]:
                 info["original_severity"] = sev
-                f.severity = "Low"
+                if cap_severity():
+                    f.severity = "Low"
             extra["confidence"] = "low"
             fp = list(extra.get("false_positive_check") or [])
             fp.insert(0, "Vetting: likely false positive - " + v["reasons"][0])

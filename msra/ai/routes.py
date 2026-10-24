@@ -356,21 +356,28 @@ _vet_jobs: Dict[str, dict] = {}
 _vet_cancel: Dict[str, threading.Event] = {}
 
 
-def vet_candidates(findings: list, researched: set, min_severity: str, limit: int) -> list:
-    """Highest-severity findings still unproven: skip likely-FPs (already disproved), verified ones,
-    anything the analyst already decided is handled by the caller, and anything already researched."""
+def vet_candidates(findings: list, researched: set, min_severity: str, limit: int,
+                   include_demoted: bool = True) -> list:
+    """Highest-risk findings still unproven. Heuristic demotions (`likely_fp`) are included by default,
+    ranked by their ORIGINAL severity, so the researcher can overturn a demotion: the scanned app
+    controls the code the heuristics look at, so they are a hint, never the last word."""
     from .triage import severity_rank
     floor = severity_rank(min_severity)
     pool = []
     for f in findings:
-        v = ((f.get("extra") or {}).get("vetting") or {}).get("status")
-        if v in ("likely_fp", "verified") or int(f["id"]) in researched:
+        vet = (f.get("extra") or {}).get("vetting") or {}
+        status = vet.get("status")
+        if status == "verified" or int(f["id"]) in researched:
             continue
-        if severity_rank(f.get("severity", "")) < floor:
+        if status == "likely_fp" and not include_demoted:
             continue
-        pool.append(f)
-    pool.sort(key=lambda f: (-severity_rank(f.get("severity", "")), int(f["id"])))
-    return pool[:limit]
+        sev = vet.get("original_severity") if status == "likely_fp" else None
+        rank = severity_rank(sev or f.get("severity", ""))
+        if rank < floor:
+            continue
+        pool.append((rank, f))
+    pool.sort(key=lambda t: (-t[0], int(t[1]["id"])))
+    return [f for _, f in pool[:limit]]
 
 
 @bp.route("/api/scans/<scan_id>/ai-vet", methods=["GET"])
@@ -413,7 +420,7 @@ def ai_vet_start(scan_id: str):
     decided = {fid for fid, t in db.get_triage_map(scan_id).items()
                if t.get("status") in ("False Positive", "Confirmed", "Fixed")}
     researched = set(db.get_ai_research_summary_map(scan_id)) | decided
-    chosen = vet_candidates(findings, researched, min_sev, limit)
+    chosen = vet_candidates(findings, researched, min_sev, limit, include_demoted=body.get("include_demoted", True) is not False)
     if not chosen:
         return jsonify({"error": f"Nothing to vet: every finding at {min_sev} or above is already "
                                  "verified, disproved, researched or triaged."}), 400
