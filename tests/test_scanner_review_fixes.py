@@ -244,3 +244,27 @@ def test_jar_manifest_continuation_lines_are_joined(tmp_path):
     with zipfile.ZipFile(z) as zf:
         m = JARScanner.__new__(JARScanner)._parse_manifest(zf)
     assert m["class-path"] == "lib/log4j-core-2.14.1.jar lib/bar.jar"
+
+
+def test_negated_star_bounding_keeps_normal_matches_and_stops_pathological_ones():
+    from msra.patterns.models import bound_negated_stars
+    assert bound_negated_stars(r"a[^}]*b[^;]*?c") == r"a[^}]{0,1500}b[^;]{0,1500}?c"
+    assert bound_negated_stars(r"x[\]^]*y") == r"x[\]^]*y"          # not a negated class: untouched
+    pat = re.compile(bound_negated_stars(r"onX[^}]*handler\.proceed"))
+    assert pat.search("onX(" + "a" * 900 + ") { handler.proceed")
+    evil = "HostnameVerifier verify( " * 2000
+    t0 = time.time()
+    re.compile(bound_negated_stars(r"HostnameVerifier[^}]*verify[^}]*return\s+true")).search(evil)
+    assert time.time() - t0 < 5
+
+
+def test_header_style_names_in_string_tables_are_not_secrets():
+    from msra.analysis.secrets import scan_paths
+    import tempfile, os
+    d = Path(tempfile.mkdtemp())
+    (d / "T.java").write_text('class T { String[] H = {"Token", "Acceptance-Encoding-1"};\n'
+                              '  String k = "api_key=9f8a7b6c5d4e3f2a1b0c9d8e7f"; }\n')
+    found = scan_paths([str(d)])
+    snippets = " ".join((f.evidence.snippet if f.evidence else "") for f in found)
+    assert "Acceptance-Encoding" not in snippets
+    assert any("9f8a7b6c" in (f.evidence.snippet if f.evidence else "") for f in found)   # a real one still found
