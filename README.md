@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/brand/logo-wordmark.svg" alt="MSRA - Mobile Security Review Assistant" width="480">
+</p>
+
 # MSRA — Mobile Security Review Assistant
 
 ![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)
