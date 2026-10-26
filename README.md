@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/brand/logo-wordmark.svg" alt="MSRA - Mobile Security Review Assistant" width="480">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/logo-wordmark-dark.svg">
+    <img src="docs/brand/logo-wordmark.svg" alt="MSRA - Mobile Security Review Assistant" width="520">
+  </picture>
 </p>
 
 # MSRA — Mobile Security Review Assistant
